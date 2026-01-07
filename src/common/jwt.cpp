@@ -3,37 +3,33 @@
 #include <sodium.h>
 #include <sstream>
 #include <iomanip>
-#include <picojson/picojson.h>
+#include <nlohmann/json.hpp>
 
 namespace edgelink {
 
-// Helper to create integer claim for picojson backend
-inline jwt::claim make_int_claim(int64_t value) {
-    return jwt::claim(picojson::value(static_cast<double>(value)));
+// Helper to create integer claim for nlohmann_json backend
+inline json_claim make_int_claim(int64_t value) {
+    return json_claim(value);
 }
 
-// Helper to create integer array claim for picojson backend
-inline jwt::claim make_int_array_claim(const std::vector<int64_t>& values) {
-    picojson::array arr;
+// Helper to create integer array claim for nlohmann_json backend
+inline json_claim make_int_array_claim(const std::vector<int64_t>& values) {
+    nlohmann::json arr = nlohmann::json::array();
     for (auto v : values) {
-        arr.push_back(picojson::value(static_cast<double>(v)));
+        arr.push_back(v);
     }
-    return jwt::claim(picojson::value(arr));
+    return json_claim(arr);
 }
 
-// Helper to extract integer from claim (picojson stores numbers as double)
-inline int64_t get_int_claim(const jwt::claim& c) {
-    auto val = c.to_json();
-    if (val.is<double>()) {
-        return static_cast<int64_t>(val.get<double>());
-    }
-    return 0;
+// Helper to extract integer from claim
+inline int64_t get_int_claim(const json_claim& c) {
+    return c.as_integer();
 }
 
 JWTManager::JWTManager(std::string secret, std::string algorithm)
     : secret_(std::move(secret))
     , algorithm_(std::move(algorithm))
-    , verifier_(jwt::verify()
+    , verifier_(jwt::verify<jwt::default_clock, json_traits>()
         .allow_algorithm(jwt::algorithm::hs256{secret_})
         .with_issuer("edgelink")) {
 }
@@ -66,17 +62,17 @@ std::string JWTManager::create_auth_token(
     auto now_time = std::chrono::system_clock::now();
     auto exp_time = now_time + expire_hours;
     
-    auto token = jwt::create()
+    auto token = jwt::create<json_traits>()
         .set_issuer("edgelink")
         .set_type("JWT")
         .set_issued_at(now_time)
         .set_expires_at(exp_time)
         .set_id(generate_jti())
-        .set_payload_claim("type", jwt::claim(std::string("auth")))
+        .set_payload_claim("type", json_claim(std::string("auth")))
         .set_payload_claim("node_id", make_int_claim(node_id))
-        .set_payload_claim("machine_key_hash", jwt::claim(machine_key_hash))
+        .set_payload_claim("machine_key_hash", json_claim(machine_key_hash))
         .set_payload_claim("network_id", make_int_claim(network_id))
-        .set_payload_claim("virtual_ip", jwt::claim(virtual_ip))
+        .set_payload_claim("virtual_ip", json_claim(virtual_ip))
         .sign(jwt::algorithm::hs256{secret_});
     
     return token;
@@ -96,13 +92,13 @@ std::string JWTManager::create_relay_token(
         relays.push_back(static_cast<int64_t>(id));
     }
     
-    auto token = jwt::create()
+    auto token = jwt::create<json_traits>()
         .set_issuer("edgelink")
         .set_type("JWT")
         .set_issued_at(now_time)
         .set_expires_at(exp_time)
         .set_id(generate_jti())
-        .set_payload_claim("type", jwt::claim(std::string("relay")))
+        .set_payload_claim("type", json_claim(std::string("relay")))
         .set_payload_claim("node_id", make_int_claim(node_id))
         .set_payload_claim("network_id", make_int_claim(network_id))
         .set_payload_claim("allowed_relays", make_int_array_claim(relays))
@@ -121,17 +117,17 @@ std::string JWTManager::create_server_token(
     auto now_time = std::chrono::system_clock::now();
     auto exp_time = now_time + expire_hours;
     
-    auto token = jwt::create()
+    auto token = jwt::create<json_traits>()
         .set_issuer("edgelink")
         .set_type("JWT")
         .set_issued_at(now_time)
         .set_expires_at(exp_time)
         .set_id(generate_jti())
-        .set_payload_claim("type", jwt::claim(std::string("server")))
+        .set_payload_claim("type", json_claim(std::string("server")))
         .set_payload_claim("server_id", make_int_claim(server_id))
-        .set_payload_claim("server_name", jwt::claim(server_name))
+        .set_payload_claim("server_name", json_claim(server_name))
         .set_payload_claim("capabilities", make_int_claim(capabilities))
-        .set_payload_claim("region", jwt::claim(region))
+        .set_payload_claim("region", json_claim(region))
         .sign(jwt::algorithm::hs256{secret_});
     
     return token;
@@ -139,7 +135,7 @@ std::string JWTManager::create_server_token(
 
 std::expected<AuthTokenClaims, ErrorCode> JWTManager::verify_auth_token(const std::string& token) {
     try {
-        auto decoded = jwt::decode(token);
+        auto decoded = jwt::decode<json_traits>(token);
         verifier_.verify(decoded);
         
         auto type = decoded.get_payload_claim("type").as_string();
@@ -154,9 +150,9 @@ std::expected<AuthTokenClaims, ErrorCode> JWTManager::verify_auth_token(const st
         
         AuthTokenClaims claims;
         claims.type = TokenType::AUTH;
-        claims.node_id = static_cast<uint32_t>(get_int_claim(decoded.get_payload_claim("node_id")));
+        claims.node_id = static_cast<uint32_t>(decoded.get_payload_claim("node_id").as_integer());
         claims.machine_key_hash = decoded.get_payload_claim("machine_key_hash").as_string();
-        claims.network_id = static_cast<uint32_t>(get_int_claim(decoded.get_payload_claim("network_id")));
+        claims.network_id = static_cast<uint32_t>(decoded.get_payload_claim("network_id").as_integer());
         claims.virtual_ip = decoded.get_payload_claim("virtual_ip").as_string();
         claims.iat = decoded.get_issued_at().time_since_epoch().count() / 1000000000;
         claims.exp = decoded.get_expires_at().time_since_epoch().count() / 1000000000;
@@ -170,7 +166,7 @@ std::expected<AuthTokenClaims, ErrorCode> JWTManager::verify_auth_token(const st
 
 std::expected<RelayTokenClaims, ErrorCode> JWTManager::verify_relay_token(const std::string& token) {
     try {
-        auto decoded = jwt::decode(token);
+        auto decoded = jwt::decode<json_traits>(token);
         verifier_.verify(decoded);
         
         auto type = decoded.get_payload_claim("type").as_string();
@@ -185,14 +181,15 @@ std::expected<RelayTokenClaims, ErrorCode> JWTManager::verify_relay_token(const 
         
         RelayTokenClaims claims;
         claims.type = TokenType::RELAY;
-        claims.node_id = static_cast<uint32_t>(get_int_claim(decoded.get_payload_claim("node_id")));
-        claims.network_id = static_cast<uint32_t>(get_int_claim(decoded.get_payload_claim("network_id")));
+        claims.node_id = static_cast<uint32_t>(decoded.get_payload_claim("node_id").as_integer());
+        claims.network_id = static_cast<uint32_t>(decoded.get_payload_claim("network_id").as_integer());
         
-        auto relays_json = decoded.get_payload_claim("allowed_relays").to_json();
-        if (relays_json.is<picojson::array>()) {
-            for (const auto& r : relays_json.get<picojson::array>()) {
-                if (r.is<double>()) {
-                    claims.allowed_relays.push_back(static_cast<uint32_t>(r.get<double>()));
+        auto relays_claim = decoded.get_payload_claim("allowed_relays");
+        auto relays_json = relays_claim.to_json();
+        if (relays_json.is_array()) {
+            for (const auto& r : relays_json) {
+                if (r.is_number_integer()) {
+                    claims.allowed_relays.push_back(static_cast<uint32_t>(r.get<int64_t>()));
                 }
             }
         }
@@ -209,7 +206,7 @@ std::expected<RelayTokenClaims, ErrorCode> JWTManager::verify_relay_token(const 
 
 std::expected<ServerTokenClaims, ErrorCode> JWTManager::verify_server_token(const std::string& token) {
     try {
-        auto decoded = jwt::decode(token);
+        auto decoded = jwt::decode<json_traits>(token);
         verifier_.verify(decoded);
         
         auto type = decoded.get_payload_claim("type").as_string();

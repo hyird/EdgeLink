@@ -12,6 +12,10 @@
 
 namespace edgelink {
 
+// JSON traits for jwt-cpp (using nlohmann_json)
+using json_traits = jwt::traits::nlohmann_json;
+using json_claim = jwt::basic_claim<json_traits>;
+
 // ============================================================================
 // JWT Token Claims
 // ============================================================================
@@ -127,7 +131,7 @@ public:
 private:
     std::string secret_;
     std::string algorithm_;
-    jwt::verifier<> verifier_;
+    jwt::verifier<jwt::default_clock, json_traits> verifier_;
     
     // Blacklist: jti -> expires_at
     mutable std::mutex blacklist_mutex_;
