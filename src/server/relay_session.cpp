@@ -286,7 +286,7 @@ size_t RelaySessionManager::session_count() const {
 bool RelaySessionManager::validate_relay_token(const std::string& token, uint32_t& node_id, 
                                                 std::string& virtual_ip, std::vector<uint32_t>& allowed_relays) {
     try {
-        auto decoded = jwt::decode(token);
+        auto decoded = jwt::decode<json_traits>(token);
         
         // Check if blacklisted
         {
@@ -299,12 +299,18 @@ bool RelaySessionManager::validate_relay_token(const std::string& token, uint32_
         }
         
         // Verify with JWT manager
-        auto verifier = jwt::verify()
+        auto verifier = jwt::verify<jwt::default_clock, json_traits>()
             .allow_algorithm(jwt::algorithm::hs256{jwt_manager_.secret()})
-            .with_issuer("edgelink")
-            .with_type("relay");
+            .with_issuer("edgelink");
         
         verifier.verify(decoded);
+        
+        // Check token type
+        auto type = decoded.get_payload_claim("type").as_string();
+        if (type != "relay") {
+            LOG_WARN("Invalid token type: {}", type);
+            return false;
+        }
         
         // Check expiration
         auto exp = decoded.get_expires_at();
@@ -314,15 +320,19 @@ bool RelaySessionManager::validate_relay_token(const std::string& token, uint32_
         }
         
         // Extract claims
-        node_id = decoded.get_payload_claim("node_id").as_integer();
+        node_id = static_cast<uint32_t>(decoded.get_payload_claim("node_id").as_integer());
         virtual_ip = decoded.get_payload_claim("virtual_ip").as_string();
         
         // Extract allowed relays
         if (decoded.has_payload_claim("allowed_relays")) {
             auto relays_claim = decoded.get_payload_claim("allowed_relays");
-            auto relays_array = relays_claim.as_array();
-            for (const auto& r : relays_array) {
-                allowed_relays.push_back(static_cast<uint32_t>(r));
+            auto relays_json = relays_claim.to_json();
+            if (relays_json.is_array()) {
+                for (const auto& r : relays_json) {
+                    if (r.is_number_integer()) {
+                        allowed_relays.push_back(static_cast<uint32_t>(r.get<int64_t>()));
+                    }
+                }
             }
         }
         
