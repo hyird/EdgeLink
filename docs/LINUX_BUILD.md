@@ -60,8 +60,11 @@ ldd edgelink-controller
 # 安装构建依赖
 apk add --no-cache \
     build-base cmake ninja git curl zip unzip tar \
-    pkgconfig linux-headers perl bash python3 \
+    pkgconfig linux-headers musl-dev perl bash python3 \
     autoconf automake libtool
+
+# 验证 Linux 头文件已安装 (vcpkg openssl 需要)
+test -f /usr/include/linux/version.h || echo "WARNING: linux-headers may not be installed correctly"
 ```
 
 ### 安装 vcpkg

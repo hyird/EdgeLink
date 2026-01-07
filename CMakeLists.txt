@@ -91,16 +91,10 @@ if(BUILD_CONTROLLER)
     find_package(SQLite3 REQUIRED)
 endif()
 
-# libsodium - platform specific finding
-if(WIN32)
-    # vcpkg handles this
-    find_package(unofficial-sodium CONFIG REQUIRED)
-    set(SODIUM_LIBRARIES unofficial-sodium::sodium)
-    set(SODIUM_INCLUDE_DIRS "")
-else()
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(SODIUM REQUIRED libsodium)
-endif()
+# libsodium - use vcpkg's unofficial-sodium on all platforms
+find_package(unofficial-sodium CONFIG REQUIRED)
+set(SODIUM_LIBRARIES unofficial-sodium::sodium)
+set(SODIUM_INCLUDE_DIRS "")
 
 # jwt-cpp (header-only, bundled in third_party)
 set(JWT_CPP_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jwt-cpp/include)
@@ -154,55 +148,47 @@ if(WIN32)
 endif()
 
 # =============================================================================
-# Controller (Linux only for now)
+# Controller
 # =============================================================================
 if(BUILD_CONTROLLER)
-    if(WIN32)
-        message(STATUS "Controller build is disabled on Windows")
-    else()
-        add_executable(edgelink-controller
-            src/controller/main.cpp
-            src/controller/commands.cpp
-            src/controller/db/database.cpp
-            src/controller/db/migrations.cpp
-            src/controller/api/http_server.cpp
-            src/controller/api/services.cpp
-            src/controller/api/control_handler.cpp
-            src/controller/services/path_service.cpp
-            src/controller/builtin_relay.cpp
-            src/controller/builtin_stun.cpp
-        )
+    add_executable(edgelink-controller
+        src/controller/main.cpp
+        src/controller/commands.cpp
+        src/controller/db/database.cpp
+        src/controller/db/migrations.cpp
+        src/controller/api/http_server.cpp
+        src/controller/api/services.cpp
+        src/controller/api/control_handler.cpp
+        src/controller/services/path_service.cpp
+        src/controller/builtin_relay.cpp
+        src/controller/builtin_stun.cpp
+    )
 
-        target_link_libraries(edgelink-controller PRIVATE
-            edgelink-common
-            SQLite::SQLite3
-        )
-    endif()
+    target_link_libraries(edgelink-controller PRIVATE
+        edgelink-common
+        SQLite::SQLite3
+    )
 endif()
 
 # =============================================================================
-# Relay/STUN Server (Linux only for now)
+# Relay/STUN Server
 # =============================================================================
 if(BUILD_SERVER)
-    if(WIN32)
-        message(STATUS "Server build is disabled on Windows")
-    else()
-        add_executable(edgelink-server
-            src/server/main.cpp
-            src/server/relay_server.cpp
-            src/server/relay_session.cpp
-            src/server/stun_server.cpp
-            src/server/controller_client.cpp
-            src/server/mesh_manager.cpp
-            src/server/mesh_client.cpp
-            src/server/mesh_session.cpp
-            src/server/node_location_cache.cpp
-        )
+    add_executable(edgelink-server
+        src/server/main.cpp
+        src/server/relay_server.cpp
+        src/server/relay_session.cpp
+        src/server/stun_server.cpp
+        src/server/controller_client.cpp
+        src/server/mesh_manager.cpp
+        src/server/mesh_client.cpp
+        src/server/mesh_session.cpp
+        src/server/node_location_cache.cpp
+    )
 
-        target_link_libraries(edgelink-server PRIVATE
-            edgelink-common
-        )
-    endif()
+    target_link_libraries(edgelink-server PRIVATE
+        edgelink-common
+    )
 endif()
 
 # =============================================================================
@@ -271,13 +257,13 @@ endif()
 # =============================================================================
 # Install
 # =============================================================================
-if(BUILD_CONTROLLER AND NOT WIN32)
+if(BUILD_CONTROLLER)
     install(TARGETS edgelink-controller
         RUNTIME DESTINATION bin
     )
 endif()
 
-if(BUILD_SERVER AND NOT WIN32)
+if(BUILD_SERVER)
     install(TARGETS edgelink-server
         RUNTIME DESTINATION bin
     )

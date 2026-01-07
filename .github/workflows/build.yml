@@ -26,8 +26,13 @@ jobs:
       run: |
         apk add --no-cache \
           build-base cmake ninja git curl zip unzip tar \
-          pkgconfig linux-headers perl bash python3 \
+          pkgconfig linux-headers musl-dev perl bash python3 \
           autoconf automake libtool
+        # Verify Linux headers are installed (required by vcpkg openssl)
+        echo "=== Checking Linux headers ==="
+        ls -la /usr/include/linux/ | head -20
+        test -f /usr/include/linux/version.h && echo "✓ version.h found" || echo "✗ version.h NOT found"
+        test -f /usr/include/linux/version.h || exit 1
 
     - uses: actions/checkout@v4
 
@@ -47,6 +52,11 @@ jobs:
 
     - name: Configure CMake (vcpkg x64-linux + musl static)
       run: |
+        # Debug: verify headers are still present before cmake
+        echo "=== Pre-configure header check ==="
+        ls -la /usr/include/linux/version.h || echo "WARNING: version.h not found!"
+        cat /usr/include/linux/version.h 2>/dev/null | head -5 || true
+        
         cmake -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
           -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
@@ -92,7 +102,7 @@ jobs:
         retention-days: 30
 
   # =============================================================================
-  # Windows Build - Client Only (vcpkg x64-windows-static + MSVC /MT)
+  # Windows Build - All Components (vcpkg x64-windows-static + MSVC /MT)
   # =============================================================================
   build-windows:
     runs-on: windows-latest
@@ -133,8 +143,8 @@ jobs:
           -DVCPKG_HOST_TRIPLET=x64-windows-static `
           -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
           -DBUILD_SHARED_LIBS=OFF `
-          -DBUILD_CONTROLLER=OFF `
-          -DBUILD_SERVER=OFF `
+          -DBUILD_CONTROLLER=ON `
+          -DBUILD_SERVER=ON `
           -DBUILD_CLIENT=ON `
           -DBUILD_TESTS=OFF
 
@@ -144,8 +154,10 @@ jobs:
     - name: Package Windows Artifacts
       run: |
         mkdir -p artifacts/windows
+        Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-server.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "third_party/wintun/wintun.dll" -Destination "artifacts/windows/"
+        Copy-Item -Path "third_party/wintun/wintun.dll" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse
         Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-static.zip"
 

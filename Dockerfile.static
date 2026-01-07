@@ -22,12 +22,19 @@ RUN apk add --no-cache \
     tar \
     pkgconfig \
     linux-headers \
+    musl-dev \
     perl \
     bash \
     python3 \
     autoconf \
     automake \
     libtool
+
+# Verify Linux headers are installed (required by vcpkg openssl)
+RUN echo "=== Checking Linux headers ===" \
+    && ls -la /usr/include/linux/ | head -20 \
+    && (test -f /usr/include/linux/version.h && echo "✓ version.h found" || echo "✗ version.h NOT found") \
+    && (test -f /usr/include/linux/version.h || exit 1)
 
 # Clone and bootstrap vcpkg
 WORKDIR /opt
@@ -39,6 +46,9 @@ ENV VCPKG_ROOT=/opt/vcpkg
 ENV PATH="${VCPKG_ROOT}:${PATH}"
 # Force vcpkg to use system binaries (cmake, ninja) instead of downloading glibc-linked ones
 ENV VCPKG_FORCE_SYSTEM_BINARIES=1
+# Help vcpkg find Linux headers
+ENV C_INCLUDE_PATH=/usr/include
+ENV CPLUS_INCLUDE_PATH=/usr/include
 
 # Set vcpkg triplet for static build
 # x64-linux: official triplet, static libraries

@@ -81,8 +81,8 @@ $cmakeArgs = @(
     "-DVCPKG_HOST_TRIPLET=$Triplet",
     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
     "-DBUILD_SHARED_LIBS=OFF",
-    "-DBUILD_CONTROLLER=OFF",
-    "-DBUILD_SERVER=OFF",
+    "-DBUILD_CONTROLLER=ON",
+    "-DBUILD_SERVER=ON",
     "-DBUILD_CLIENT=ON",
     "-DBUILD_TESTS=OFF"
 )
@@ -106,6 +106,9 @@ Get-ChildItem "$outputDir\edgelink-*.exe" | ForEach-Object {
 
 Write-Host ""
 Write-Host "=== Build Complete ===" -ForegroundColor Green
-Write-Host "Binary: $ProjectDir\$outputDir\edgelink-client.exe"
+Write-Host "Binaries in: $ProjectDir\$outputDir\"
+Write-Host "  - edgelink-controller.exe"
+Write-Host "  - edgelink-server.exe"
+Write-Host "  - edgelink-client.exe"
 Write-Host ""
-Write-Host "Note: Copy wintun.dll to the same directory as the executable"
+Write-Host "Note: Copy wintun.dll to the same directory as edgelink-client.exe"

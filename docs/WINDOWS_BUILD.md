@@ -44,22 +44,25 @@ $env:VCPKG_ROOT = "C:\vcpkg"
 ### 使用 vcpkg x64-windows-static triplet
 
 ```powershell
-# 配置 (只编译客户端，静态链接)
+# 配置 (构建所有组件，静态链接)
 cmake -B build -G "Visual Studio 17 2022" -A x64 `
     -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
     -DVCPKG_TARGET_TRIPLET=x64-windows-static `
     -DVCPKG_HOST_TRIPLET=x64-windows-static `
     -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
     -DBUILD_SHARED_LIBS=OFF `
-    -DBUILD_CONTROLLER=OFF `
-    -DBUILD_SERVER=OFF `
+    -DBUILD_CONTROLLER=ON `
+    -DBUILD_SERVER=ON `
     -DBUILD_CLIENT=ON `
     -DBUILD_TESTS=OFF
 
 # 编译
 cmake --build build --config Release
 
-# 输出文件在 build/Release/edgelink-client.exe
+# 输出文件在 build/Release/
+#   - edgelink-controller.exe
+#   - edgelink-server.exe
+#   - edgelink-client.exe
 ```
 
 ## vcpkg Triplet 说明
@@ -71,11 +74,21 @@ cmake --build build --config Release
 
 ## 静态编译说明
 
-使用 `x64-windows-static` triplet 后，`edgelink-client.exe` 不依赖额外的 DLL 文件（除了 `wintun.dll`）：
+使用 `x64-windows-static` triplet 后，所有可执行文件不依赖额外的 DLL 文件（客户端需要 `wintun.dll`）：
 
 - 无需安装 Visual C++ Redistributable
 - 无需复制其他依赖 DLL
 - 可执行文件体积会增大，但部署更简单
+
+## 下载 Wintun (客户端需要)
+
+1. 从 https://www.wintun.net/ 下载 wintun
+2. 解压并复制到 `third_party/wintun/`:
+   ```
+   third_party/wintun/
+   ├── wintun.h    (从 include/ 复制)
+   └── wintun.dll  (从 bin/amd64/ 复制)
+   ```
 
 ## 运行
 
