@@ -35,6 +35,7 @@ jobs:
         git clone --depth 1 https://github.com/microsoft/vcpkg.git /opt/vcpkg
         /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
         echo "VCPKG_ROOT=/opt/vcpkg" >> $GITHUB_ENV
+        echo "VCPKG_FORCE_SYSTEM_BINARIES=1" >> $GITHUB_ENV
 
     - name: Export GitHub Actions cache variables
       uses: actions/github-script@v7

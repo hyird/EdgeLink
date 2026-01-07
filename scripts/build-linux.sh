@@ -67,6 +67,12 @@ if [ -z "$VCPKG_ROOT" ]; then
 fi
 echo "vcpkg: $VCPKG_ROOT"
 
+# Force vcpkg to use system binaries on musl/Alpine
+if [ -f "/etc/alpine-release" ]; then
+    export VCPKG_FORCE_SYSTEM_BINARIES=1
+    echo "Alpine detected, using system binaries for vcpkg"
+fi
+
 # Clean if requested
 if [ $CLEAN_BUILD -eq 1 ]; then
     echo "Cleaning build directory..."

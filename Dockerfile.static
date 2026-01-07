@@ -34,6 +34,8 @@ RUN git clone --depth 1 https://github.com/microsoft/vcpkg.git \
 
 ENV VCPKG_ROOT=/opt/vcpkg
 ENV PATH="${VCPKG_ROOT}:${PATH}"
+# Force vcpkg to use system binaries (cmake, ninja) instead of downloading glibc-linked ones
+ENV VCPKG_FORCE_SYSTEM_BINARIES=1
 
 # Set vcpkg triplet for static build
 # x64-linux: official triplet, static libraries

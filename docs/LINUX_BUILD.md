@@ -74,6 +74,9 @@ cd /opt/vcpkg
 # 设置环境变量
 export VCPKG_ROOT=/opt/vcpkg
 export PATH="$VCPKG_ROOT:$PATH"
+
+# 重要：Alpine/musl 环境必须设置此变量，强制使用系统的 cmake/ninja
+export VCPKG_FORCE_SYSTEM_BINARIES=1
 ```
 
 ### 使用构建脚本
@@ -161,6 +164,21 @@ sudo ./edgelink-server -c config/server.json
 ```
 
 ## 故障排除
+
+### vcpkg 下载的 cmake 无法运行 (Alpine/musl)
+
+错误信息：
+```
+error: cmake --version failed with exit code 127
+sh: cmake: not found
+```
+
+原因：vcpkg 默认下载 glibc 链接的二进制文件，无法在 musl 环境运行。
+
+解决方案：
+```bash
+export VCPKG_FORCE_SYSTEM_BINARIES=1
+```
 
 ### vcpkg 依赖安装失败
 
