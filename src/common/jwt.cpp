@@ -29,7 +29,7 @@ inline int64_t get_int_claim(const json_claim& c) {
 JWTManager::JWTManager(std::string secret, std::string algorithm)
     : secret_(std::move(secret))
     , algorithm_(std::move(algorithm))
-    , verifier_(jwt::verify<jwt::default_clock, json_traits>()
+    , verifier_(jwt::verify<json_traits>()
         .allow_algorithm(jwt::algorithm::hs256{secret_})
         .with_issuer("edgelink")) {
 }

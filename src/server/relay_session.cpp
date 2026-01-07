@@ -299,7 +299,7 @@ bool RelaySessionManager::validate_relay_token(const std::string& token, uint32_
         }
         
         // Verify with JWT manager
-        auto verifier = jwt::verify<jwt::default_clock, json_traits>()
+        auto verifier = jwt::verify<json_traits>()
             .allow_algorithm(jwt::algorithm::hs256{jwt_manager_.secret()})
             .with_issuer("edgelink");
         
