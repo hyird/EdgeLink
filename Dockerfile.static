@@ -24,7 +24,10 @@ RUN apk add --no-cache \
     linux-headers \
     perl \
     bash \
-    python3
+    python3 \
+    autoconf \
+    automake \
+    libtool
 
 # Clone and bootstrap vcpkg
 WORKDIR /opt

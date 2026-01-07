@@ -60,7 +60,8 @@ ldd edgelink-controller
 # 安装构建依赖
 apk add --no-cache \
     build-base cmake ninja git curl zip unzip tar \
-    pkgconfig linux-headers perl bash python3
+    pkgconfig linux-headers perl bash python3 \
+    autoconf automake libtool
 ```
 
 ### 安装 vcpkg
