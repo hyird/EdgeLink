@@ -13,7 +13,7 @@ env:
 
 jobs:
   # =============================================================================
-  # Linux Build - All Components
+  # Linux Build - All Components (Static)
   # =============================================================================
   build-linux:
     runs-on: ubuntu-24.04
@@ -37,10 +37,12 @@ jobs:
           libgtest-dev \
           pkg-config
 
-    - name: Configure CMake
+    - name: Configure CMake (Static)
       run: |
         cmake -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
+          -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+          -DBUILD_SHARED_LIBS=OFF \
           -DBUILD_CONTROLLER=ON \
           -DBUILD_SERVER=ON \
           -DBUILD_CLIENT=ON \
@@ -52,6 +54,12 @@ jobs:
     - name: Run Tests
       working-directory: build
       run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure || true
+
+    - name: Strip Binaries
+      run: |
+        strip build/edgelink-controller || true
+        strip build/edgelink-server || true
+        strip build/edgelink-client || true
 
     - name: Package Linux Artifacts
       run: |
@@ -70,13 +78,13 @@ jobs:
         retention-days: 30
 
   # =============================================================================
-  # Windows Build - Client Only (with wintun support)
+  # Windows Build - Client Only (Static with wintun)
   # =============================================================================
   build-windows:
     runs-on: windows-latest
     
     env:
-      VCPKG_DEFAULT_TRIPLET: x64-windows
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
       VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
     
     steps:
@@ -103,11 +111,14 @@ jobs:
         Copy-Item -Path "wintun/wintun/include/*" -Destination "third_party/wintun/" -Recurse
         Copy-Item -Path "wintun/wintun/bin/amd64/wintun.dll" -Destination "third_party/wintun/"
 
-    - name: Configure CMake (Windows Client)
+    - name: Configure CMake (Windows Client Static)
       run: |
         cmake -B build -G "Visual Studio 17 2022" -A x64 `
           -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} `
           -DCMAKE_TOOLCHAIN_FILE="${env:VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" `
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+          -DBUILD_SHARED_LIBS=OFF `
           -DBUILD_CONTROLLER=OFF `
           -DBUILD_SERVER=OFF `
           -DBUILD_CLIENT=ON `
@@ -122,8 +133,6 @@ jobs:
         Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "third_party/wintun/wintun.dll" -Destination "artifacts/windows/"
         Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse
-        # Copy vcpkg DLLs
-        Get-ChildItem -Path "build/${{env.BUILD_TYPE}}/*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "artifacts/windows/"
         Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64.zip"
 
     - name: Upload Windows Artifacts
@@ -134,50 +143,10 @@ jobs:
         retention-days: 30
 
   # =============================================================================
-  # macOS Build - Client Only
-  # =============================================================================
-  build-macos:
-    runs-on: macos-14
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Dependencies
-      run: |
-        brew install cmake ninja boost openssl@3 sqlite spdlog nlohmann-json libsodium googletest pkg-config
-
-    - name: Configure CMake
-      run: |
-        cmake -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
-          -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
-          -DBUILD_CONTROLLER=OFF \
-          -DBUILD_SERVER=OFF \
-          -DBUILD_CLIENT=ON \
-          -DBUILD_TESTS=OFF
-
-    - name: Build
-      run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(sysctl -n hw.ncpu)
-
-    - name: Package macOS Artifacts
-      run: |
-        mkdir -p artifacts/macos
-        cp build/edgelink-client artifacts/macos/ || true
-        cp -r config artifacts/macos/
-        tar -czvf edgelink-macos-arm64.tar.gz -C artifacts macos
-
-    - name: Upload macOS Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: edgelink-macos-arm64
-        path: edgelink-macos-arm64.tar.gz
-        retention-days: 30
-
-  # =============================================================================
   # Release Job
   # =============================================================================
   release:
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     
@@ -196,7 +165,6 @@ jobs:
         files: |
           artifacts/edgelink-linux-x64/edgelink-linux-x64.tar.gz
           artifacts/edgelink-windows-x64/edgelink-windows-x64.zip
-          artifacts/edgelink-macos-arm64/edgelink-macos-arm64.tar.gz
         draft: false
         prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
         generate_release_notes: true

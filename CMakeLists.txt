@@ -10,6 +10,7 @@ option(BUILD_CONTROLLER "Build the controller" ON)
 option(BUILD_SERVER "Build the relay/stun server" ON)
 option(BUILD_CLIENT "Build the client" ON)
 option(BUILD_TESTS "Build tests" ON)
+option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 
 # Suppress CMP0167 warning for FindBoost (if available)
 if(POLICY CMP0167)
@@ -25,12 +26,25 @@ if(WIN32)
     add_definitions(-D_WIN32_WINNT=0x0A00)  # Windows 10+
     add_definitions(-DNOMINMAX)
     add_definitions(-DWIN32_LEAN_AND_MEAN)
+    
+    # Static runtime for MSVC
+    if(MSVC)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        # Disable MSVC warnings
+        add_compile_options(/W3 /wd4996)
+    endif()
 elseif(APPLE)
     message(STATUS "Building for macOS")
     set(EDGELINK_PLATFORM "macos")
 else()
     message(STATUS "Building for Linux")
     set(EDGELINK_PLATFORM "linux")
+    
+    # Static linking flags for Linux
+    if(NOT BUILD_SHARED_LIBS)
+        set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
+    endif()
 endif()
 
 # =============================================================================
@@ -255,10 +269,14 @@ install(DIRECTORY config/
 # =============================================================================
 message(STATUS "")
 message(STATUS "EdgeLink Build Configuration:")
-message(STATUS "  Platform:    ${EDGELINK_PLATFORM}")
-message(STATUS "  Build Type:  ${CMAKE_BUILD_TYPE}")
-message(STATUS "  Controller:  ${BUILD_CONTROLLER}")
-message(STATUS "  Server:      ${BUILD_SERVER}")
-message(STATUS "  Client:      ${BUILD_CLIENT}")
-message(STATUS "  Tests:       ${BUILD_TESTS}")
+message(STATUS "  Platform:      ${EDGELINK_PLATFORM}")
+message(STATUS "  Build Type:    ${CMAKE_BUILD_TYPE}")
+message(STATUS "  Static Build:  ${BUILD_SHARED_LIBS}" )
+message(STATUS "  Controller:    ${BUILD_CONTROLLER}")
+message(STATUS "  Server:        ${BUILD_SERVER}")
+message(STATUS "  Client:        ${BUILD_CLIENT}")
+message(STATUS "  Tests:         ${BUILD_TESTS}")
+if(MSVC)
+message(STATUS "  MSVC Runtime:  ${CMAKE_MSVC_RUNTIME_LIBRARY}")
+endif()
 message(STATUS "")

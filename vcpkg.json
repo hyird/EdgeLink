@@ -37,5 +37,12 @@
       "name": "boost",
       "version": "1.85.0"
     }
-  ]
+  ],
+  "vcpkg-configuration": {
+    "default-registry": {
+      "kind": "git",
+      "repository": "https://github.com/microsoft/vcpkg",
+      "baseline": "01f602195983451bc83e72f4214af2cbc495aa94"
+    }
+  }
 }

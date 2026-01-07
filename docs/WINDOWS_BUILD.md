@@ -24,17 +24,17 @@ cd C:\vcpkg
 $env:VCPKG_ROOT = "C:\vcpkg"
 ```
 
-## 安装依赖
+## 安装依赖 (静态库)
 
 ```powershell
-# 安装所需的包
-vcpkg install boost-asio:x64-windows
-vcpkg install boost-json:x64-windows
-vcpkg install boost-beast:x64-windows
-vcpkg install openssl:x64-windows
-vcpkg install spdlog:x64-windows
-vcpkg install nlohmann-json:x64-windows
-vcpkg install libsodium:x64-windows
+# 安装所需的静态库包
+vcpkg install boost-asio:x64-windows-static
+vcpkg install boost-json:x64-windows-static
+vcpkg install boost-beast:x64-windows-static
+vcpkg install openssl:x64-windows-static
+vcpkg install spdlog:x64-windows-static
+vcpkg install nlohmann-json:x64-windows-static
+vcpkg install libsodium:x64-windows-static
 ```
 
 或者使用项目的 `vcpkg.json` 清单模式自动安装。
@@ -49,12 +49,15 @@ vcpkg install libsodium:x64-windows
    └── wintun.dll  (从 bin/amd64/ 复制)
    ```
 
-## 编译
+## 编译 (静态链接)
 
 ```powershell
-# 配置 (只编译客户端)
+# 配置 (只编译客户端，静态链接)
 cmake -B build -G "Visual Studio 17 2022" -A x64 `
     -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+    -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+    -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+    -DBUILD_SHARED_LIBS=OFF `
     -DBUILD_CONTROLLER=OFF `
     -DBUILD_SERVER=OFF `
     -DBUILD_CLIENT=ON `
@@ -65,6 +68,14 @@ cmake --build build --config Release
 
 # 输出文件在 build/Release/edgelink-client.exe
 ```
+
+## 静态编译说明
+
+使用静态编译后，`edgelink-client.exe` 不再依赖额外的 DLL 文件（除了 `wintun.dll`），这意味着：
+
+- 无需安装 Visual C++ Redistributable
+- 无需复制其他依赖 DLL
+- 可执行文件体积会增大，但部署更简单
 
 ## 运行
 
@@ -112,11 +123,6 @@ cmake --build build --config Release
 - 检查 Windows Defender 防火墙设置
 - 确保 Windows 网络服务正常运行
 
-### 依赖缺失
-如果提示 DLL 缺失，可以：
-1. 安装 [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-2. 将所需 DLL 复制到可执行文件目录
-
 ## 防火墙配置
 
 允许 EdgeLink 通过防火墙：
@@ -131,11 +137,10 @@ New-NetFirewallRule -DisplayName "EdgeLink Client" `
 
 ## GitHub Actions CI/CD
 
-项目已配置 GitHub Actions 自动构建：
+项目已配置 GitHub Actions 自动构建（静态编译）：
 
-- **Linux**: 构建所有组件 (controller, server, client)
-- **Windows**: 仅构建客户端 (使用 wintun)
-- **macOS**: 仅构建客户端 (utun)
+- **Linux**: 构建所有组件 (controller, server, client)，使用 `-static-libgcc -static-libstdc++`
+- **Windows**: 仅构建客户端，使用 `/MT` 静态运行时 + vcpkg 静态库
 
 每次推送到 `main`/`master`/`develop` 分支或创建 Pull Request 时自动触发构建。
 
