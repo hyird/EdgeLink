@@ -1,7 +1,8 @@
 #pragma once
 
 #include "protocol.hpp"
-#include <jwt-cpp/jwt.h>
+#include <nlohmann/json.hpp>
+#include <jwt-cpp/traits/nlohmann-json/traits.h>
 #include <string>
 #include <optional>
 #include <expected>
