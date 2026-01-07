@@ -109,6 +109,6 @@ Write-Host "=== Build Complete ===" -ForegroundColor Green
 Write-Host "Binaries in: $ProjectDir\$outputDir\"
 Write-Host "  - edgelink-controller.exe"
 Write-Host "  - edgelink-server.exe"
-Write-Host "  - edgelink-client.exe"
+Write-Host "  - edgelink-client.exe (wintun statically linked)"
 Write-Host ""
-Write-Host "Note: Copy wintun.dll to the same directory as edgelink-client.exe"
+Write-Host "Note: Run client as Administrator to create virtual network adapter"

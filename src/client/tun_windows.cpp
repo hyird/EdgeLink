@@ -3,6 +3,7 @@
 
 #ifdef _WIN32
 
+#include "wintun/wintun_static.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -16,33 +17,11 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
 
-// Wintun types and function pointers
-typedef void* WINTUN_ADAPTER_HANDLE;
-typedef void* WINTUN_SESSION_HANDLE;
-typedef GUID WINTUN_ADAPTER_GUID;
-
-typedef WINTUN_ADAPTER_HANDLE(WINAPI* WINTUN_CREATE_ADAPTER_FUNC)(
-    const WCHAR* Name, const WCHAR* TunnelType, const GUID* RequestedGUID);
-typedef void(WINAPI* WINTUN_CLOSE_ADAPTER_FUNC)(WINTUN_ADAPTER_HANDLE Adapter);
-typedef WINTUN_SESSION_HANDLE(WINAPI* WINTUN_START_SESSION_FUNC)(
-    WINTUN_ADAPTER_HANDLE Adapter, DWORD Capacity);
-typedef void(WINAPI* WINTUN_END_SESSION_FUNC)(WINTUN_SESSION_HANDLE Session);
-typedef BYTE*(WINAPI* WINTUN_RECEIVE_PACKET_FUNC)(
-    WINTUN_SESSION_HANDLE Session, DWORD* PacketSize);
-typedef void(WINAPI* WINTUN_RELEASE_RECEIVE_PACKET_FUNC)(
-    WINTUN_SESSION_HANDLE Session, const BYTE* Packet);
-typedef BYTE*(WINAPI* WINTUN_ALLOCATE_SEND_PACKET_FUNC)(
-    WINTUN_SESSION_HANDLE Session, DWORD PacketSize);
-typedef void(WINAPI* WINTUN_SEND_PACKET_FUNC)(
-    WINTUN_SESSION_HANDLE Session, const BYTE* Packet);
-typedef HANDLE(WINAPI* WINTUN_GET_READ_WAIT_EVENT_FUNC)(
-    WINTUN_SESSION_HANDLE Session);
-typedef LUID*(WINAPI* WINTUN_GET_ADAPTER_LUID_FUNC)(
-    WINTUN_ADAPTER_HANDLE Adapter, LUID* Luid);
+// No longer need function pointer typedefs - using static library directly
 
 namespace edgelink::client {
 
-// Wintun DLL interface
+// Wintun static library wrapper
 class WintunInterface {
 public:
     static WintunInterface& instance() {
@@ -50,54 +29,24 @@ public:
         return inst;
     }
 
-    bool is_loaded() const { return module_ != nullptr; }
-
-    WINTUN_CREATE_ADAPTER_FUNC create_adapter = nullptr;
-    WINTUN_CLOSE_ADAPTER_FUNC close_adapter = nullptr;
-    WINTUN_START_SESSION_FUNC start_session = nullptr;
-    WINTUN_END_SESSION_FUNC end_session = nullptr;
-    WINTUN_RECEIVE_PACKET_FUNC receive_packet = nullptr;
-    WINTUN_RELEASE_RECEIVE_PACKET_FUNC release_receive_packet = nullptr;
-    WINTUN_ALLOCATE_SEND_PACKET_FUNC allocate_send_packet = nullptr;
-    WINTUN_SEND_PACKET_FUNC send_packet = nullptr;
-    WINTUN_GET_READ_WAIT_EVENT_FUNC get_read_wait_event = nullptr;
-    WINTUN_GET_ADAPTER_LUID_FUNC get_adapter_luid = nullptr;
+    bool is_loaded() const { return initialized_; }
 
 private:
-    HMODULE module_ = nullptr;
+    bool initialized_ = false;
 
     WintunInterface() {
-        module_ = LoadLibraryW(L"wintun.dll");
-        if (!module_) {
-            LOG_ERROR("WintunInterface: Failed to load wintun.dll");
-            return;
-        }
-
-        create_adapter = (WINTUN_CREATE_ADAPTER_FUNC)GetProcAddress(module_, "WintunCreateAdapter");
-        close_adapter = (WINTUN_CLOSE_ADAPTER_FUNC)GetProcAddress(module_, "WintunCloseAdapter");
-        start_session = (WINTUN_START_SESSION_FUNC)GetProcAddress(module_, "WintunStartSession");
-        end_session = (WINTUN_END_SESSION_FUNC)GetProcAddress(module_, "WintunEndSession");
-        receive_packet = (WINTUN_RECEIVE_PACKET_FUNC)GetProcAddress(module_, "WintunReceivePacket");
-        release_receive_packet = (WINTUN_RELEASE_RECEIVE_PACKET_FUNC)GetProcAddress(module_, "WintunReleaseReceivePacket");
-        allocate_send_packet = (WINTUN_ALLOCATE_SEND_PACKET_FUNC)GetProcAddress(module_, "WintunAllocateSendPacket");
-        send_packet = (WINTUN_SEND_PACKET_FUNC)GetProcAddress(module_, "WintunSendPacket");
-        get_read_wait_event = (WINTUN_GET_READ_WAIT_EVENT_FUNC)GetProcAddress(module_, "WintunGetReadWaitEvent");
-        get_adapter_luid = (WINTUN_GET_ADAPTER_LUID_FUNC)GetProcAddress(module_, "WintunGetAdapterLUID");
-
-        if (!create_adapter || !close_adapter || !start_session || !end_session ||
-            !receive_packet || !release_receive_packet || !allocate_send_packet ||
-            !send_packet || !get_read_wait_event || !get_adapter_luid) {
-            LOG_ERROR("WintunInterface: Failed to get all function pointers");
-            FreeLibrary(module_);
-            module_ = nullptr;
+        // Initialize static wintun library
+        if (WintunInitialize()) {
+            initialized_ = true;
+            LOG_INFO("WintunInterface: Initialized (static)");
         } else {
-            LOG_INFO("WintunInterface: Loaded successfully");
+            LOG_ERROR("WintunInterface: Failed to initialize - error {}", GetLastError());
         }
     }
 
     ~WintunInterface() {
-        if (module_) {
-            FreeLibrary(module_);
+        if (initialized_) {
+            WintunShutdown();
         }
     }
 };
@@ -169,7 +118,7 @@ std::expected<void, ErrorCode> TunDevice::open() {
 
     // Create adapter
     GUID guid = name_to_guid(name_);
-    platform_->adapter = wintun.create_adapter(
+    platform_->adapter = WintunCreateAdapter(
         platform_->adapter_name.c_str(),
         L"EdgeLink",
         &guid
@@ -180,30 +129,27 @@ std::expected<void, ErrorCode> TunDevice::open() {
         return std::unexpected(ErrorCode::SYSTEM_ERROR);
     }
 
-    // Get adapter LUID (Wintun returns LUID, need to convert to NET_LUID)
-    LUID wintun_luid{};
-    wintun.get_adapter_luid(platform_->adapter, &wintun_luid);
-    // Copy LUID to NET_LUID (they share the same underlying 64-bit value)
-    platform_->adapter_luid.Value = *reinterpret_cast<ULONG64*>(&wintun_luid);
+    // Get adapter LUID
+    WintunGetAdapterLUID(platform_->adapter, &platform_->adapter_luid);
 
     // Get interface index
     if (ConvertInterfaceLuidToIndex(&platform_->adapter_luid, &platform_->if_index) != NO_ERROR) {
         LOG_ERROR("TunDevice: Failed to get interface index");
-        wintun.close_adapter(platform_->adapter);
+        WintunCloseAdapter(platform_->adapter);
         platform_->adapter = nullptr;
         return std::unexpected(ErrorCode::SYSTEM_ERROR);
     }
 
     // Start session (8MB ring buffer)
-    platform_->session = wintun.start_session(platform_->adapter, 0x800000);
+    platform_->session = WintunStartSession(platform_->adapter, 0x800000);
     if (!platform_->session) {
         LOG_ERROR("TunDevice: Failed to start session");
-        wintun.close_adapter(platform_->adapter);
+        WintunCloseAdapter(platform_->adapter);
         platform_->adapter = nullptr;
         return std::unexpected(ErrorCode::SYSTEM_ERROR);
     }
 
-    platform_->read_event = wintun.get_read_wait_event(platform_->session);
+    platform_->read_event = WintunGetReadWaitEvent(platform_->session);
     fd_ = 1;  // Marker for "open"
 
     LOG_INFO("TunDevice: Created interface {} (index {})", name_, platform_->if_index);
@@ -213,15 +159,14 @@ std::expected<void, ErrorCode> TunDevice::open() {
 void TunDevice::close() {
     stop_reading();
 
-    auto& wintun = WintunInterface::instance();
-    
-    if (platform_->session && wintun.is_loaded()) {
-        wintun.end_session(platform_->session);
+    // With static library, always safe to call if handles are valid
+    if (platform_->session) {
+        WintunEndSession(platform_->session);
         platform_->session = nullptr;
     }
 
-    if (platform_->adapter && wintun.is_loaded()) {
-        wintun.close_adapter(platform_->adapter);
+    if (platform_->adapter) {
+        WintunCloseAdapter(platform_->adapter);
         platform_->adapter = nullptr;
     }
 
@@ -376,7 +321,7 @@ void TunDevice::start_reading() {
             
             if (result == WAIT_OBJECT_0) {
                 DWORD packet_size;
-                while (BYTE* packet = wintun.receive_packet(platform_->session, &packet_size)) {
+                while (BYTE* packet = WintunReceivePacket(platform_->session, &packet_size)) {
                     if (packet_size > 0 && packet_callback_) {
                         std::vector<uint8_t> data(packet, packet + packet_size);
                         
@@ -387,7 +332,7 @@ void TunDevice::start_reading() {
                             }
                         });
                     }
-                    wintun.release_receive_packet(platform_->session, packet);
+                    WintunReleaseReceivePacket(platform_->session, packet);
                 }
             }
         }
@@ -411,7 +356,7 @@ std::expected<void, ErrorCode> TunDevice::write_packet(const std::vector<uint8_t
 
     auto& wintun = WintunInterface::instance();
     
-    BYTE* send_packet = wintun.allocate_send_packet(
+    BYTE* send_packet = WintunAllocateSendPacket(
         platform_->session, 
         static_cast<DWORD>(packet.size())
     );
@@ -422,7 +367,7 @@ std::expected<void, ErrorCode> TunDevice::write_packet(const std::vector<uint8_t
     }
 
     memcpy(send_packet, packet.data(), packet.size());
-    wintun.send_packet(platform_->session, send_packet);
+    WintunSendPacket(platform_->session, send_packet);
 
     return {};
 }

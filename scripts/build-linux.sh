@@ -10,8 +10,8 @@
 #   - cmake, ninja, git, build-base
 #
 # vcpkg Triplets:
-#   - x64-linux: Official triplet, static libraries (recommended)
-#   - arm64-linux: ARM64 static libraries (community)
+#   - x64-linux-release: Official triplet, static libraries, release only
+#   - arm64-linux-release: ARM64 static libraries, release only
 # =============================================================================
 
 set -e
@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_TYPE="Release"
 CLEAN_BUILD=0
-TRIPLET="x64-linux"
+TRIPLET="x64-linux-release"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do

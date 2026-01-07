@@ -193,10 +193,23 @@ int main(int argc, char* argv[]) {
     
     // Load configuration
     ControllerConfig config;
-    auto config_opt = ControllerConfig::load(std::filesystem::path(config_file));
+    std::filesystem::path config_path = std::filesystem::path(config_file);
+    auto config_opt = ControllerConfig::load(config_path);
     if (config_opt) {
         config = *config_opt;
         if (!quiet) LOG_INFO("Configuration loaded from: {}", config_file);
+        
+        // Resolve relative database path relative to config file directory
+        if (!config.database.path.empty()) {
+            std::filesystem::path db_path_fs = expand_path(config.database.path);
+            if (db_path_fs.is_relative()) {
+                // Make database path relative to config file's directory
+                auto config_dir = std::filesystem::absolute(config_path).parent_path();
+                db_path_fs = config_dir / db_path_fs;
+            }
+            config.database.path = db_path_fs.string();
+            if (!quiet) LOG_INFO("Database path resolved to: {}", config.database.path);
+        }
     } else {
         config.http.listen_address = "0.0.0.0";
         config.http.listen_port = 8080;
@@ -204,7 +217,7 @@ int main(int argc, char* argv[]) {
         config.jwt.secret = "change-this-secret-in-production";
     }
     
-    // Override database path if specified
+    // Override database path if specified on command line (absolute or relative to cwd)
     if (!db_path.empty()) {
         config.database.path = db_path;
     }

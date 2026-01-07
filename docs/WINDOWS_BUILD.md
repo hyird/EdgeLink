@@ -74,29 +74,36 @@ cmake --build build --config Release
 
 ## 静态编译说明
 
-使用 `x64-windows-static` triplet 后，所有可执行文件不依赖额外的 DLL 文件（客户端需要 `wintun.dll`）：
+使用 `x64-windows-static` triplet 后，所有可执行文件不依赖额外的 DLL 文件：
 
 - 无需安装 Visual C++ Redistributable
 - 无需复制其他依赖 DLL
+- Wintun 驱动静态链接到客户端可执行文件中
 - 可执行文件体积会增大，但部署更简单
 
-## 下载 Wintun (客户端需要)
+## Wintun 驱动嵌入 (可选)
+
+默认情况下，客户端会使用系统已安装的 Wintun 驱动。如果要将 Wintun 驱动嵌入到可执行文件中实现单文件部署：
 
 1. 从 https://www.wintun.net/ 下载 wintun
-2. 解压并复制到 `third_party/wintun/`:
-   ```
-   third_party/wintun/
-   ├── wintun.h    (从 include/ 复制)
-   └── wintun.dll  (从 bin/amd64/ 复制)
-   ```
+2. 解压后使用 `-DWINTUN_DRIVER_DIR` 参数指定驱动目录：
+
+```powershell
+cmake -B build -G "Visual Studio 17 2022" -A x64 `
+    -DWINTUN_DRIVER_DIR="C:\path\to\wintun\bin\amd64" `
+    ... 其他参数
+```
+
+嵌入后，客户端启动时会自动提取并安装驱动。
+
+如果不嵌入驱动，请确保系统已安装 Wintun 驱动，或者将驱动文件（wintun.sys, wintun.inf, wintun.cat）放在可执行文件同目录。
 
 ## 运行
 
-运行客户端需要**管理员权限**（创建虚拟网卡需要）。
+运行客户端需要**管理员权限**（创建虚拟网卡和安装驱动需要）。
 
-1. 确保 `wintun.dll` 与 `edgelink-client.exe` 在同一目录
-2. 准备配置文件 `client.json`
-3. 以管理员权限运行：
+1. 准备配置文件 `client.json`
+2. 以管理员权限运行：
 
 ```powershell
 # 使用管理员 PowerShell

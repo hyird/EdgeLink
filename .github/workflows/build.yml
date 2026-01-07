@@ -29,9 +29,6 @@ jobs:
           pkgconfig linux-headers musl-dev perl bash python3 \
           autoconf automake libtool
         # Verify Linux headers are installed (required by vcpkg openssl)
-        echo "=== Checking Linux headers ==="
-        ls -la /usr/include/linux/ | head -20
-        test -f /usr/include/linux/version.h && echo "✓ version.h found" || echo "✗ version.h NOT found"
         test -f /usr/include/linux/version.h || exit 1
 
     - uses: actions/checkout@v4
@@ -50,18 +47,13 @@ jobs:
           core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
           core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-    - name: Configure CMake (vcpkg x64-linux + musl static)
+    - name: Configure CMake (vcpkg x64-linux-release + musl static)
       run: |
-        # Debug: verify headers are still present before cmake
-        echo "=== Pre-configure header check ==="
-        ls -la /usr/include/linux/version.h || echo "WARNING: version.h not found!"
-        cat /usr/include/linux/version.h 2>/dev/null | head -5 || true
-        
         cmake -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
           -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
-          -DVCPKG_TARGET_TRIPLET=x64-linux \
-          -DVCPKG_HOST_TRIPLET=x64-linux \
+          -DVCPKG_TARGET_TRIPLET=x64-linux-release \
+          -DVCPKG_HOST_TRIPLET=x64-linux-release \
           -DBUILD_SHARED_LIBS=OFF \
           -DEDGELINK_STATIC=ON \
           -DBUILD_CONTROLLER=ON \
@@ -129,10 +121,9 @@ jobs:
     - name: Download wintun
       run: |
         Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile "wintun.zip"
-        Expand-Archive -Path "wintun.zip" -DestinationPath "wintun"
-        mkdir -p third_party/wintun
-        Copy-Item -Path "wintun/wintun/include/*" -Destination "third_party/wintun/" -Recurse
-        Copy-Item -Path "wintun/wintun/bin/amd64/wintun.dll" -Destination "third_party/wintun/"
+        Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-extract"
+        # Set driver directory for embedding
+        echo "WINTUN_DRIVER_DIR=${{ github.workspace }}/wintun-extract/wintun/bin/amd64" >> $env:GITHUB_ENV
 
     - name: Configure CMake (vcpkg x64-windows-static + MSVC /MT)
       run: |
@@ -146,7 +137,8 @@ jobs:
           -DBUILD_CONTROLLER=ON `
           -DBUILD_SERVER=ON `
           -DBUILD_CLIENT=ON `
-          -DBUILD_TESTS=OFF
+          -DBUILD_TESTS=OFF `
+          -DWINTUN_DRIVER_DIR="${{ github.workspace }}/wintun-extract/wintun/bin/amd64"
 
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} --parallel
@@ -157,8 +149,8 @@ jobs:
         Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-server.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "third_party/wintun/wintun.dll" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse
+        # Note: wintun driver is statically linked into edgelink-client.exe
         Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-static.zip"
 
     - name: Upload Windows Artifacts
@@ -169,105 +161,10 @@ jobs:
         retention-days: 30
 
   # =============================================================================
-  # Docker Build & Push to Docker Hub (vcpkg + musl static)
-  # =============================================================================
-  build-docker:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-    - name: Docker meta (Controller)
-      id: meta-controller
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-controller
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=sha,prefix=
-          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
-
-    - name: Docker meta (Server)
-      id: meta-server
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-server
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=sha,prefix=
-          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
-
-    - name: Docker meta (Client)
-      id: meta-client
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-client
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=sha,prefix=
-          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
-
-    - name: Build and push Controller
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile.static
-        target: controller
-        push: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') }}
-        tags: ${{ steps.meta-controller.outputs.tags }}
-        labels: ${{ steps.meta-controller.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Build and push Server
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile.static
-        target: server
-        push: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') }}
-        tags: ${{ steps.meta-server.outputs.tags }}
-        labels: ${{ steps.meta-server.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Build and push Client
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile.static
-        target: client
-        push: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') }}
-        tags: ${{ steps.meta-client.outputs.tags }}
-        labels: ${{ steps.meta-client.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-  # =============================================================================
   # Release Job
   # =============================================================================
   release:
-    needs: [build-linux, build-windows, build-docker]
+    needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     

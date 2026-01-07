@@ -14,6 +14,8 @@
     "spdlog",
     "nlohmann-json",
     "libsodium",
+    "jwt-cpp",
+    "picojson",
     {
       "name": "gtest",
       "platform": "!windows"

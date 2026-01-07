@@ -96,14 +96,8 @@ find_package(unofficial-sodium CONFIG REQUIRED)
 set(SODIUM_LIBRARIES unofficial-sodium::sodium)
 set(SODIUM_INCLUDE_DIRS "")
 
-# jwt-cpp (header-only, bundled in third_party)
-set(JWT_CPP_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jwt-cpp/include)
-set(PICOJSON_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/picojson/include)
-
-# Wintun for Windows client
-if(WIN32 AND BUILD_CLIENT)
-    set(WINTUN_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/wintun)
-endif()
+# jwt-cpp (header-only, from vcpkg)
+find_package(jwt-cpp CONFIG REQUIRED)
 
 # =============================================================================
 # Common Library
@@ -123,8 +117,6 @@ add_library(edgelink-common STATIC
 target_include_directories(edgelink-common PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${SODIUM_INCLUDE_DIRS}
-    ${JWT_CPP_INCLUDE_DIR}
-    ${PICOJSON_INCLUDE_DIR}
 )
 
 target_link_libraries(edgelink-common PUBLIC
@@ -135,6 +127,7 @@ target_link_libraries(edgelink-common PUBLIC
     spdlog::spdlog
     nlohmann_json::nlohmann_json
     ${SODIUM_LIBRARIES}
+    jwt-cpp::jwt-cpp
     Threads::Threads
 )
 
@@ -197,7 +190,62 @@ endif()
 if(BUILD_CLIENT)
     # Platform-specific TUN source
     if(WIN32)
-        set(TUN_SOURCE src/client/tun_windows.cpp)
+        set(TUN_SOURCE 
+            src/client/tun_windows.cpp
+            src/client/wintun/wintun_static.c
+        )
+        
+        # Optionally embed wintun driver files (.sys, .inf, .cat)
+        # Use: cmake -DWINTUN_DRIVER_DIR=/path/to/wintun/
+        if(DEFINED WINTUN_DRIVER_DIR AND EXISTS "${WINTUN_DRIVER_DIR}")
+            message(STATUS "Embedding wintun driver from: ${WINTUN_DRIVER_DIR}")
+            
+            # Determine architecture
+            if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+                if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+                    set(WINTUN_ARCH "arm64")
+                else()
+                    set(WINTUN_ARCH "amd64")
+                endif()
+            else()
+                set(WINTUN_ARCH "x86")
+            endif()
+            
+            # Generate resource file for driver embedding
+            set(WINTUN_RC_FILE "${CMAKE_CURRENT_BINARY_DIR}/wintun_driver.rc")
+            file(WRITE ${WINTUN_RC_FILE}
+                "// Embedded Wintun driver files\n"
+                "#define IDR_WINTUN_AMD64_SYS 201\n"
+                "#define IDR_WINTUN_AMD64_INF 202\n"
+                "#define IDR_WINTUN_AMD64_CAT 203\n"
+                "#define IDR_WINTUN_ARM64_SYS 211\n"
+                "#define IDR_WINTUN_ARM64_INF 212\n"
+                "#define IDR_WINTUN_ARM64_CAT 213\n"
+            )
+            
+            # Add resource entries if files exist
+            if(EXISTS "${WINTUN_DRIVER_DIR}/wintun.sys")
+                file(APPEND ${WINTUN_RC_FILE}
+                    "IDR_WINTUN_${WINTUN_ARCH}_SYS RCDATA \"${WINTUN_DRIVER_DIR}/wintun.sys\"\n"
+                )
+            endif()
+            if(EXISTS "${WINTUN_DRIVER_DIR}/wintun.inf")
+                file(APPEND ${WINTUN_RC_FILE}
+                    "IDR_WINTUN_${WINTUN_ARCH}_INF RCDATA \"${WINTUN_DRIVER_DIR}/wintun.inf\"\n"
+                )
+            endif()
+            if(EXISTS "${WINTUN_DRIVER_DIR}/wintun.cat")
+                file(APPEND ${WINTUN_RC_FILE}
+                    "IDR_WINTUN_${WINTUN_ARCH}_CAT RCDATA \"${WINTUN_DRIVER_DIR}/wintun.cat\"\n"
+                )
+            endif()
+            
+            list(APPEND TUN_SOURCE ${WINTUN_RC_FILE})
+            set(EDGELINK_WINTUN_EMBEDDED TRUE)
+        else()
+            message(STATUS "Wintun driver not embedded. Will use system-installed driver.")
+            message(STATUS "  To embed: cmake -DWINTUN_DRIVER_DIR=/path/to/wintun/ ...")
+        endif()
     elseif(APPLE)
         set(TUN_SOURCE src/client/tun_macos.cpp)
     else()
@@ -221,11 +269,22 @@ if(BUILD_CLIENT)
     )
 
     if(WIN32)
-        target_include_directories(edgelink-client PRIVATE ${WINTUN_INCLUDE_DIR})
+        target_include_directories(edgelink-client PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/client
+        )
         target_link_libraries(edgelink-client PRIVATE
             iphlpapi
             ntdll
+            setupapi
+            cfgmgr32
+            newdev
+            ole32
+            shlwapi
         )
+        
+        if(EDGELINK_WINTUN_EMBEDDED)
+            target_compile_definitions(edgelink-client PRIVATE EDGELINK_WINTUN_EMBEDDED=1)
+        endif()
     endif()
 endif()
 
