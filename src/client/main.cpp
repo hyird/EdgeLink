@@ -5,9 +5,19 @@
 #include <iostream>
 #include <fstream>
 #include <csignal>
-#include <unistd.h>
 #include <iomanip>
 #include <ctime>
+
+#ifdef _WIN32
+    #include <io.h>
+    #include <process.h>
+    #include <windows.h>
+    #define access _access
+    #define F_OK 0
+    #define getpid _getpid
+#else
+    #include <unistd.h>
+#endif
 
 using namespace edgelink::client;
 using namespace edgelink;
@@ -155,13 +165,18 @@ int cmd_status(const std::string& config_file) {
             std::cout << "Controller: " << config.controller_url << "\n";
             std::cout << "Interface:  " << config.tun_name << "\n";
             
-            // Check if interface exists
+#ifdef _WIN32
+            // On Windows, we can't easily check interface status without more complex code
+            std::cout << "Status:     Unknown (check Task Manager)\n";
+#else
+            // Check if interface exists (Linux)
             std::string ifpath = "/sys/class/net/" + config.tun_name;
             if (access(ifpath.c_str(), F_OK) == 0) {
                 std::cout << "Status:     Connected\n";
             } else {
                 std::cout << "Status:     Not running\n";
             }
+#endif
         } else {
             std::cout << "Config not found: " << config_file << "\n";
         }
@@ -172,12 +187,40 @@ int cmd_status(const std::string& config_file) {
     return 0;
 }
 
+#ifdef _WIN32
+// Check if running as Administrator on Windows
+static bool is_admin() {
+    BOOL isAdmin = FALSE;
+    PSID adminGroup = NULL;
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    
+    if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+            DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
+        CheckTokenMembership(NULL, adminGroup, &isAdmin);
+        FreeSid(adminGroup);
+    }
+    return isAdmin == TRUE;
+}
+#endif
+
 int cmd_connect(const ClientConfig& config, bool daemon_mode) {
-    // Check root
+    // Check root/admin privileges
+#ifdef _WIN32
+    if (!is_admin()) {
+        std::cerr << "Error: Administrator privileges required for TUN device.\n";
+        std::cerr << "Please run as Administrator.\n";
+        return 1;
+    }
+    if (daemon_mode) {
+        std::cerr << "Warning: Daemon mode not supported on Windows. Running in foreground.\n";
+        daemon_mode = false;
+    }
+#else
     if (geteuid() != 0) {
         std::cerr << "Error: Root privileges required for TUN device.\n";
         return 1;
     }
+#endif
     
     // Validate
     if (config.controller_url.empty()) {
@@ -189,7 +232,8 @@ int cmd_connect(const ClientConfig& config, bool daemon_mode) {
         return 1;
     }
     
-    // Daemon mode
+#ifndef _WIN32
+    // Daemon mode (POSIX only)
     if (daemon_mode) {
         pid_t pid = fork();
         if (pid < 0) {
@@ -210,6 +254,7 @@ int cmd_connect(const ClientConfig& config, bool daemon_mode) {
             pid_file << getpid();
         }
     }
+#endif
     
     LOG_INFO("EdgeLink Client v0.1.0");
     LOG_INFO("Controller: {}", config.controller_url);
@@ -235,9 +280,11 @@ int cmd_connect(const ClientConfig& config, bool daemon_mode) {
         return 1;
     }
     
+#ifndef _WIN32
     if (daemon_mode) {
         std::remove("/var/run/edgelink-client.pid");
     }
+#endif
     
     return 0;
 }

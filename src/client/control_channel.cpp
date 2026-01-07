@@ -5,7 +5,6 @@
 #include <nlohmann/json.hpp>
 #include <regex>
 #include <charconv>
-#include <unistd.h>
 
 namespace edgelink::client {
 

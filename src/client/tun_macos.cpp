@@ -12,7 +12,7 @@
 #include <net/if.h>
 #include <net/if_utun.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
+#include "common/platform_net.hpp"
 #include <ifaddrs.h>
 #include <cstring>
 #include <array>

@@ -1,0 +1,139 @@
+# =============================================================================
+# EdgeLink Dockerfile - Fully Static Build with vcpkg + musl
+# =============================================================================
+# Build: docker build -f Dockerfile.static -t edgelink-static .
+# Extract binaries: docker cp $(docker create edgelink-static:controller):/app/edgelink-controller .
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: vcpkg + Build environment (Alpine musl)
+# -----------------------------------------------------------------------------
+FROM alpine:3.20 AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    cmake \
+    ninja \
+    git \
+    curl \
+    zip \
+    unzip \
+    tar \
+    pkgconfig \
+    linux-headers \
+    perl \
+    bash \
+    python3
+
+# Clone and bootstrap vcpkg
+WORKDIR /opt
+RUN git clone --depth 1 https://github.com/microsoft/vcpkg.git \
+    && cd vcpkg \
+    && ./bootstrap-vcpkg.sh -disableMetrics
+
+ENV VCPKG_ROOT=/opt/vcpkg
+ENV PATH="${VCPKG_ROOT}:${PATH}"
+
+# Set vcpkg triplet for static build
+# x64-linux: official triplet, static libraries
+ENV VCPKG_DEFAULT_TRIPLET=x64-linux
+ENV VCPKG_DEFAULT_HOST_TRIPLET=x64-linux
+
+WORKDIR /build
+COPY vcpkg.json .
+
+# Install dependencies via vcpkg manifest mode
+RUN vcpkg install \
+    --triplet=x64-linux \
+    --host-triplet=x64-linux \
+    --x-install-root=/build/vcpkg_installed
+
+# Copy source
+COPY . .
+
+# Build with full static linking
+RUN cmake -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
+    -DVCPKG_TARGET_TRIPLET=x64-linux \
+    -DVCPKG_HOST_TRIPLET=x64-linux \
+    -DVCPKG_INSTALLED_DIR=/build/vcpkg_installed \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DEDGELINK_STATIC=ON \
+    -DBUILD_CONTROLLER=ON \
+    -DBUILD_SERVER=ON \
+    -DBUILD_CLIENT=ON \
+    -DBUILD_TESTS=OFF \
+    && cmake --build build --config Release -j$(nproc)
+
+# Strip binaries
+RUN strip build/edgelink-controller build/edgelink-server build/edgelink-client
+
+# Verify static linking
+RUN echo "=== Binary Analysis ===" \
+    && file build/edgelink-* \
+    && echo "=== Dependencies ===" \
+    && (ldd build/edgelink-controller 2>&1 || echo "Static binary - no dynamic dependencies")
+
+# -----------------------------------------------------------------------------
+# Stage 2: Controller (scratch - no OS, just the binary)
+# -----------------------------------------------------------------------------
+FROM scratch AS controller
+
+COPY --from=builder /build/build/edgelink-controller /app/edgelink-controller
+COPY --from=builder /build/config/controller.example.json /app/config/controller.json
+
+# SSL certificates for HTTPS
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+EXPOSE 8080 8443
+VOLUME ["/app/data", "/app/config"]
+
+ENTRYPOINT ["/app/edgelink-controller"]
+CMD ["-c", "/app/config/controller.json"]
+
+# -----------------------------------------------------------------------------
+# Stage 3: Server (scratch)
+# -----------------------------------------------------------------------------
+FROM scratch AS server
+
+COPY --from=builder /build/build/edgelink-server /app/edgelink-server
+COPY --from=builder /build/config/server.example.json /app/config/server.json
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+EXPOSE 9443 3478/udp
+VOLUME ["/app/config"]
+
+ENTRYPOINT ["/app/edgelink-server"]
+CMD ["-c", "/app/config/server.json"]
+
+# -----------------------------------------------------------------------------
+# Stage 4: Client (minimal Alpine for TUN support)
+# -----------------------------------------------------------------------------
+FROM alpine:3.20 AS client
+
+# Only runtime deps for TUN device
+RUN apk add --no-cache \
+    ca-certificates \
+    iproute2 \
+    iptables
+
+WORKDIR /app
+
+COPY --from=builder /build/build/edgelink-client /app/edgelink-client
+COPY --from=builder /build/config/client.example.json /app/config/client.json
+
+VOLUME ["/app/config"]
+
+ENTRYPOINT ["/app/edgelink-client"]
+CMD ["-c", "/app/config/client.json"]
+
+# -----------------------------------------------------------------------------
+# Stage 5: All binaries (for extraction)
+# -----------------------------------------------------------------------------
+FROM scratch AS binaries
+
+COPY --from=builder /build/build/edgelink-controller /
+COPY --from=builder /build/build/edgelink-server /
+COPY --from=builder /build/build/edgelink-client /

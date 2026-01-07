@@ -11,7 +11,7 @@
 #include <net/if.h>
 #include <linux/if_tun.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
+#include "common/platform_net.hpp"
 #include <cstring>
 #include <array>
 

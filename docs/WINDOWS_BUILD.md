@@ -24,38 +24,31 @@ cd C:\vcpkg
 $env:VCPKG_ROOT = "C:\vcpkg"
 ```
 
-## 安装依赖 (静态库)
+## 编译 (使用构建脚本)
+
+推荐使用提供的构建脚本：
 
 ```powershell
-# 安装所需的静态库包
-vcpkg install boost-asio:x64-windows-static
-vcpkg install boost-json:x64-windows-static
-vcpkg install boost-beast:x64-windows-static
-vcpkg install openssl:x64-windows-static
-vcpkg install spdlog:x64-windows-static
-vcpkg install nlohmann-json:x64-windows-static
-vcpkg install libsodium:x64-windows-static
+# Release 构建 (默认)
+.\scripts\build-windows.ps1
+
+# Debug 构建
+.\scripts\build-windows.ps1 -Debug
+
+# 清理后重新构建
+.\scripts\build-windows.ps1 -Clean
 ```
 
-或者使用项目的 `vcpkg.json` 清单模式自动安装。
+## 手动编译
 
-## 下载 Wintun
-
-1. 从 https://www.wintun.net/ 下载 wintun
-2. 解压并复制到 `third_party/wintun/`:
-   ```
-   third_party/wintun/
-   ├── wintun.h    (从 include/ 复制)
-   └── wintun.dll  (从 bin/amd64/ 复制)
-   ```
-
-## 编译 (静态链接)
+### 使用 vcpkg x64-windows-static triplet
 
 ```powershell
 # 配置 (只编译客户端，静态链接)
 cmake -B build -G "Visual Studio 17 2022" -A x64 `
     -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
     -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+    -DVCPKG_HOST_TRIPLET=x64-windows-static `
     -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
     -DBUILD_SHARED_LIBS=OFF `
     -DBUILD_CONTROLLER=OFF `
@@ -69,9 +62,16 @@ cmake --build build --config Release
 # 输出文件在 build/Release/edgelink-client.exe
 ```
 
+## vcpkg Triplet 说明
+
+| Triplet | 描述 |
+|---------|------|
+| `x64-windows-static` | 64位 Windows，静态库 + 静态 CRT (/MT) |
+| `arm64-windows-static` | ARM64 Windows，静态库 + 静态 CRT |
+
 ## 静态编译说明
 
-使用静态编译后，`edgelink-client.exe` 不再依赖额外的 DLL 文件（除了 `wintun.dll`），这意味着：
+使用 `x64-windows-static` triplet 后，`edgelink-client.exe` 不依赖额外的 DLL 文件（除了 `wintun.dll`）：
 
 - 无需安装 Visual C++ Redistributable
 - 无需复制其他依赖 DLL

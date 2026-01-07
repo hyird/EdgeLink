@@ -16,18 +16,12 @@ RUN apk add --no-cache \
     pkgconfig \
     linux-headers \
     boost-dev \
-    openssl \
     openssl-dev \
-    libssl3 \
-    libcrypto3 \
     sqlite-dev \
     spdlog-dev \
     fmt-dev \
     nlohmann-json \
-    libsodium-dev \
-    && ls -la /usr/lib/libssl* /usr/lib/libcrypto* || true \
-    && ln -sf /usr/lib/libssl.so.3 /usr/lib/libssl.so || true \
-    && ln -sf /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so || true
+    libsodium-dev
 
 WORKDIR /build
 COPY . .
@@ -36,6 +30,9 @@ COPY . .
 RUN cmake -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DOPENSSL_ROOT_DIR=/usr \
+    -DOPENSSL_CRYPTO_LIBRARY=/lib/libcrypto.so.3 \
+    -DOPENSSL_SSL_LIBRARY=/lib/libssl.so.3 \
+    -DOPENSSL_INCLUDE_DIR=/usr/include \
     -DBUILD_CONTROLLER=ON \
     -DBUILD_SERVER=ON \
     -DBUILD_CLIENT=ON \

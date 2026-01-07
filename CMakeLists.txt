@@ -11,6 +11,7 @@ option(BUILD_SERVER "Build the relay/stun server" ON)
 option(BUILD_CLIENT "Build the client" ON)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
+option(EDGELINK_STATIC "Build fully static binaries (Linux musl)" OFF)
 
 # Suppress CMP0167 warning for FindBoost (if available)
 if(POLICY CMP0167)
@@ -27,11 +28,11 @@ if(WIN32)
     add_definitions(-DNOMINMAX)
     add_definitions(-DWIN32_LEAN_AND_MEAN)
     
-    # Static runtime for MSVC
+    # Static runtime for MSVC (use x64-windows-static triplet)
     if(MSVC)
         set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-        # Disable MSVC warnings
-        add_compile_options(/W3 /wd4996)
+        # Disable MSVC warnings, enable big object files, UTF-8 source
+        add_compile_options(/W3 /wd4996 /bigobj /utf-8)
     endif()
 elseif(APPLE)
     message(STATUS "Building for macOS")
@@ -40,10 +41,28 @@ else()
     message(STATUS "Building for Linux")
     set(EDGELINK_PLATFORM "linux")
     
-    # Static linking flags for Linux
+    # Detect musl libc
+    execute_process(
+        COMMAND ${CMAKE_C_COMPILER} -dumpmachine
+        OUTPUT_VARIABLE TARGET_TRIPLE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(TARGET_TRIPLE MATCHES "musl" OR EXISTS "/etc/alpine-release")
+        set(EDGELINK_MUSL ON)
+        message(STATUS "Detected musl libc environment")
+    endif()
+    
+    # Full static linking for Linux (use x64-linux or x64-linux-release triplet)
     if(NOT BUILD_SHARED_LIBS)
         set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
+        if(EDGELINK_STATIC OR EDGELINK_MUSL)
+            # Full static linking with musl
+            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+            message(STATUS "Enabled full static linking")
+        else()
+            # Partial static (libgcc/libstdc++ only)
+            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
+        endif()
     endif()
 endif()
 
@@ -282,12 +301,20 @@ message(STATUS "")
 message(STATUS "EdgeLink Build Configuration:")
 message(STATUS "  Platform:      ${EDGELINK_PLATFORM}")
 message(STATUS "  Build Type:    ${CMAKE_BUILD_TYPE}")
-message(STATUS "  Static Build:  ${BUILD_SHARED_LIBS}" )
+message(STATUS "  Shared Libs:   ${BUILD_SHARED_LIBS}" )
+if(EDGELINK_MUSL)
+message(STATUS "  Libc:          musl (full static)")
+elseif(EDGELINK_STATIC)
+message(STATUS "  Static:        full static linking")
+endif()
 message(STATUS "  Controller:    ${BUILD_CONTROLLER}")
 message(STATUS "  Server:        ${BUILD_SERVER}")
 message(STATUS "  Client:        ${BUILD_CLIENT}")
 message(STATUS "  Tests:         ${BUILD_TESTS}")
 if(MSVC)
 message(STATUS "  MSVC Runtime:  ${CMAKE_MSVC_RUNTIME_LIBRARY}")
+endif()
+if(DEFINED VCPKG_TARGET_TRIPLET)
+message(STATUS "  vcpkg Triplet: ${VCPKG_TARGET_TRIPLET}")
 endif()
 message(STATUS "")

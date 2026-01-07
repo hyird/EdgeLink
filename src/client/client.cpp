@@ -4,7 +4,7 @@
 #include <sodium.h>
 #include <fstream>
 #include <regex>
-#include <arpa/inet.h>
+#include "common/platform_net.hpp"
 #include <nlohmann/json.hpp>
 
 namespace edgelink::client {

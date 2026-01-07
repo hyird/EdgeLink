@@ -1,11 +1,17 @@
 #include "endpoint_manager.hpp"
 #include <spdlog/spdlog.h>
-#include <ifaddrs.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <net/if.h>
+#include "common/platform_net.hpp"
 #include <random>
 #include <cstring>
+
+#ifdef _WIN32
+    #include <iphlpapi.h>
+    #pragma comment(lib, "iphlpapi.lib")
+#else
+    #include <ifaddrs.h>
+    #include <netinet/in.h>
+    #include <net/if.h>
+#endif
 
 namespace edgelink::client {
 
@@ -37,9 +43,9 @@ EndpointManager::EndpointManager(boost::asio::io_context& ioc,
     // 生成随机transaction ID
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint8_t> dist(0, 255);
+    std::uniform_int_distribution<unsigned int> dist(0, 255);
     for (auto& b : stun_transaction_id_) {
-        b = dist(gen);
+        b = static_cast<uint8_t>(dist(gen));
     }
 }
 
@@ -146,6 +152,76 @@ void EndpointManager::refresh() {
 void EndpointManager::collect_local_addresses() {
     std::vector<Endpoint> local_endpoints;
     
+#ifdef _WIN32
+    // Windows implementation using GetAdaptersAddresses
+    ULONG bufferSize = 15000;
+    PIP_ADAPTER_ADDRESSES pAddresses = nullptr;
+    ULONG flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | 
+                  GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    
+    // Allocate buffer
+    pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(bufferSize);
+    if (pAddresses == nullptr) {
+        spdlog::error("EndpointManager: Failed to allocate memory for adapter addresses");
+        return;
+    }
+    
+    DWORD dwRetVal = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &bufferSize);
+    if (dwRetVal == ERROR_BUFFER_OVERFLOW) {
+        free(pAddresses);
+        pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(bufferSize);
+        if (pAddresses == nullptr) {
+            spdlog::error("EndpointManager: Failed to allocate memory for adapter addresses");
+            return;
+        }
+        dwRetVal = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &bufferSize);
+    }
+    
+    if (dwRetVal != NO_ERROR) {
+        spdlog::error("EndpointManager: GetAdaptersAddresses failed with error: {}", dwRetVal);
+        free(pAddresses);
+        return;
+    }
+    
+    for (PIP_ADAPTER_ADDRESSES pCurrAddresses = pAddresses; 
+         pCurrAddresses != nullptr; 
+         pCurrAddresses = pCurrAddresses->Next) {
+        
+        // Skip loopback and non-operational adapters
+        if (pCurrAddresses->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        if (pCurrAddresses->OperStatus != IfOperStatusUp) continue;
+        
+        for (PIP_ADAPTER_UNICAST_ADDRESS pUnicast = pCurrAddresses->FirstUnicastAddress;
+             pUnicast != nullptr;
+             pUnicast = pUnicast->Next) {
+            
+            if (pUnicast->Address.lpSockaddr->sa_family != AF_INET) continue;
+            
+            struct sockaddr_in* addr = reinterpret_cast<struct sockaddr_in*>(pUnicast->Address.lpSockaddr);
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &addr->sin_addr, ip_str, sizeof(ip_str));
+            
+            std::string ip = ip_str;
+            
+            // Skip link-local addresses
+            if (ip.substr(0, 7) == "169.254") continue;
+            
+            spdlog::debug("EndpointManager: Found local address {} on {}", ip, pCurrAddresses->AdapterName);
+            
+            Endpoint ep;
+            ep.address = ip;
+            ep.port = local_port_;
+            ep.type = EndpointType::LAN;
+            ep.priority = 10;
+            ep.discovered_at = std::chrono::steady_clock::now();
+            
+            local_endpoints.push_back(ep);
+        }
+    }
+    
+    free(pAddresses);
+#else
+    // POSIX implementation using getifaddrs
     struct ifaddrs* ifaddr = nullptr;
     if (getifaddrs(&ifaddr) == -1) {
         spdlog::error("EndpointManager: getifaddrs failed: {}", strerror(errno));
@@ -185,6 +261,7 @@ void EndpointManager::collect_local_addresses() {
     }
     
     freeifaddrs(ifaddr);
+#endif
     
     // 更新端点列表
     {

@@ -4,7 +4,7 @@
 #include <sstream>
 #include <set>
 #include <chrono>
-#include <arpa/inet.h>
+#include "common/platform_net.hpp"
 
 namespace edgelink::controller {
 

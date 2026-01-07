@@ -1,7 +1,7 @@
 #include "client/route_manager.hpp"
 #include "common/log.hpp"
 
-#include <arpa/inet.h>
+#include "common/platform_net.hpp"
 #include <regex>
 #include <algorithm>
 #include <random>

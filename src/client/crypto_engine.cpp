@@ -7,7 +7,7 @@
 #include <sodium.h>
 #include <cstring>
 #include <random>
-#include <arpa/inet.h>
+#include "common/platform_net.hpp"
 
 namespace edgelink::client {
 

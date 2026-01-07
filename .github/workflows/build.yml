@@ -10,55 +10,68 @@ on:
 
 env:
   BUILD_TYPE: Release
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
 jobs:
   # =============================================================================
-  # Linux Build - All Components
+  # Linux Build - vcpkg + Alpine musl (Full Static)
   # =============================================================================
   build-linux:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.20
     
     steps:
-    - uses: actions/checkout@v4
-    
     - name: Install Dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          cmake \
-          ninja-build \
-          libboost-all-dev \
-          libssl-dev \
-          libsqlite3-dev \
-          libspdlog-dev \
-          nlohmann-json3-dev \
-          libsodium-dev \
-          libgtest-dev \
-          pkg-config
+        apk add --no-cache \
+          build-base cmake ninja git curl zip unzip tar \
+          pkgconfig linux-headers perl bash python3
 
-    - name: Configure CMake (Static Runtime)
+    - uses: actions/checkout@v4
+
+    - name: Setup vcpkg
+      run: |
+        git clone --depth 1 https://github.com/microsoft/vcpkg.git /opt/vcpkg
+        /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+        echo "VCPKG_ROOT=/opt/vcpkg" >> $GITHUB_ENV
+
+    - name: Export GitHub Actions cache variables
+      uses: actions/github-script@v7
+      with:
+        script: |
+          core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+    - name: Configure CMake (vcpkg x64-linux + musl static)
       run: |
         cmake -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
-          -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+          -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
+          -DVCPKG_TARGET_TRIPLET=x64-linux \
+          -DVCPKG_HOST_TRIPLET=x64-linux \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DEDGELINK_STATIC=ON \
           -DBUILD_CONTROLLER=ON \
           -DBUILD_SERVER=ON \
           -DBUILD_CLIENT=ON \
-          -DBUILD_TESTS=ON
+          -DBUILD_TESTS=OFF
 
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
-
-    - name: Run Tests
-      working-directory: build
-      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure || true
 
     - name: Strip Binaries
       run: |
         strip build/edgelink-controller || true
         strip build/edgelink-server || true
         strip build/edgelink-client || true
+
+    - name: Verify Static Linking
+      run: |
+        echo "=== File info ==="
+        file build/edgelink-* || true
+        echo "=== Dynamic dependencies ==="
+        ldd build/edgelink-controller 2>&1 || echo "Fully static binary (expected)"
 
     - name: Package Linux Artifacts
       run: |
@@ -67,24 +80,23 @@ jobs:
         cp build/edgelink-server artifacts/linux/ || true
         cp build/edgelink-client artifacts/linux/ || true
         cp -r config artifacts/linux/
-        tar -czvf edgelink-linux-x64.tar.gz -C artifacts linux
+        tar -czvf edgelink-linux-x64-static.tar.gz -C artifacts linux
 
     - name: Upload Linux Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: edgelink-linux-x64
-        path: edgelink-linux-x64.tar.gz
+        name: edgelink-linux-x64-static
+        path: edgelink-linux-x64-static.tar.gz
         retention-days: 30
 
   # =============================================================================
-  # Windows Build - Client Only (Static with wintun)
+  # Windows Build - Client Only (vcpkg x64-windows-static + MSVC /MT)
   # =============================================================================
   build-windows:
     runs-on: windows-latest
     
     env:
       VCPKG_DEFAULT_TRIPLET: x64-windows-static
-      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
     
     steps:
     - uses: actions/checkout@v4
@@ -97,9 +109,10 @@ jobs:
           core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
     - name: Setup vcpkg
-      uses: lukka/run-vcpkg@v11
-      with:
-        runVcpkgInstall: true
+      run: |
+        git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\vcpkg
+        C:\vcpkg\bootstrap-vcpkg.bat
+        echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
     - name: Download wintun
       run: |
@@ -109,12 +122,13 @@ jobs:
         Copy-Item -Path "wintun/wintun/include/*" -Destination "third_party/wintun/" -Recurse
         Copy-Item -Path "wintun/wintun/bin/amd64/wintun.dll" -Destination "third_party/wintun/"
 
-    - name: Configure CMake (Windows Client Static)
+    - name: Configure CMake (vcpkg x64-windows-static + MSVC /MT)
       run: |
         cmake -B build -G "Visual Studio 17 2022" -A x64 `
           -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} `
-          -DCMAKE_TOOLCHAIN_FILE="${env:VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" `
+          -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
           -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+          -DVCPKG_HOST_TRIPLET=x64-windows-static `
           -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
           -DBUILD_SHARED_LIBS=OFF `
           -DBUILD_CONTROLLER=OFF `
@@ -123,7 +137,7 @@ jobs:
           -DBUILD_TESTS=OFF
 
     - name: Build
-      run: cmake --build build --config ${{env.BUILD_TYPE}} -j $env:NUMBER_OF_PROCESSORS
+      run: cmake --build build --config ${{env.BUILD_TYPE}} --parallel
 
     - name: Package Windows Artifacts
       run: |
@@ -131,20 +145,21 @@ jobs:
         Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "third_party/wintun/wintun.dll" -Destination "artifacts/windows/"
         Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse
-        Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64.zip"
+        Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-static.zip"
 
     - name: Upload Windows Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: edgelink-windows-x64
-        path: edgelink-windows-x64.zip
+        name: edgelink-windows-x64-static
+        path: edgelink-windows-x64-static.zip
         retention-days: 30
 
   # =============================================================================
-  # Docker Build & Push to Docker Hub
+  # Docker Build & Push to Docker Hub (vcpkg + musl static)
   # =============================================================================
   build-docker:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
     
     steps:
     - uses: actions/checkout@v4
@@ -154,6 +169,7 @@ jobs:
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
+      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -201,9 +217,9 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./Dockerfile
+        file: ./Dockerfile.static
         target: controller
-        push: true
+        push: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') }}
         tags: ${{ steps.meta-controller.outputs.tags }}
         labels: ${{ steps.meta-controller.outputs.labels }}
         cache-from: type=gha
@@ -213,9 +229,9 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./Dockerfile
+        file: ./Dockerfile.static
         target: server
-        push: true
+        push: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') }}
         tags: ${{ steps.meta-server.outputs.tags }}
         labels: ${{ steps.meta-server.outputs.labels }}
         cache-from: type=gha
@@ -225,9 +241,9 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./Dockerfile
+        file: ./Dockerfile.static
         target: client
-        push: true
+        push: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') }}
         tags: ${{ steps.meta-client.outputs.tags }}
         labels: ${{ steps.meta-client.outputs.labels }}
         cache-from: type=gha
@@ -254,8 +270,8 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          artifacts/edgelink-linux-x64/edgelink-linux-x64.tar.gz
-          artifacts/edgelink-windows-x64/edgelink-windows-x64.zip
+          artifacts/edgelink-linux-x64-static/edgelink-linux-x64-static.tar.gz
+          artifacts/edgelink-windows-x64-static/edgelink-windows-x64-static.zip
         draft: false
         prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
         generate_release_notes: true

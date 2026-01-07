@@ -3,7 +3,7 @@
 
 #include <boost/asio/buffer.hpp>
 #include <cstring>
-#include <arpa/inet.h>
+#include "common/platform_net.hpp"
 
 namespace edgelink::controller {
 

@@ -107,7 +107,7 @@ struct TunDevice::PlatformData {
     WINTUN_ADAPTER_HANDLE adapter = nullptr;
     WINTUN_SESSION_HANDLE session = nullptr;
     HANDLE read_event = nullptr;
-    LUID adapter_luid{};
+    NET_LUID adapter_luid{};
     NET_IFINDEX if_index = 0;
     std::wstring adapter_name;
 };
@@ -180,8 +180,11 @@ std::expected<void, ErrorCode> TunDevice::open() {
         return std::unexpected(ErrorCode::SYSTEM_ERROR);
     }
 
-    // Get adapter LUID
-    wintun.get_adapter_luid(platform_->adapter, &platform_->adapter_luid);
+    // Get adapter LUID (Wintun returns LUID, need to convert to NET_LUID)
+    LUID wintun_luid{};
+    wintun.get_adapter_luid(platform_->adapter, &wintun_luid);
+    // Copy LUID to NET_LUID (they share the same underlying 64-bit value)
+    platform_->adapter_luid.Value = *reinterpret_cast<ULONG64*>(&wintun_luid);
 
     // Get interface index
     if (ConvertInterfaceLuidToIndex(&platform_->adapter_luid, &platform_->if_index) != NO_ERROR) {
