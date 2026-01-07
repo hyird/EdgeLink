@@ -53,15 +53,23 @@ public:
     bool is_open() const { return fd_ >= 0; }
     
 private:
+#ifdef _WIN32
+    // Windows: wintun-based implementation
+    struct PlatformData;
+    std::unique_ptr<PlatformData> platform_;
+    std::thread read_thread_;
+#else
+    // POSIX: /dev/net/tun based implementation
     void do_read();
     int execute_ip_command(const std::vector<std::string>& args);
+    std::unique_ptr<boost::asio::posix::stream_descriptor> stream_;
+#endif
     
     boost::asio::io_context& ioc_;
     std::string name_;
     int fd_ = -1;
     uint16_t mtu_ = NetworkConstants::DEFAULT_TUN_MTU;
     
-    std::unique_ptr<boost::asio::posix::stream_descriptor> stream_;
     std::vector<uint8_t> read_buffer_;
     PacketCallback packet_callback_;
     std::atomic<bool> reading_{false};

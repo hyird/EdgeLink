@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "edgelink",
+  "version-string": "0.1.0",
+  "description": "EdgeLink - Distributed Edge Networking",
+  "homepage": "https://github.com/your-org/edgelink",
+  "dependencies": [
+    {
+      "name": "boost-asio",
+      "version>=": "1.83.0"
+    },
+    {
+      "name": "boost-json",
+      "version>=": "1.83.0"
+    },
+    {
+      "name": "boost-beast",
+      "version>=": "1.83.0"
+    },
+    {
+      "name": "boost-system",
+      "version>=": "1.83.0"
+    },
+    {
+      "name": "boost-algorithm",
+      "version>=": "1.83.0"
+    },
+    "openssl",
+    "sqlite3",
+    "spdlog",
+    "nlohmann-json",
+    "libsodium"
+  ],
+  "builtin-baseline": "01f602195983451bc83e72f4214af2cbc495aa94",
+  "overrides": [
+    {
+      "name": "boost",
+      "version": "1.85.0"
+    }
+  ]
+}

@@ -16,27 +16,60 @@ if(POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
 endif()
 
-# Dependencies - Boost 1.82+ has header-only system
+# =============================================================================
+# Platform Detection
+# =============================================================================
+if(WIN32)
+    message(STATUS "Building for Windows")
+    set(EDGELINK_PLATFORM "windows")
+    add_definitions(-D_WIN32_WINNT=0x0A00)  # Windows 10+
+    add_definitions(-DNOMINMAX)
+    add_definitions(-DWIN32_LEAN_AND_MEAN)
+elseif(APPLE)
+    message(STATUS "Building for macOS")
+    set(EDGELINK_PLATFORM "macos")
+else()
+    message(STATUS "Building for Linux")
+    set(EDGELINK_PLATFORM "linux")
+endif()
+
+# =============================================================================
+# Dependencies
+# =============================================================================
 find_package(Boost 1.81 REQUIRED COMPONENTS json)
 find_package(OpenSSL REQUIRED)
-find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
-
-# Try to find spdlog
 find_package(spdlog REQUIRED)
-
-# nlohmann/json
 find_package(nlohmann_json REQUIRED)
 
-# libsodium for crypto
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SODIUM REQUIRED libsodium)
+# SQLite3 - only needed for controller
+if(BUILD_CONTROLLER)
+    find_package(SQLite3 REQUIRED)
+endif()
+
+# libsodium - platform specific finding
+if(WIN32)
+    # vcpkg handles this
+    find_package(unofficial-sodium CONFIG REQUIRED)
+    set(SODIUM_LIBRARIES unofficial-sodium::sodium)
+    set(SODIUM_INCLUDE_DIRS "")
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SODIUM REQUIRED libsodium)
+endif()
 
 # jwt-cpp (header-only, bundled in third_party)
 set(JWT_CPP_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jwt-cpp/include)
 set(PICOJSON_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/picojson/include)
 
-# Common library
+# Wintun for Windows client
+if(WIN32 AND BUILD_CLIENT)
+    set(WINTUN_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/wintun)
+endif()
+
+# =============================================================================
+# Common Library
+# =============================================================================
 add_library(edgelink-common STATIC
     src/common/protocol.cpp
     src/common/frame.cpp
@@ -67,66 +100,108 @@ target_link_libraries(edgelink-common PUBLIC
     Threads::Threads
 )
 
-# Controller
+if(WIN32)
+    target_link_libraries(edgelink-common PUBLIC
+        ws2_32
+        mswsock
+        bcrypt
+        crypt32
+    )
+endif()
+
+# =============================================================================
+# Controller (Linux only for now)
+# =============================================================================
 if(BUILD_CONTROLLER)
-    add_executable(edgelink-controller
-        src/controller/main.cpp
-        src/controller/commands.cpp
-        src/controller/db/database.cpp
-        src/controller/db/migrations.cpp
-        src/controller/api/http_server.cpp
-        src/controller/api/services.cpp
-        src/controller/api/control_handler.cpp
-        src/controller/services/path_service.cpp
-        src/controller/builtin_relay.cpp
-        src/controller/builtin_stun.cpp
-    )
+    if(WIN32)
+        message(STATUS "Controller build is disabled on Windows")
+    else()
+        add_executable(edgelink-controller
+            src/controller/main.cpp
+            src/controller/commands.cpp
+            src/controller/db/database.cpp
+            src/controller/db/migrations.cpp
+            src/controller/api/http_server.cpp
+            src/controller/api/services.cpp
+            src/controller/api/control_handler.cpp
+            src/controller/services/path_service.cpp
+            src/controller/builtin_relay.cpp
+            src/controller/builtin_stun.cpp
+        )
 
-    target_link_libraries(edgelink-controller PRIVATE
-        edgelink-common
-        SQLite::SQLite3
-    )
+        target_link_libraries(edgelink-controller PRIVATE
+            edgelink-common
+            SQLite::SQLite3
+        )
+    endif()
 endif()
 
-# Relay/STUN Server
+# =============================================================================
+# Relay/STUN Server (Linux only for now)
+# =============================================================================
 if(BUILD_SERVER)
-    add_executable(edgelink-server
-        src/server/main.cpp
-        src/server/relay_server.cpp
-        src/server/relay_session.cpp
-        src/server/stun_server.cpp
-        src/server/controller_client.cpp
-        src/server/mesh_manager.cpp
-        src/server/mesh_client.cpp
-        src/server/mesh_session.cpp
-        src/server/node_location_cache.cpp
-    )
+    if(WIN32)
+        message(STATUS "Server build is disabled on Windows")
+    else()
+        add_executable(edgelink-server
+            src/server/main.cpp
+            src/server/relay_server.cpp
+            src/server/relay_session.cpp
+            src/server/stun_server.cpp
+            src/server/controller_client.cpp
+            src/server/mesh_manager.cpp
+            src/server/mesh_client.cpp
+            src/server/mesh_session.cpp
+            src/server/node_location_cache.cpp
+        )
 
-    target_link_libraries(edgelink-server PRIVATE
-        edgelink-common
-    )
+        target_link_libraries(edgelink-server PRIVATE
+            edgelink-common
+        )
+    endif()
 endif()
 
-# Client
+# =============================================================================
+# Client (Cross-platform)
+# =============================================================================
 if(BUILD_CLIENT)
+    # Platform-specific TUN source
+    if(WIN32)
+        set(TUN_SOURCE src/client/tun_windows.cpp)
+    elseif(APPLE)
+        set(TUN_SOURCE src/client/tun_macos.cpp)
+    else()
+        set(TUN_SOURCE src/client/tun.cpp)
+    endif()
+
     add_executable(edgelink-client
         src/client/main.cpp
         src/client/control_channel.cpp
         src/client/relay_manager.cpp
         src/client/crypto_engine.cpp
-        src/client/tun.cpp
         src/client/route_manager.cpp
         src/client/endpoint_manager.cpp
         src/client/p2p_manager.cpp
         src/client/client.cpp
+        ${TUN_SOURCE}
     )
 
     target_link_libraries(edgelink-client PRIVATE
         edgelink-common
     )
+
+    if(WIN32)
+        target_include_directories(edgelink-client PRIVATE ${WINTUN_INCLUDE_DIR})
+        target_link_libraries(edgelink-client PRIVATE
+            iphlpapi
+            ntdll
+        )
+    endif()
 endif()
 
+# =============================================================================
 # Tests
+# =============================================================================
 if(BUILD_TESTS)
     enable_testing()
     find_package(GTest QUIET)
@@ -144,17 +219,21 @@ if(BUILD_TESTS)
         
         include(GoogleTest)
         gtest_discover_tests(edgelink-tests)
+    else()
+        message(STATUS "GTest not found, tests will not be built")
     endif()
 endif()
 
+# =============================================================================
 # Install
-if(BUILD_CONTROLLER)
+# =============================================================================
+if(BUILD_CONTROLLER AND NOT WIN32)
     install(TARGETS edgelink-controller
         RUNTIME DESTINATION bin
     )
 endif()
 
-if(BUILD_SERVER)
+if(BUILD_SERVER AND NOT WIN32)
     install(TARGETS edgelink-server
         RUNTIME DESTINATION bin
     )
@@ -170,3 +249,16 @@ install(DIRECTORY config/
     DESTINATION etc/edgelink
     FILES_MATCHING PATTERN "*.example.json"
 )
+
+# =============================================================================
+# Summary
+# =============================================================================
+message(STATUS "")
+message(STATUS "EdgeLink Build Configuration:")
+message(STATUS "  Platform:    ${EDGELINK_PLATFORM}")
+message(STATUS "  Build Type:  ${CMAKE_BUILD_TYPE}")
+message(STATUS "  Controller:  ${BUILD_CONTROLLER}")
+message(STATUS "  Server:      ${BUILD_SERVER}")
+message(STATUS "  Client:      ${BUILD_CLIENT}")
+message(STATUS "  Tests:       ${BUILD_TESTS}")
+message(STATUS "")
