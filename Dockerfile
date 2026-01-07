@@ -16,25 +16,19 @@ RUN apk add --no-cache \
     pkgconfig \
     linux-headers \
     boost-dev \
-    boost-json \
     openssl-dev \
-    openssl-libs-static \
     sqlite-dev \
-    sqlite-static \
     spdlog-dev \
+    fmt-dev \
     nlohmann-json \
-    libsodium-dev \
-    libsodium-static
+    libsodium-dev
 
 WORKDIR /build
 COPY . .
 
-# Build with static linking
+# Build (dynamic linking)
 RUN cmake -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_EXE_LINKER_FLAGS="-static" \
-    -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
-    -DBUILD_SHARED_LIBS=OFF \
     -DBUILD_CONTROLLER=ON \
     -DBUILD_SERVER=ON \
     -DBUILD_CLIENT=ON \
@@ -47,7 +41,16 @@ RUN cmake -B build -G Ninja \
 # -----------------------------------------------------------------------------
 FROM alpine:3.20 AS controller
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    libstdc++ \
+    boost1.84-json \
+    openssl \
+    sqlite-libs \
+    spdlog \
+    fmt \
+    libsodium
 
 WORKDIR /app
 
@@ -66,7 +69,15 @@ CMD ["-c", "/app/config/controller.json"]
 # -----------------------------------------------------------------------------
 FROM alpine:3.20 AS server
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    libstdc++ \
+    boost1.84-json \
+    openssl \
+    spdlog \
+    fmt \
+    libsodium
 
 WORKDIR /app
 
@@ -85,7 +96,17 @@ CMD ["-c", "/app/config/server.json"]
 # -----------------------------------------------------------------------------
 FROM alpine:3.20 AS client
 
-RUN apk add --no-cache ca-certificates tzdata iproute2 iptables
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    libstdc++ \
+    boost1.84-json \
+    openssl \
+    spdlog \
+    fmt \
+    libsodium \
+    iproute2 \
+    iptables
 
 WORKDIR /app
 

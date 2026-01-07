@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.20...3.31)
 project(edgelink VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -50,6 +50,15 @@ endif()
 # =============================================================================
 # Dependencies
 # =============================================================================
+
+# Force static libraries when BUILD_SHARED_LIBS is OFF
+if(NOT BUILD_SHARED_LIBS)
+    set(Boost_USE_STATIC_LIBS ON)
+    set(Boost_USE_STATIC_RUNTIME ON)
+    set(OPENSSL_USE_STATIC_LIBS ON)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+endif()
+
 find_package(Boost 1.81 REQUIRED COMPONENTS json)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
@@ -113,6 +122,15 @@ target_link_libraries(edgelink-common PUBLIC
     ${SODIUM_LIBRARIES}
     Threads::Threads
 )
+
+# Additional static linking dependencies
+if(NOT BUILD_SHARED_LIBS AND NOT WIN32)
+    # For fully static builds on Linux/Alpine
+    target_link_libraries(edgelink-common PUBLIC
+        $<$<BOOL:${UNIX}>:dl>
+        $<$<BOOL:${UNIX}>:z>
+    )
+endif()
 
 if(WIN32)
     target_link_libraries(edgelink-common PUBLIC
