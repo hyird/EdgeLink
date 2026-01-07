@@ -51,12 +51,14 @@ endif()
 # Dependencies
 # =============================================================================
 
-# Force static libraries when BUILD_SHARED_LIBS is OFF
-if(NOT BUILD_SHARED_LIBS)
-    set(Boost_USE_STATIC_LIBS ON)
-    set(Boost_USE_STATIC_RUNTIME ON)
-    set(OPENSSL_USE_STATIC_LIBS ON)
-    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+# Static linking options (only when explicitly enabled via cmake flags)
+# Example: cmake -DBoost_USE_STATIC_LIBS=ON ...
+if(Boost_USE_STATIC_LIBS)
+    message(STATUS "Using static Boost libraries")
+endif()
+
+if(OPENSSL_USE_STATIC_LIBS)
+    message(STATUS "Using static OpenSSL libraries")
 endif()
 
 find_package(Boost 1.81 REQUIRED COMPONENTS json)
@@ -122,15 +124,6 @@ target_link_libraries(edgelink-common PUBLIC
     ${SODIUM_LIBRARIES}
     Threads::Threads
 )
-
-# Additional static linking dependencies
-if(NOT BUILD_SHARED_LIBS AND NOT WIN32)
-    # For fully static builds on Linux/Alpine
-    target_link_libraries(edgelink-common PUBLIC
-        $<$<BOOL:${UNIX}>:dl>
-        $<$<BOOL:${UNIX}>:z>
-    )
-endif()
 
 if(WIN32)
     target_link_libraries(edgelink-common PUBLIC
