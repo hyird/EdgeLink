@@ -26,13 +26,14 @@ ControlProtocolHandler::ControlProtocolHandler(std::shared_ptr<Database> db,
 std::string ControlProtocolHandler::handle_message(const std::string& message,
                                                    const std::string& query_string) {
     try {
-        // First message might be empty (just connected), send initial response
+        // First message might be empty (just connected)
+        // Don't try to auto-authenticate from query string - wait for explicit auth message
+        // This ensures auth_key can be included for new node registration
         if (message.empty()) {
-            // Try to authenticate from query string
+            // Just save the machine_key for reference, but don't authenticate yet
             machine_key_ = extract_machine_key(query_string);
-            if (!machine_key_.empty()) {
-                return handle_auth(json{{"machine_key", machine_key_}});
-            }
+            LOG_DEBUG("ControlProtocolHandler: Empty message, machine_key from query: {}...", 
+                      machine_key_.empty() ? "(none)" : machine_key_.substr(0, 10));
             return "";
         }
         
@@ -113,6 +114,12 @@ std::string ControlProtocolHandler::handle_auth(const json& msg) {
     
     // Check for auth_key (pre-authorization key)
     std::string auth_key = msg.value("auth_key", "");
+    
+    // Debug: log what we received
+    LOG_DEBUG("ControlProtocolHandler: Received auth request - machine_key: {}..., auth_key: {}, msg_keys: {}", 
+              key.substr(0, 10),
+              auth_key.empty() ? "(empty)" : auth_key.substr(0, 8) + "...",
+              msg.dump().substr(0, 200));
     
     // Look up node by machine key
     auto node_opt = db_->get_node_by_machine_key(key);

@@ -512,6 +512,9 @@ void ControlChannel::do_authenticate() {
     
     std::string payload = auth_data.dump();
     
+    // Debug: log the full message being sent
+    LOG_DEBUG("ControlChannel: Sending auth request: {}", payload);
+    
     // Send as text (not binary Frame)
     send_json(payload);
     
