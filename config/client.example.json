@@ -3,6 +3,7 @@
     "machine_key_pub": "",
     "machine_key_priv": "",
     "auth_key": "",
-    "tun_name": "wss0",
+    "tun_name": "edgelink0",
+    "mtu": 1400,
     "log_level": "info"
 }

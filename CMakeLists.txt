@@ -188,71 +188,8 @@ endif()
 # Client (Cross-platform)
 # =============================================================================
 if(BUILD_CLIENT)
-    # Platform-specific TUN source
-    if(WIN32)
-        set(TUN_SOURCE 
-            src/client/tun_windows.cpp
-            src/client/wintun/wintun_static.c
-        )
-        
-        # Optionally embed wintun driver files (.sys, .inf, .cat)
-        # Use: cmake -DWINTUN_DRIVER_DIR=/path/to/wintun/
-        if(DEFINED WINTUN_DRIVER_DIR AND EXISTS "${WINTUN_DRIVER_DIR}")
-            message(STATUS "Embedding wintun driver from: ${WINTUN_DRIVER_DIR}")
-            
-            # Determine architecture
-            if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-                if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
-                    set(WINTUN_ARCH "arm64")
-                else()
-                    set(WINTUN_ARCH "amd64")
-                endif()
-            else()
-                set(WINTUN_ARCH "x86")
-            endif()
-            
-            # Generate resource file for driver embedding
-            set(WINTUN_RC_FILE "${CMAKE_CURRENT_BINARY_DIR}/wintun_driver.rc")
-            file(WRITE ${WINTUN_RC_FILE}
-                "// Embedded Wintun driver files\n"
-                "#define IDR_WINTUN_AMD64_SYS 201\n"
-                "#define IDR_WINTUN_AMD64_INF 202\n"
-                "#define IDR_WINTUN_AMD64_CAT 203\n"
-                "#define IDR_WINTUN_ARM64_SYS 211\n"
-                "#define IDR_WINTUN_ARM64_INF 212\n"
-                "#define IDR_WINTUN_ARM64_CAT 213\n"
-            )
-            
-            # Add resource entries if files exist
-            if(EXISTS "${WINTUN_DRIVER_DIR}/wintun.sys")
-                file(APPEND ${WINTUN_RC_FILE}
-                    "IDR_WINTUN_${WINTUN_ARCH}_SYS RCDATA \"${WINTUN_DRIVER_DIR}/wintun.sys\"\n"
-                )
-            endif()
-            if(EXISTS "${WINTUN_DRIVER_DIR}/wintun.inf")
-                file(APPEND ${WINTUN_RC_FILE}
-                    "IDR_WINTUN_${WINTUN_ARCH}_INF RCDATA \"${WINTUN_DRIVER_DIR}/wintun.inf\"\n"
-                )
-            endif()
-            if(EXISTS "${WINTUN_DRIVER_DIR}/wintun.cat")
-                file(APPEND ${WINTUN_RC_FILE}
-                    "IDR_WINTUN_${WINTUN_ARCH}_CAT RCDATA \"${WINTUN_DRIVER_DIR}/wintun.cat\"\n"
-                )
-            endif()
-            
-            list(APPEND TUN_SOURCE ${WINTUN_RC_FILE})
-            set(EDGELINK_WINTUN_EMBEDDED TRUE)
-        else()
-            message(STATUS "Wintun driver not embedded. Will use system-installed driver.")
-            message(STATUS "  To embed: cmake -DWINTUN_DRIVER_DIR=/path/to/wintun/ ...")
-        endif()
-    elseif(APPLE)
-        set(TUN_SOURCE src/client/tun_macos.cpp)
-    else()
-        set(TUN_SOURCE src/client/tun.cpp)
-    endif()
-
-    add_executable(edgelink-client
+    # Common client source files
+    set(CLIENT_SOURCE
         src/client/main.cpp
         src/client/control_channel.cpp
         src/client/relay_manager.cpp
@@ -261,8 +198,38 @@ if(BUILD_CLIENT)
         src/client/endpoint_manager.cpp
         src/client/p2p_manager.cpp
         src/client/client.cpp
-        ${TUN_SOURCE}
     )
+    
+    # Platform-specific TUN source
+    if(WIN32)
+        list(APPEND CLIENT_SOURCE src/client/tun_windows.cpp)
+        
+        # Optionally embed wintun.dll
+        # Use: cmake -DWINTUN_DLL_PATH=/path/to/wintun.dll
+        if(DEFINED WINTUN_DLL_PATH AND EXISTS "${WINTUN_DLL_PATH}")
+            message(STATUS "Embedding wintun.dll from: ${WINTUN_DLL_PATH}")
+            
+            # Generate resource file
+            set(WINTUN_RC_FILE "${CMAKE_CURRENT_BINARY_DIR}/wintun.rc")
+            file(WRITE ${WINTUN_RC_FILE}
+                "// Embedded wintun.dll\n"
+                "#define IDR_WINTUN_DLL 301\n"
+                "IDR_WINTUN_DLL RCDATA \"${WINTUN_DLL_PATH}\"\n"
+            )
+            
+            list(APPEND CLIENT_SOURCE ${WINTUN_RC_FILE})
+            set(EDGELINK_WINTUN_EMBEDDED TRUE)
+        else()
+            message(STATUS "Wintun DLL not embedded. Will load from exe directory or system.")
+            message(STATUS "  To embed: cmake -DWINTUN_DLL_PATH=/path/to/wintun.dll ...")
+        endif()
+    elseif(APPLE)
+        list(APPEND CLIENT_SOURCE src/client/tun_macos.cpp)
+    else()
+        list(APPEND CLIENT_SOURCE src/client/tun.cpp)
+    endif()
+
+    add_executable(edgelink-client ${CLIENT_SOURCE})
 
     target_link_libraries(edgelink-client PRIVATE
         edgelink-common
@@ -276,10 +243,6 @@ if(BUILD_CLIENT)
             iphlpapi
             ntdll
             setupapi
-            cfgmgr32
-            newdev
-            ole32
-            shlwapi
         )
         
         if(EDGELINK_WINTUN_EMBEDDED)

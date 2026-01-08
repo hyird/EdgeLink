@@ -122,8 +122,8 @@ jobs:
       run: |
         Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile "wintun.zip"
         Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-extract"
-        # Set driver directory for embedding
-        echo "WINTUN_DRIVER_DIR=${{ github.workspace }}/wintun-extract/wintun/bin/amd64" >> $env:GITHUB_ENV
+        # wintun.dll location for embedding
+        echo "WINTUN_DLL=${{ github.workspace }}\wintun-extract\wintun\bin\amd64\wintun.dll" >> $env:GITHUB_ENV
 
     - name: Configure CMake (vcpkg x64-windows-static + MSVC /MT)
       run: |
@@ -138,7 +138,7 @@ jobs:
           -DBUILD_SERVER=ON `
           -DBUILD_CLIENT=ON `
           -DBUILD_TESTS=OFF `
-          -DWINTUN_DRIVER_DIR="${{ github.workspace }}/wintun-extract/wintun/bin/amd64"
+          -DWINTUN_DLL_PATH="${{ github.workspace }}\wintun-extract\wintun\bin\amd64\wintun.dll"
 
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} --parallel
@@ -149,8 +149,9 @@ jobs:
         Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-server.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
+        # Include wintun.dll (if not embedded, client will load from same directory)
+        Copy-Item -Path "wintun-extract/wintun/bin/amd64/wintun.dll" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse
-        # Note: wintun driver is statically linked into edgelink-client.exe
         Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-static.zip"
 
     - name: Upload Windows Artifacts

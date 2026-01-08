@@ -8,18 +8,28 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <iostream>
+#include <fstream>
 #include <thread>
 #include <vector>
 #include <filesystem>
+#include <cstdio>
+
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
+#include <unistd.h>
+#endif
 
 using namespace edgelink;
 using namespace edgelink::controller;
 
 void print_usage(const char* prog) {
     std::cout << "EdgeLink Controller\n\n"
-              << "Usage: " << prog << " [options] <command> [args...]\n\n"
+              << "Usage:\n"
+              << "  " << prog << " -c <config.json>           Start controller service\n"
+              << "  " << prog << " <command> [args...]        Run CLI command\n\n"
               << "Commands:\n"
-              << "  serve                 Start controller service (default)\n"
               << "  network <action>      Manage networks (list|create|show|delete)\n"
               << "  node <action>         Manage nodes (list|show|authorize|deauthorize|rename|delete)\n"
               << "  server <action>       Manage servers (list|add|show|enable|disable|token|delete)\n"
@@ -30,18 +40,40 @@ void print_usage(const char* prog) {
               << "  latency               Show latency matrix\n"
               << "  init                  Generate config file\n\n"
               << "Options:\n"
-              << "  -c, --config <file>   Config file (default: controller.json)\n"
-              << "  --db <path>           Database path (overrides config)\n"
+              << "  -c, --config <file>   Config file (starts server)\n"
               << "  -q, --quiet           Suppress log output\n"
               << "  -h, --help            Show help\n\n"
               << "Examples:\n"
-              << "  " << prog << " serve -c controller.json\n"
-              << "  " << prog << " authkey create --network 1 --reusable\n"
+              << "  " << prog << " -c /etc/edgelink/controller.json\n"
+              << "  " << prog << " node list\n"
               << "  " << prog << " node list --online\n"
+              << "  " << prog << " authkey create --network 1 --reusable\n"
+              << "  " << prog << " init --output /etc/edgelink/controller.json\n\n"
+              << "Note: CLI commands require a running controller instance.\n"
               << std::endl;
 }
 
 int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
+    // Write state file for CLI commands
+    const std::string state_file = "/tmp/edgelink-controller.state";
+    {
+        std::ofstream f(state_file);
+        if (f) {
+            f << "{\n";
+            f << "  \"pid\": " << getpid() << ",\n";
+            f << "  \"database\": \"" << config.database.path << "\",\n";
+            f << "  \"jwt_secret\": \"" << config.jwt.secret << "\",\n";
+            f << "  \"http_port\": " << config.http.listen_port << "\n";
+            f << "}\n";
+            LOG_INFO("State file written: {}", state_file);
+        }
+    }
+    
+    // Cleanup state file on exit
+    auto cleanup_state = [&state_file]() {
+        std::remove(state_file.c_str());
+    };
+    
     // Create default network if none exists
     if (db->list_networks().empty()) {
         Network network;
@@ -153,55 +185,36 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
     }
     
     LOG_INFO("Controller shutdown complete");
+    cleanup_state();
     return 0;
 }
 
 int main(int argc, char* argv[]) {
-    std::string config_file = "controller.json";
-    std::string db_path;
+    std::string config_file;
     bool quiet = false;
-    std::string command = "serve";
+    std::string command;
     std::vector<std::string> cmd_args;
-    int cmd_start = -1;  // Index where command starts
     
-    // First pass: find command and options before it
+    // Parse arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-c" || arg == "--config") {
             if (i + 1 < argc) config_file = argv[++i];
-        } else if (arg == "--db") {
-            if (i + 1 < argc) db_path = argv[++i];
         } else if (arg == "-q" || arg == "--quiet") {
             quiet = true;
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
         } else if (arg[0] != '-') {
-            // Found command
-            command = arg;
-            cmd_start = i;
-            break;
-        }
-    }
-    
-    // Second pass: parse options after command (for flexibility)
-    if (cmd_start >= 0) {
-        for (int i = cmd_start + 1; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "-c" || arg == "--config") {
-                if (i + 1 < argc) config_file = argv[++i];
-            } else if (arg == "--db") {
-                if (i + 1 < argc) db_path = argv[++i];
-            } else if (arg == "-q" || arg == "--quiet") {
-                quiet = true;
-            } else {
-                // Collect remaining args for command
-                cmd_args.push_back(arg);
+            // First non-option is the command
+            if (command.empty()) {
+                command = arg;
             }
+            cmd_args.push_back(arg);
+        } else {
+            cmd_args.push_back(arg);
         }
     }
-    // Add command itself to cmd_args for CLI processing
-    cmd_args.insert(cmd_args.begin(), command);
     
     // Initialize logging
     if (quiet) {
@@ -210,60 +223,102 @@ int main(int argc, char* argv[]) {
         log::init_from_env();
     }
     
-    // Load configuration
-    ControllerConfig config;
-    std::filesystem::path config_path = std::filesystem::path(config_file);
-    auto config_opt = ControllerConfig::load(config_path);
-    if (config_opt) {
-        config = *config_opt;
+    // If -c specified without command, start server
+    if (!config_file.empty() && command.empty()) {
+        std::filesystem::path config_path = config_file;
+        auto config_opt = ControllerConfig::load(config_path);
+        if (!config_opt) {
+            std::cerr << "Error: Failed to load configuration from '" << config_file << "'\n";
+            return 1;
+        }
+        
+        auto config = *config_opt;
         LOG_INFO("Configuration loaded from: {}", config_file);
         LOG_INFO("HTTP listen: {}:{}", config.http.listen_address, config.http.listen_port);
         
-        // Resolve relative database path relative to config file directory
+        // Resolve relative database path
         if (!config.database.path.empty()) {
             std::filesystem::path db_path_fs = expand_path(config.database.path);
             if (db_path_fs.is_relative()) {
-                // Make database path relative to config file's directory
                 auto config_dir = std::filesystem::absolute(config_path).parent_path();
                 db_path_fs = config_dir / db_path_fs;
             }
             config.database.path = db_path_fs.string();
-            LOG_INFO("Database path resolved to: {}", config.database.path);
+            LOG_INFO("Database path: {}", config.database.path);
         }
-    } else {
-        std::cerr << "Error: Failed to load configuration from '" << config_file << "'\n\n";
-        std::cerr << "Create a config file or specify one with -c option.\n";
-        std::cerr << "Use 'edgelink-controller init' to generate a sample config.\n\n";
-        print_usage(argv[0]);
-        return 1;
+        
+        // Initialize database
+        auto db = std::make_shared<Database>(config.database);
+        if (!db->initialize()) {
+            std::cerr << "Error: Failed to initialize database: " << config.database.path << "\n";
+            return 1;
+        }
+        
+        LOG_INFO("EdgeLink Controller starting...");
+        return run_server(config, db);
     }
     
-    // Override database path if specified on command line (absolute or relative to cwd)
-    if (!db_path.empty()) {
-        config.database.path = db_path;
-    }
-    
-    // Handle init command before database
+    // Handle init command (doesn't need running instance)
     if (command == "init") {
         ControllerCLI cli(nullptr, "");
         return cli.run(cmd_args);
     }
     
-    // Initialize database
-    if (quiet) log::set_level(spdlog::level::off);
-    auto db = std::make_shared<Database>(config.database);
-    if (!db->initialize()) {
-        std::cerr << "Error: Failed to initialize database\n";
+    // No command and no config - show help
+    if (command.empty()) {
+        print_usage(argv[0]);
         return 1;
     }
     
-    // Route to command
-    if (command == "serve") {
-        if (!quiet) LOG_INFO("EdgeLink Controller starting...");
-        return run_server(config, db);
+    // CLI commands: read state file from running instance
+    const std::string state_file = "/tmp/edgelink-controller.state";
+    std::string db_path;
+    std::string jwt_secret;
+    
+    {
+        std::ifstream f(state_file);
+        if (!f) {
+            std::cerr << "Error: Controller is not running.\n";
+            std::cerr << "Start the controller first: edgelink-controller -c <config.json>\n";
+            return 1;
+        }
+        
+        // Simple JSON parsing for state file
+        std::string content((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+        
+        // Extract database path
+        auto db_pos = content.find("\"database\":");
+        if (db_pos != std::string::npos) {
+            auto start = content.find('"', db_pos + 11) + 1;
+            auto end = content.find('"', start);
+            db_path = content.substr(start, end - start);
+        }
+        
+        // Extract JWT secret
+        auto jwt_pos = content.find("\"jwt_secret\":");
+        if (jwt_pos != std::string::npos) {
+            auto start = content.find('"', jwt_pos + 13) + 1;
+            auto end = content.find('"', start);
+            jwt_secret = content.substr(start, end - start);
+        }
     }
     
-    // CLI commands
-    ControllerCLI cli(db, config.jwt.secret);
+    if (db_path.empty()) {
+        std::cerr << "Error: Invalid state file, cannot determine database path.\n";
+        return 1;
+    }
+    
+    // Initialize database
+    DatabaseConfig db_config;
+    db_config.path = db_path;
+    auto db = std::make_shared<Database>(db_config);
+    if (!db->initialize()) {
+        std::cerr << "Error: Failed to open database: " << db_path << "\n";
+        return 1;
+    }
+    
+    // Run CLI command
+    ControllerCLI cli(db, jwt_secret);
     return cli.run(cmd_args);
 }

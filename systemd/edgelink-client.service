@@ -1,0 +1,23 @@
+[Unit]
+Description=EdgeLink Client
+Documentation=https://github.com/anthropic/edgelink
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/edgelink-client connect -c /etc/edgelink/client.json
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+# TUN device requires root or CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edgelink-client
+
+[Install]
+WantedBy=multi-user.target
