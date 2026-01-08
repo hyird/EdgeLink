@@ -293,11 +293,17 @@ void EndpointManager::send_stun_request(const StunServer& server) {
     spdlog::debug("EndpointManager: Sending STUN request to {}:{}", 
                   server.host, server.port);
     
-    // 解析STUN服务器地址
+    // 解析STUN服务器地址 (强制使用IPv4)
     boost::asio::ip::udp::resolver resolver(ioc_);
     
     try {
-        auto results = resolver.resolve(server.host, std::to_string(server.port));
+        // Force IPv4 resolution since our UDP socket is IPv4
+        boost::asio::ip::udp::resolver::query query(
+            boost::asio::ip::udp::v4(),
+            server.host, 
+            std::to_string(server.port)
+        );
+        auto results = resolver.resolve(query);
         if (results.empty()) {
             spdlog::warn("EndpointManager: Failed to resolve STUN server {}", server.host);
             schedule_stun_refresh();

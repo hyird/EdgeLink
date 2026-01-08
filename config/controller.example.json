@@ -26,7 +26,8 @@
         "server_token": "CHANGE_THIS_TO_A_RANDOM_TOKEN_FOR_RELAY_SERVERS"
     },
     "builtin_relay": {
-        "enabled": true
+        "enabled": true,
+        "external_url": ""
     },
     "builtin_stun": {
         "enabled": true,

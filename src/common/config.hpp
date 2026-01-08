@@ -62,6 +62,8 @@ struct JWTConfig {
 // ============================================================================
 struct BuiltinRelayConfig {
     bool enabled{false};
+    std::string external_url;  // External URL for clients (e.g., "wss://vpn.example.com")
+                               // If empty, uses http listen address
 };
 
 // ============================================================================

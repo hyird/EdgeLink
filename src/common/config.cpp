@@ -111,7 +111,8 @@ boost::json::object ControllerConfig::to_json() const {
             {"server_token", server_token}
         }},
         {"builtin_relay", {
-            {"enabled", builtin_relay.enabled}
+            {"enabled", builtin_relay.enabled},
+            {"external_url", builtin_relay.external_url}
         }},
         {"builtin_stun", {
             {"enabled", builtin_stun.enabled},
@@ -187,6 +188,7 @@ std::optional<ControllerConfig> ControllerConfig::from_json(const boost::json::v
         if (obj.contains("builtin_relay")) {
             const auto& relay = obj.at("builtin_relay").as_object();
             if (relay.contains("enabled")) cfg.builtin_relay.enabled = relay.at("enabled").as_bool();
+            if (relay.contains("external_url")) cfg.builtin_relay.external_url = relay.at("external_url").as_string().c_str();
         }
         
         // Builtin STUN

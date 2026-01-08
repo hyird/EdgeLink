@@ -354,8 +354,20 @@ bool Client::init_crypto_engine() {
     try {
         crypto_engine_ = std::make_shared<CryptoEngine>(node_id_);
         
-        // 如果有预配置的node_key，设置它
-        // 否则CryptoEngine会在需要时自动生成
+        // Generate X25519 key pair for end-to-end encryption
+        // Note: This is separate from the Ed25519 machine key used for authentication
+        std::array<uint8_t, 32> node_priv, node_pub;
+        
+        // Generate random X25519 key pair using libsodium
+        if (crypto_box_keypair(node_pub.data(), node_priv.data()) != 0) {
+            LOG_ERROR("CryptoEngine: Failed to generate X25519 key pair");
+            return false;
+        }
+        
+        // Set the local keys in the crypto engine
+        crypto_engine_->set_local_keys(node_priv, node_pub);
+        
+        LOG_INFO("CryptoEngine: Generated and set local X25519 keys for node {}", node_id_);
         
         return true;
     } catch (const std::exception& e) {

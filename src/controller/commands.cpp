@@ -381,17 +381,33 @@ int ControllerCLI::server_list() {
     
     std::vector<std::vector<std::string>> rows;
     for (const auto& s : servers) {
+        // Parse capabilities for display
+        std::string caps_display = s.type;
+        if (!s.capabilities.empty() && s.capabilities != "[]") {
+            // Extract from JSON array like ["relay","stun"]
+            caps_display = "";
+            if (s.capabilities.find("relay") != std::string::npos) {
+                caps_display += "relay";
+            }
+            if (s.capabilities.find("stun") != std::string::npos) {
+                if (!caps_display.empty()) caps_display += "+";
+                caps_display += "stun";
+            }
+            if (caps_display.empty()) caps_display = s.type;
+        }
+        
         rows.push_back({
             std::to_string(s.id),
             s.name,
-            s.type,
+            caps_display,
             s.region,
             s.url.empty() ? "-" : s.url,
+            s.stun_ip.empty() ? "-" : (s.stun_ip + ":" + std::to_string(s.stun_port)),
             format_bool(s.enabled)
         });
     }
     
-    print_table(rows, {"ID", "Name", "Type", "Region", "URL", "Enabled"});
+    print_table(rows, {"ID", "Name", "Capabilities", "Region", "Relay URL", "STUN", "Enabled"});
     return 0;
 }
 
@@ -433,16 +449,33 @@ int ControllerCLI::server_show(uint32_t id, bool show_token) {
         return 1;
     }
     
-    std::cout << "ID:        " << server->id << "\n";
-    std::cout << "Name:      " << server->name << "\n";
-    std::cout << "Type:      " << server->type << "\n";
-    std::cout << "Region:    " << server->region << "\n";
-    std::cout << "URL:       " << (server->url.empty() ? "-" : server->url) << "\n";
-    std::cout << "STUN IP:   " << (server->stun_ip.empty() ? "-" : server->stun_ip) << "\n";
-    std::cout << "Enabled:   " << format_bool(server->enabled) << "\n";
+    // Parse capabilities
+    std::string caps_display = server->type;
+    if (!server->capabilities.empty() && server->capabilities != "[]") {
+        caps_display = "";
+        if (server->capabilities.find("relay") != std::string::npos) {
+            caps_display += "relay";
+        }
+        if (server->capabilities.find("stun") != std::string::npos) {
+            if (!caps_display.empty()) caps_display += ", ";
+            caps_display += "stun";
+        }
+        if (caps_display.empty()) caps_display = server->type;
+    }
     
-    if (show_token) {
-        std::cout << "Token:     " << server->server_token << "\n";
+    std::cout << "ID:           " << server->id << "\n";
+    std::cout << "Name:         " << server->name << "\n";
+    std::cout << "Type:         " << server->type << "\n";
+    std::cout << "Capabilities: " << caps_display << "\n";
+    std::cout << "Region:       " << server->region << "\n";
+    std::cout << "Relay URL:    " << (server->url.empty() ? "-" : server->url) << "\n";
+    std::cout << "STUN IP:      " << (server->stun_ip.empty() ? "-" : server->stun_ip) << "\n";
+    std::cout << "STUN IP2:     " << (server->stun_ip2.empty() ? "-" : server->stun_ip2) << "\n";
+    std::cout << "STUN Port:    " << server->stun_port << "\n";
+    std::cout << "Enabled:      " << format_bool(server->enabled) << "\n";
+    
+    if (show_token && !server->server_token.empty()) {
+        std::cout << "Token:        " << server->server_token << "\n";
     }
     
     return 0;

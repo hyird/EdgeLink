@@ -99,33 +99,6 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
         LOG_INFO("Created default network with ID {}", id);
     }
     
-    // Register built-in services in database
-    auto register_builtin_server = [&db](const std::string& name, const std::string& type,
-                                          const std::string& url, const std::string& stun_ip,
-                                          uint16_t stun_port) {
-        // Check if already exists
-        auto servers = db->list_servers();
-        for (const auto& s : servers) {
-            if (s.name == name && s.type == "builtin") {
-                return; // Already registered
-            }
-        }
-        
-        Server srv;
-        srv.name = name;
-        srv.type = "builtin";
-        srv.region = "local";
-        srv.url = url;
-        srv.stun_ip = stun_ip;
-        srv.stun_port = stun_port;
-        srv.enabled = true;
-        
-        uint32_t id = db->create_server(srv);
-        if (id > 0) {
-            LOG_INFO("Registered built-in server '{}' (ID: {})", name, id);
-        }
-    };
-    
     // Setup I/O context
     unsigned int num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0) num_threads = 4;
@@ -142,11 +115,6 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
             ioc, config.builtin_relay, db, config.jwt.secret);
         server.set_builtin_relay(builtin_relay.get());
         
-        // Register in database
-        std::string relay_url = "ws://localhost:" + std::to_string(config.http.listen_port) + 
-                                paths::WS_DATA;
-        register_builtin_server("builtin-relay", "builtin", relay_url, "", 0);
-        
         LOG_INFO("Built-in Relay enabled (path: {})", paths::WS_DATA);
     }
     
@@ -159,16 +127,68 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
         builtin_stun = std::make_unique<BuiltinSTUN>(ioc, config.builtin_stun);
         builtin_stun->start();
         
-        // Register in database
-        uint16_t stun_port = 3478;
-        auto colon_pos = config.builtin_stun.listen.find(':');
-        if (colon_pos != std::string::npos) {
-            stun_port = static_cast<uint16_t>(std::stoul(config.builtin_stun.listen.substr(colon_pos + 1)));
-        }
-        register_builtin_server("builtin-stun", "builtin", "", 
-                                config.builtin_stun.external_ip, stun_port);
-        
         LOG_INFO("Built-in STUN enabled ({})", config.builtin_stun.listen);
+    }
+    
+    // Register combined built-in server in database (if relay or stun is enabled)
+    if (config.builtin_relay.enabled || config.builtin_stun.enabled) {
+        // Check if already exists
+        auto servers = db->list_servers();
+        bool exists = false;
+        for (const auto& s : servers) {
+            if (s.name == "builtin" && s.type == "builtin") {
+                exists = true;
+                break;
+            }
+        }
+        
+        if (!exists) {
+            Server srv;
+            srv.name = "builtin";
+            srv.type = "builtin";
+            srv.region = "local";
+            
+            // Determine relay URL
+            if (config.builtin_relay.enabled) {
+                if (!config.builtin_relay.external_url.empty()) {
+                    // Use configured external URL (for reverse proxy scenarios)
+                    srv.url = config.builtin_relay.external_url;
+                } else {
+                    // Default: use http listen address (without /ws/data path)
+                    std::string scheme = config.http.enable_tls ? "wss" : "ws";
+                    srv.url = scheme + "://localhost:" + std::to_string(config.http.listen_port);
+                }
+            }
+            
+            // STUN info
+            if (config.builtin_stun.enabled) {
+                srv.stun_ip = config.builtin_stun.external_ip;
+                srv.stun_ip2 = config.builtin_stun.secondary_ip;
+                
+                uint16_t stun_port = 3478;
+                auto colon_pos = config.builtin_stun.listen.find(':');
+                if (colon_pos != std::string::npos) {
+                    stun_port = static_cast<uint16_t>(std::stoul(config.builtin_stun.listen.substr(colon_pos + 1)));
+                }
+                srv.stun_port = stun_port;
+            }
+            
+            // Capabilities
+            std::string caps = "[";
+            if (config.builtin_relay.enabled) caps += "\"relay\"";
+            if (config.builtin_relay.enabled && config.builtin_stun.enabled) caps += ",";
+            if (config.builtin_stun.enabled) caps += "\"stun\"";
+            caps += "]";
+            srv.capabilities = caps;
+            
+            srv.enabled = true;
+            
+            uint32_t id = db->create_server(srv);
+            if (id > 0) {
+                LOG_INFO("Registered built-in server (ID: {}, relay: {}, stun: {})", 
+                         id, config.builtin_relay.enabled, config.builtin_stun.enabled);
+            }
+        }
     }
     
     // Setup signal handling

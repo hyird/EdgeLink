@@ -63,6 +63,7 @@ struct RelayServerInfo {
     std::string host;
     uint16_t port = 443;
     std::string path = "/ws/data";
+    bool use_tls = true;
     uint8_t capabilities = 0;
     bool available = true;
 };

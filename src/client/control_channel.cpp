@@ -51,6 +51,94 @@ static std::vector<uint8_t> decode_base64(const std::string& encoded) {
 }
 
 // ============================================================================
+// URL Parsing Helper
+// ============================================================================
+
+// Parse relay URL: ws://host:port/path or wss://host:port/path
+static bool parse_relay_url(const std::string& url, 
+                            std::string& host, 
+                            uint16_t& port, 
+                            std::string& path,
+                            bool& use_tls) {
+    // Default values
+    host.clear();
+    port = 443;
+    path = paths::WS_DATA;
+    use_tls = true;
+    
+    if (url.empty()) {
+        return false;
+    }
+    
+    size_t pos = 0;
+    
+    // Parse scheme
+    if (url.substr(0, 6) == "wss://") {
+        use_tls = true;
+        port = 443;
+        pos = 6;
+    } else if (url.substr(0, 5) == "ws://") {
+        use_tls = false;
+        port = 80;
+        pos = 5;
+    } else {
+        // No scheme, assume wss://
+        use_tls = true;
+        port = 443;
+    }
+    
+    // Find end of host (: or / or end)
+    size_t host_end = url.find_first_of(":/", pos);
+    if (host_end == std::string::npos) {
+        // Just host, no port or path
+        host = url.substr(pos);
+        return !host.empty();
+    }
+    
+    host = url.substr(pos, host_end - pos);
+    if (host.empty()) {
+        return false;
+    }
+    
+    pos = host_end;
+    
+    // Parse port if present
+    if (pos < url.size() && url[pos] == ':') {
+        pos++;  // skip ':'
+        size_t port_end = url.find('/', pos);
+        std::string port_str;
+        if (port_end == std::string::npos) {
+            port_str = url.substr(pos);
+            pos = url.size();
+        } else {
+            port_str = url.substr(pos, port_end - pos);
+            pos = port_end;
+        }
+        
+        if (!port_str.empty()) {
+            try {
+                int port_val = std::stoi(port_str);
+                if (port_val > 0 && port_val <= 65535) {
+                    port = static_cast<uint16_t>(port_val);
+                }
+            } catch (...) {
+                // Keep default port
+            }
+        }
+    }
+    
+    // Parse path if present
+    if (pos < url.size() && url[pos] == '/') {
+        path = url.substr(pos);
+        if (path.empty()) {
+            path = paths::WS_DATA;
+        }
+    }
+    
+    return !host.empty();
+}
+
+// ============================================================================
 // Constructor / Destructor
 // ============================================================================
 
@@ -634,14 +722,24 @@ void ControlChannel::process_json_message(const json& msg) {
                 // Parse relays
                 if (msg.contains("relays") && msg["relays"].is_array()) {
                     for (const auto& r : msg["relays"]) {
+                        std::string url = r.value("url", "");
+                        
+                        // Skip relays without URL (e.g., STUN-only servers)
+                        if (url.empty()) {
+                            continue;
+                        }
+                        
                         RelayServerInfo relay;
                         relay.server_id = r.value("server_id", 0u);
                         relay.name = r.value("name", "");
                         relay.region = r.value("region", "");
-                        // Parse URL to get host/port
-                        std::string url = r.value("url", "");
-                        // Simple parsing for now
-                        relay.host = url;
+                        
+                        // Parse URL: ws://host:port/path or wss://host:port/path
+                        if (!parse_relay_url(url, relay.host, relay.port, relay.path, relay.use_tls)) {
+                            LOG_WARN("ControlChannel: Invalid relay URL: {}", url);
+                            continue;
+                        }
+                        
                         config.relays.push_back(relay);
                     }
                 }
@@ -714,12 +812,23 @@ void ControlChannel::process_json_message(const json& msg) {
             // Parse relays
             if (msg.contains("relays") && msg["relays"].is_array()) {
                 for (const auto& r : msg["relays"]) {
+                    std::string url = r.value("url", "");
+                    
+                    // Skip relays without URL
+                    if (url.empty()) {
+                        continue;
+                    }
+                    
                     RelayServerInfo relay;
                     relay.server_id = r.value("server_id", 0u);
                     relay.name = r.value("name", "");
                     relay.region = r.value("region", "");
-                    std::string url = r.value("url", "");
-                    relay.host = url;
+                    
+                    if (!parse_relay_url(url, relay.host, relay.port, relay.path, relay.use_tls)) {
+                        LOG_WARN("ControlChannel: Invalid relay URL: {}", url);
+                        continue;
+                    }
+                    
                     config.relays.push_back(relay);
                 }
             }

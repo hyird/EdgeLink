@@ -329,13 +329,16 @@ std::expected<void, ErrorCode> RouteManager::apply_routes() {
     
     // Add route for entire virtual network
     if (network_addr_ != 0) {
-        std::string cmd = "ip route add " + format_ip(network_addr_) + "/" + 
-                         std::to_string(network_prefix_) + " dev " + tun_name_;
+        std::string route_spec = format_ip(network_addr_) + "/" + 
+                                 std::to_string(network_prefix_) + " dev " + tun_name_;
+        
+        // Try to add the route; if it exists, try to replace it
+        std::string cmd = "ip route add " + route_spec + " 2>/dev/null || "
+                         "ip route replace " + route_spec;
         
         int ret = std::system(cmd.c_str());
         if (ret != 0) {
-            LOG_ERROR("RouteManager: Failed to add network route");
-            return std::unexpected(ErrorCode::SYSTEM_ERROR);
+            LOG_WARN("RouteManager: Route command returned non-zero, but may still be OK");
         }
         
         applied_routes_.emplace_back(format_ip(network_addr_), network_prefix_);

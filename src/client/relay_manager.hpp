@@ -35,14 +35,18 @@ using tcp = net::ip::tcp;
 // ============================================================================
 struct RelayConnection {
     using WsStream = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
+    using WsStreamPlain = websocket::stream<beast::tcp_stream>;
     
     uint32_t server_id = 0;
     std::string host;
     uint16_t port = 443;
     std::string path;
     std::string region;
+    bool use_tls = true;
     
+    // TLS or plain WebSocket (only one will be active)
     std::unique_ptr<WsStream> ws;
+    std::unique_ptr<WsStreamPlain> ws_plain;
     beast::flat_buffer read_buffer;
     
     enum class State {
@@ -72,6 +76,15 @@ struct RelayConnection {
     
     // Reconnection
     uint32_t reconnect_attempts = 0;
+    
+    // Helper to check if connected
+    bool is_open() const {
+        if (use_tls) {
+            return ws && ws->is_open();
+        } else {
+            return ws_plain && ws_plain->is_open();
+        }
+    }
 };
 
 // ============================================================================
@@ -212,6 +225,7 @@ private:
     void on_relay_resolve(std::shared_ptr<RelayConnection> relay, beast::error_code ec,
                           tcp::resolver::results_type results);
     void on_relay_connect(std::shared_ptr<RelayConnection> relay, beast::error_code ec);
+    void on_relay_connect_plain(std::shared_ptr<RelayConnection> relay, beast::error_code ec);
     void on_relay_ssl_handshake(std::shared_ptr<RelayConnection> relay, beast::error_code ec);
     void on_relay_ws_handshake(std::shared_ptr<RelayConnection> relay, beast::error_code ec);
     

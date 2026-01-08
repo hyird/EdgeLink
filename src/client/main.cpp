@@ -7,6 +7,7 @@
 #include <csignal>
 #include <iomanip>
 #include <ctime>
+#include <memory>
 
 #ifdef _WIN32
     #include <io.h>
@@ -264,18 +265,20 @@ int cmd_connect(const ClientConfig& config, bool daemon_mode) {
     }
     
     try {
-        Client client(config);
-        g_client = &client;
+        // IMPORTANT: Client must be created with make_shared because it uses
+        // enable_shared_from_this for async callbacks
+        auto client = std::make_shared<Client>(config);
+        g_client = client.get();
         
         signal(SIGINT, signal_handler);
         signal(SIGTERM, signal_handler);
         
-        if (!client.start()) {
+        if (!client->start()) {
             LOG_ERROR("Failed to start client");
             return 1;
         }
         
-        client.run();
+        client->run();
         LOG_INFO("Client stopped");
         
     } catch (const std::exception& e) {

@@ -1,7 +1,7 @@
 {
     "http": {
         "address": "0.0.0.0",
-        "port": 8080,
+        "port": 8888,
         "enable_tls": false
     },
     "database": {
@@ -10,14 +10,25 @@
     },
     "jwt": {
         "secret": "test-jwt-secret-key-for-development-only-change-in-prod",
-        "issuer": "edgelink-controller",
-        "access_token_expiry": 3600,
-        "refresh_token_expiry": 604800,
-        "relay_token_expiry": 86400
+        "algorithm": "HS256"
     },
-    "logging": {
-        "level": "debug",
-        "file": "",
-        "console": true
+    "tokens": {
+        "auth_expire_hours": 24,
+        "relay_expire_hours": 1.5
+    },
+    "security": {
+        "node_key_rotate_hours": 24,
+        "require_authorization": false,
+        "server_token": "dev-server-token"
+    },
+    "builtin_relay": {
+        "enabled": true,
+        "external_url": ""
+    },
+    "builtin_stun": {
+        "enabled": true,
+        "listen": "0.0.0.0:3478",
+        "external_ip": "",
+        "secondary_ip": ""
     }
 }

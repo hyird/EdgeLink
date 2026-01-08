@@ -85,16 +85,18 @@ void RelayManager::update_relays(const std::vector<RelayServerInfo>& relays) {
             relay->port = info.port;
             relay->path = info.path;
             relay->region = info.region;
+            relay->use_tls = info.use_tls;
             relays_[info.server_id] = relay;
             
-            LOG_INFO("RelayManager: Added relay {} ({}:{})", 
-                     info.server_id, info.host, info.port);
+            LOG_INFO("RelayManager: Added relay {} ({}:{}, TLS: {})", 
+                     info.server_id, info.host, info.port, info.use_tls);
         } else {
             // Update existing
             it->second->host = info.host;
             it->second->port = info.port;
             it->second->path = info.path;
             it->second->region = info.region;
+            it->second->use_tls = info.use_tls;
         }
     }
 }
@@ -153,9 +155,11 @@ void RelayManager::disconnect_relay(uint32_t relay_id) {
         relay = it->second;
     }
     
-    if (relay->ws && relay->ws->is_open()) {
-        beast::error_code ec;
+    beast::error_code ec;
+    if (relay->use_tls && relay->ws && relay->ws->is_open()) {
         relay->ws->close(websocket::close_code::normal, ec);
+    } else if (!relay->use_tls && relay->ws_plain && relay->ws_plain->is_open()) {
+        relay->ws_plain->close(websocket::close_code::normal, ec);
     }
     
     relay->state = RelayConnection::State::DISCONNECTED;
@@ -173,9 +177,11 @@ void RelayManager::disconnect_all() {
     std::lock_guard<std::mutex> lock(relays_mutex_);
     
     for (auto& [id, relay] : relays_) {
-        if (relay->ws && relay->ws->is_open()) {
-            beast::error_code ec;
+        beast::error_code ec;
+        if (relay->use_tls && relay->ws && relay->ws->is_open()) {
             relay->ws->close(websocket::close_code::normal, ec);
+        } else if (!relay->use_tls && relay->ws_plain && relay->ws_plain->is_open()) {
+            relay->ws_plain->close(websocket::close_code::normal, ec);
         }
         relay->state = RelayConnection::State::DISCONNECTED;
     }
@@ -217,19 +223,64 @@ void RelayManager::on_relay_resolve(std::shared_ptr<RelayConnection> relay, beas
     
     auto ep = results.begin()->endpoint();
     
-    relay->ws = std::make_unique<RelayConnection::WsStream>(ioc_, ssl_ctx_);
-    
-    // Set SNI hostname
-    if (!SSL_set_tlsext_host_name(relay->ws->next_layer().native_handle(), relay->host.c_str())) {
-        LOG_ERROR("RelayManager: Failed to set SNI for relay {}", relay->server_id);
+    if (relay->use_tls) {
+        // TLS connection
+        relay->ws = std::make_unique<RelayConnection::WsStream>(ioc_, ssl_ctx_);
+        relay->ws_plain.reset();
+        
+        // Set SNI hostname
+        if (!SSL_set_tlsext_host_name(relay->ws->next_layer().native_handle(), relay->host.c_str())) {
+            LOG_ERROR("RelayManager: Failed to set SNI for relay {}", relay->server_id);
+        }
+        
+        beast::get_lowest_layer(*relay->ws).expires_after(std::chrono::seconds(30));
+        
+        beast::get_lowest_layer(*relay->ws).async_connect(
+            ep,
+            [self = shared_from_this(), relay](beast::error_code ec) {
+                self->on_relay_connect(relay, ec);
+            }
+        );
+    } else {
+        // Plain WebSocket (no TLS)
+        relay->ws_plain = std::make_unique<RelayConnection::WsStreamPlain>(ioc_);
+        relay->ws.reset();
+        
+        beast::get_lowest_layer(*relay->ws_plain).expires_after(std::chrono::seconds(30));
+        
+        beast::get_lowest_layer(*relay->ws_plain).async_connect(
+            ep,
+            [self = shared_from_this(), relay](beast::error_code ec) {
+                self->on_relay_connect_plain(relay, ec);
+            }
+        );
+    }
+}
+
+void RelayManager::on_relay_connect_plain(std::shared_ptr<RelayConnection> relay, beast::error_code ec) {
+    if (ec) {
+        LOG_ERROR("RelayManager: TCP connect failed for relay {}: {}", relay->server_id, ec.message());
+        schedule_relay_reconnect(relay);
+        return;
     }
     
-    beast::get_lowest_layer(*relay->ws).expires_after(std::chrono::seconds(30));
+    beast::get_lowest_layer(*relay->ws_plain).expires_never();
     
-    beast::get_lowest_layer(*relay->ws).async_connect(
-        ep,
+    relay->ws_plain->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+    
+    // Include relay_token in auth header
+    relay->ws_plain->set_option(websocket::stream_base::decorator(
+        [this](websocket::request_type& req) {
+            req.set(beast::http::field::authorization, "Bearer " + relay_token_);
+            req.set(beast::http::field::user_agent, "edgelink-client/1.0");
+        }
+    ));
+    
+    relay->ws_plain->async_handshake(
+        relay->host,
+        relay->path,
         [self = shared_from_this(), relay](beast::error_code ec) {
-            self->on_relay_connect(relay, ec);
+            self->on_relay_ws_handshake(relay, ec);
         }
     );
 }
@@ -352,12 +403,21 @@ void RelayManager::on_relay_auth_response(std::shared_ptr<RelayConnection> relay
 // ============================================================================
 
 void RelayManager::do_relay_read(std::shared_ptr<RelayConnection> relay) {
-    relay->ws->async_read(
-        relay->read_buffer,
-        [self = shared_from_this(), relay](beast::error_code ec, std::size_t bytes) {
-            self->on_relay_read(relay, ec, bytes);
-        }
-    );
+    if (relay->use_tls && relay->ws) {
+        relay->ws->async_read(
+            relay->read_buffer,
+            [self = shared_from_this(), relay](beast::error_code ec, std::size_t bytes) {
+                self->on_relay_read(relay, ec, bytes);
+            }
+        );
+    } else if (!relay->use_tls && relay->ws_plain) {
+        relay->ws_plain->async_read(
+            relay->read_buffer,
+            [self = shared_from_this(), relay](beast::error_code ec, std::size_t bytes) {
+                self->on_relay_read(relay, ec, bytes);
+            }
+        );
+    }
 }
 
 void RelayManager::on_relay_read(std::shared_ptr<RelayConnection> relay, beast::error_code ec,
@@ -510,17 +570,31 @@ void RelayManager::do_relay_write(std::shared_ptr<RelayConnection> relay) {
     relay->bytes_sent += data.size();
     relay->packets_sent++;
     
-    relay->ws->binary(true);
-    relay->ws->async_write(
-        net::buffer(data),
-        [self = shared_from_this(), relay](beast::error_code ec, std::size_t) {
-            if (ec) {
-                LOG_ERROR("RelayManager: Write error to relay {}: {}", relay->server_id, ec.message());
-                return;
+    if (relay->use_tls && relay->ws) {
+        relay->ws->binary(true);
+        relay->ws->async_write(
+            net::buffer(data),
+            [self = shared_from_this(), relay](beast::error_code ec, std::size_t) {
+                if (ec) {
+                    LOG_ERROR("RelayManager: Write error to relay {}: {}", relay->server_id, ec.message());
+                    return;
+                }
+                self->do_relay_write(relay);
             }
-            self->do_relay_write(relay);
-        }
-    );
+        );
+    } else if (!relay->use_tls && relay->ws_plain) {
+        relay->ws_plain->binary(true);
+        relay->ws_plain->async_write(
+            net::buffer(data),
+            [self = shared_from_this(), relay](beast::error_code ec, std::size_t) {
+                if (ec) {
+                    LOG_ERROR("RelayManager: Write error to relay {}: {}", relay->server_id, ec.message());
+                    return;
+                }
+                self->do_relay_write(relay);
+            }
+        );
+    }
 }
 
 // ============================================================================
@@ -608,12 +682,18 @@ void RelayManager::schedule_relay_reconnect(std::shared_ptr<RelayConnection> rel
 void RelayManager::on_relay_reconnect(std::shared_ptr<RelayConnection> relay) {
     relay->reconnect_attempts++;
     
+    beast::error_code ec;
     if (relay->ws) {
-        beast::error_code ec;
         if (relay->ws->is_open()) {
             relay->ws->close(websocket::close_code::going_away, ec);
         }
         relay->ws.reset();
+    }
+    if (relay->ws_plain) {
+        if (relay->ws_plain->is_open()) {
+            relay->ws_plain->close(websocket::close_code::going_away, ec);
+        }
+        relay->ws_plain.reset();
     }
     
     do_connect_relay(relay);
