@@ -212,6 +212,9 @@ void Client::stop() {
     set_state(ClientState::STOPPING);
     LOG_INFO("Client stopping...");
     
+    // 重置初始化标志
+    initialized_ = false;
+    
     // 停止延迟测量和上报
     latency_report_timer_.cancel();
     if (relay_manager_) {
@@ -276,6 +279,14 @@ bool Client::init_ssl_context() {
 
 bool Client::init_control_channel() {
     try {
+        // Debug: verify auth_key is being passed
+        if (!config_.auth_key.empty()) {
+            LOG_INFO("init_control_channel: auth_key present ({}...)", 
+                     config_.auth_key.substr(0, std::min(size_t(8), config_.auth_key.size())));
+        } else {
+            LOG_WARN("init_control_channel: No auth_key in config");
+        }
+        
         control_channel_ = std::make_shared<ControlChannel>(
             ioc_, ssl_ctx_,
             config_.controller_url,
@@ -486,7 +497,14 @@ bool Client::init_p2p_manager() {
 // ============================================================================
 
 void Client::on_config_received(const ConfigUpdate& config) {
-    LOG_INFO("Received config from controller");
+    // 区分初始配置和增量更新
+    bool is_initial = !initialized_;
+    
+    if (is_initial) {
+        LOG_INFO("Received initial config from controller");
+    } else {
+        LOG_DEBUG("Received config update from controller");
+    }
     
     // 保存节点信息
     node_id_ = control_channel_->node_id();
@@ -494,7 +512,9 @@ void Client::on_config_received(const ConfigUpdate& config) {
     auth_token_ = config.auth_token;
     relay_token_ = config.relay_token;
     
-    LOG_INFO("Node ID: {}, Virtual IP: {}", node_id_, virtual_ip_);
+    if (is_initial) {
+        LOG_INFO("Node ID: {}, Virtual IP: {}", node_id_, virtual_ip_);
+    }
     
     // 初始化其他组件（如果尚未初始化）
     if (!crypto_engine_) {
@@ -561,7 +581,7 @@ void Client::on_config_received(const ConfigUpdate& config) {
         }
     }
     
-    // 更新peer列表
+    // 更新peer列表（初始和增量都需要）
     for (const auto& peer : config.peers) {
         (void)crypto_engine_->add_peer(peer.node_id, peer.node_key_pub);
         route_manager_->add_peer(peer.node_id, peer.virtual_ip);
@@ -593,30 +613,34 @@ void Client::on_config_received(const ConfigUpdate& config) {
                         peer.node_id, endpoints, NatType::UNKNOWN);
                 }
             }
+        } else {
+            route_manager_->set_peer_reachable(peer.node_id, false);
         }
     }
     
-    // 连接relay
-    set_state(ClientState::CONNECTING_RELAYS);
-    
-    // 转换relay信息格式
-    std::vector<RelayServerInfo> relay_infos;
-    for (const auto& relay : config.relays) {
-        RelayServerInfo info;
-        info.server_id = relay.server_id;
-        info.name = relay.name;
-        info.region = relay.region;
-        info.host = relay.host;
-        info.port = relay.port;
-        info.path = relay.path;
-        info.use_tls = relay.use_tls;  // 重要：传递 TLS 设置
-        relay_infos.push_back(info);
+    // 只在初始配置时连接relay和设置状态
+    if (is_initial) {
+        set_state(ClientState::CONNECTING_RELAYS);
+        
+        // 转换relay信息格式
+        std::vector<RelayServerInfo> relay_infos;
+        for (const auto& relay : config.relays) {
+            RelayServerInfo info;
+            info.server_id = relay.server_id;
+            info.name = relay.name;
+            info.region = relay.region;
+            info.host = relay.host;
+            info.port = relay.port;
+            info.path = relay.path;
+            info.use_tls = relay.use_tls;
+            relay_infos.push_back(info);
+        }
+        
+        relay_manager_->update_relays(relay_infos);
+        relay_manager_->connect_all();
     }
     
-    relay_manager_->update_relays(relay_infos);
-    relay_manager_->connect_all();
-    
-    // 更新子网路由
+    // 更新子网路由（初始和增量都需要）
     if (route_manager_ && !config.subnet_routes.empty()) {
         std::vector<RouteEntry> routes;
         for (const auto& sr : config.subnet_routes) {
@@ -643,23 +667,31 @@ void Client::on_config_received(const ConfigUpdate& config) {
         }
         
         route_manager_->update_subnet_routes(routes);
-        LOG_INFO("Updated {} subnet routes from controller", routes.size());
+        if (is_initial) {
+            LOG_INFO("Updated {} subnet routes from controller", routes.size());
+        }
     }
     
-    // 开始接收TUN数据
-    tun_device_->start_reading();
+    // 只在初始配置时完成启动流程
+    if (is_initial) {
+        // 开始接收TUN数据
+        tun_device_->start_reading();
+        
+        // 应用路由
+        (void)route_manager_->apply_routes();
+        
+        set_state(ClientState::RUNNING);
+        LOG_INFO("Client is now running");
+        
+        // 启动延迟上报定时器
+        start_latency_report_timer();
+        
+        // 标记已初始化
+        initialized_ = true;
+    }
     
-    // 应用路由
-    (void)route_manager_->apply_routes();
-    
-    set_state(ClientState::RUNNING);
-    LOG_INFO("Client is now running");
-    
-    // 启动延迟上报定时器
-    start_latency_report_timer();
-    
-    // 启动延迟测量
-    if (relay_manager_) {
+    // 启动延迟测量（如果relay已连接）
+    if (is_initial && relay_manager_) {
         relay_manager_->start_latency_measurements();
     }
 }

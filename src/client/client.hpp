@@ -194,6 +194,7 @@ private:
     
     // 状态
     std::atomic<ClientState> state_{ClientState::STOPPED};
+    bool initialized_ = false;  // 是否已完成初始化
     
     // 统计
     mutable std::mutex stats_mutex_;

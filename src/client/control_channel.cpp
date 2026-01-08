@@ -476,11 +476,16 @@ void ControlChannel::do_authenticate() {
     // Include auth_key if provided (for registration/authorization)
     if (!auth_key_.empty()) {
         auth_data["auth_key"] = auth_key_;
-        LOG_DEBUG("ControlChannel: Including auth_key for registration");
+        LOG_INFO("ControlChannel: Including auth_key for registration ({}...)", 
+                 auth_key_.substr(0, std::min(size_t(8), auth_key_.size())));
+    } else {
+        LOG_WARN("ControlChannel: No auth_key provided - new node registration may fail");
     }
     
     // Include system info for registration
-    #ifdef __linux__
+    #ifdef _WIN32
+    auth_data["os"] = "windows";
+    #elif __linux__
     auth_data["os"] = "linux";
     #elif __APPLE__
     auth_data["os"] = "darwin";
@@ -491,6 +496,10 @@ void ControlChannel::do_authenticate() {
     #ifdef __x86_64__
     auth_data["arch"] = "amd64";
     #elif __aarch64__
+    auth_data["arch"] = "arm64";
+    #elif _M_X64
+    auth_data["arch"] = "amd64";
+    #elif _M_ARM64
     auth_data["arch"] = "arm64";
     #else
     auth_data["arch"] = "unknown";
@@ -813,6 +822,8 @@ void ControlChannel::process_json_message(const json& msg) {
                 }
                 
                 // Start heartbeat
+                reconnect_attempts_ = 0;
+                last_pong_ = std::chrono::steady_clock::now();
                 start_heartbeat();
             } else {
                 std::string error = msg.value("error", "unknown");
@@ -822,6 +833,10 @@ void ControlChannel::process_json_message(const json& msg) {
                 if (callbacks_.on_disconnected) {
                     callbacks_.on_disconnected(ErrorCode::AUTH_FAILED);
                 }
+                
+                // Important: Don't reconnect on auth failure - it won't help
+                // Just disconnect and let the user fix the issue (e.g., provide auth_key)
+                disconnect();
             }
         } else {
             // Config update while connected - parse and notify
@@ -1117,17 +1132,12 @@ void ControlChannel::on_heartbeat_timer() {
         return;
     }
     
-    // Send PING
-    Frame ping;
-    ping.type = FrameType::PING;
-    ping.src_id = node_id_;
-    ping.dst_id = 0;
-    
+    // Send JSON ping (Controller expects JSON format, not binary Frame)
     auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-    ping.payload.resize(8);
-    std::memcpy(ping.payload.data(), &ts, 8);
-    
-    send_frame(std::move(ping));
+    json ping_msg;
+    ping_msg["type"] = "ping";
+    ping_msg["timestamp"] = ts;
+    send_json(ping_msg.dump());
     
     // Reschedule
     start_heartbeat();

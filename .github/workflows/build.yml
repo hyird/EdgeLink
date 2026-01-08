@@ -64,14 +64,8 @@ jobs:
         echo "VCPKG_ROOT=/opt/vcpkg" >> $GITHUB_ENV
         echo "VCPKG_FORCE_SYSTEM_BINARIES=1" >> $GITHUB_ENV
 
-    - name: Cache vcpkg installed packages
-      uses: actions/cache@v4
-      with:
-        path: build/vcpkg_installed
-        key: vcpkg-installed-linux-x64-release-${{ hashFiles('vcpkg.json') }}-${{ steps.vcpkg-hash.outputs.hash }}
-        restore-keys: |
-          vcpkg-installed-linux-x64-release-${{ hashFiles('vcpkg.json') }}-
-          vcpkg-installed-linux-x64-release-
+    # NOTE: vcpkg_installed cache removed - x-gha binary cache handles this
+    # The VCPKG_BINARY_SOURCES env var enables GitHub Actions binary caching
 
     - name: Configure CMake (vcpkg x64-linux-release + musl static)
       run: |
@@ -161,14 +155,9 @@ jobs:
       run: |
         echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
-    - name: Cache vcpkg installed packages
-      uses: actions/cache@v4
-      with:
-        path: build/vcpkg_installed
-        key: vcpkg-installed-windows-x64-static-${{ hashFiles('vcpkg.json') }}-${{ steps.vcpkg-hash.outputs.hash }}
-        restore-keys: |
-          vcpkg-installed-windows-x64-static-${{ hashFiles('vcpkg.json') }}-
-          vcpkg-installed-windows-x64-static-
+    # NOTE: vcpkg_installed cache removed - x-gha binary cache handles this
+    # The VCPKG_BINARY_SOURCES env var enables GitHub Actions binary caching
+    # which is more efficient than caching the installed directory
 
     - name: Cache wintun
       uses: actions/cache@v4
