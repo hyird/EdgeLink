@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "edgelink",
+  "version-string": "0.1.0",
+  "description": "EdgeLink - Distributed Edge Networking",
+  "dependencies": [
+    "boost-asio",
+    "boost-json",
+    "boost-system",
+    "openssl",
+    {
+      "name": "sqlite3",
+      "default-features": false
+    },
+    "spdlog",
+    "nlohmann-json",
+    "libsodium",
+    "jwt-cpp",
+    "grpc",
+    "protobuf",
+    {
+      "name": "gtest",
+      "platform": "!windows"
+    }
+  ],
+  "features": {
+    "tests": {
+      "description": "Build unit tests",
+      "dependencies": ["gtest"]
+    }
+  }
+}

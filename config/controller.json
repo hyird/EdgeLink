@@ -1,0 +1,34 @@
+{
+    "http": {
+        "address": "0.0.0.0",
+        "port": 8888,
+        "enable_tls": false
+    },
+    "database": {
+        "type": "sqlite",
+        "path": "edgelink.db"
+    },
+    "jwt": {
+        "secret": "test-jwt-secret-key-for-development-only-change-in-prod",
+        "algorithm": "HS256"
+    },
+    "tokens": {
+        "auth_expire_hours": 24,
+        "relay_expire_hours": 1.5
+    },
+    "security": {
+        "node_key_rotate_hours": 24,
+        "require_authorization": false,
+        "server_token": "dev-server-token"
+    },
+    "builtin_relay": {
+        "enabled": true,
+        "external_url": ""
+    },
+    "builtin_stun": {
+        "enabled": true,
+        "listen": "0.0.0.0:3478",
+        "external_ip": "",
+        "secondary_ip": ""
+    }
+}
