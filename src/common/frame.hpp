@@ -7,8 +7,24 @@
 
 namespace edgelink {
 
-// All frame/payload types are in the wire:: namespace to avoid conflicts with
-// proto-generated types in the edgelink:: namespace
+// ============================================================================
+// Wire Protocol Types (wire:: namespace)
+// ============================================================================
+// These types are used for the custom binary wire protocol, which is used for:
+// - P2P direct communication between nodes
+// - Relay data forwarding (encapsulated in gRPC streams)
+// - Binary frame serialization for network transmission
+//
+// The proto-generated types (edgelink::*) are used for gRPC communication with:
+// - Controller <-> Client (ControlService)
+// - Controller <-> Server (ServerService)
+// - Client <-> Relay (RelayService)
+//
+// Both type systems coexist because:
+// 1. Wire protocol needs compact binary format for P2P UDP communication
+// 2. gRPC uses Protobuf for structured RPC communication
+// 3. Some messages need both representations for different transport layers
+// ============================================================================
 namespace wire {
 
 // ============================================================================

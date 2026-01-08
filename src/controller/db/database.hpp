@@ -7,9 +7,10 @@
 #include <vector>
 #include <optional>
 #include <memory>
-#include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <variant>
+#include <functional>
 
 namespace edgelink::controller {
 
@@ -267,8 +268,37 @@ public:
 
 private:
     sqlite3* db_{nullptr};
-    mutable std::mutex mutex_;
+    mutable std::shared_mutex mutex_;  // Read-write lock for better concurrency
     DatabaseConfig config_;
+
+    // Prepared statement cache for frequently used queries
+    struct StmtCache {
+        std::unordered_map<std::string, sqlite3_stmt*> stmts;
+        ~StmtCache() {
+            for (auto& [_, stmt] : stmts) {
+                if (stmt) sqlite3_finalize(stmt);
+            }
+        }
+    };
+    mutable StmtCache stmt_cache_;
+    mutable std::mutex cache_mutex_;  // Separate mutex for cache access
+
+    // Get or create a prepared statement (thread-safe)
+    sqlite3_stmt* get_cached_stmt(const std::string& sql) const;
+    void return_stmt(sqlite3_stmt* stmt) const;  // Reset and return to cache
+
+    // RAII wrapper for statement lifecycle
+    class StmtGuard {
+    public:
+        StmtGuard(const Database* db, const std::string& sql)
+            : db_(db), stmt_(db->get_cached_stmt(sql)) {}
+        ~StmtGuard() { if (stmt_ && db_) db_->return_stmt(stmt_); }
+        sqlite3_stmt* get() { return stmt_; }
+        operator bool() const { return stmt_ != nullptr; }
+    private:
+        const Database* db_;
+        sqlite3_stmt* stmt_;
+    };
 
     // Original execute methods (internal use)
     bool execute_sql(const std::string& sql);
@@ -289,7 +319,7 @@ private:
     static Value to_value(std::nullptr_t) { return nullptr; }
 
     // Bind a Value to a sqlite statement
-    void bind_value(sqlite3_stmt* stmt, int index, const Value& value);
+    void bind_value(sqlite3_stmt* stmt, int index, const Value& value) const;
 };
 
 } // namespace edgelink::controller

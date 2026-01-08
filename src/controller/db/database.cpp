@@ -8,6 +8,10 @@
 
 namespace edgelink::controller {
 
+// Helper type aliases for lock guards
+using ReadLock = std::shared_lock<std::shared_mutex>;
+using WriteLock = std::unique_lock<std::shared_mutex>;
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -55,14 +59,70 @@ static std::string ip_to_string(uint32_t ip) {
 Database::Database(const DatabaseConfig& config) : config_(config) {}
 
 Database::~Database() {
+    // Clear statement cache first (before closing db)
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        stmt_cache_.stmts.clear();
+    }
     if (db_) {
         sqlite3_close(db_);
         db_ = nullptr;
     }
 }
 
+// ============================================================================
+// Prepared Statement Cache Implementation
+// ============================================================================
+
+sqlite3_stmt* Database::get_cached_stmt(const std::string& sql) const {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+
+    auto it = stmt_cache_.stmts.find(sql);
+    if (it != stmt_cache_.stmts.end() && it->second != nullptr) {
+        // Found cached statement, return it
+        sqlite3_stmt* stmt = it->second;
+        it->second = nullptr;  // Mark as in-use
+        return stmt;
+    }
+
+    // Create new statement
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        LOG_ERROR("Failed to prepare statement: {} - {}", sqlite3_errmsg(db_), sql);
+        return nullptr;
+    }
+
+    // Store in cache (as nullptr since it's being used)
+    stmt_cache_.stmts[sql] = nullptr;
+    return stmt;
+}
+
+void Database::return_stmt(sqlite3_stmt* stmt) const {
+    if (!stmt) return;
+
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+
+    // Find the entry and return the statement
+    const char* sql = sqlite3_sql(stmt);
+    if (sql) {
+        auto it = stmt_cache_.stmts.find(sql);
+        if (it != stmt_cache_.stmts.end()) {
+            if (it->second == nullptr) {
+                it->second = stmt;  // Return to cache
+                return;
+            }
+        }
+    }
+
+    // If we can't return to cache, finalize it
+    sqlite3_finalize(stmt);
+}
+
 bool Database::initialize() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
     int rc = sqlite3_open_v2(config_.path.c_str(), &db_, flags, nullptr);
@@ -120,7 +180,7 @@ bool Database::execute_sql(const std::string& sql, const std::vector<std::string
 // Generic Query/Execute Implementation
 // ============================================================================
 
-void Database::bind_value(sqlite3_stmt* stmt, int index, const Value& value) {
+void Database::bind_value(sqlite3_stmt* stmt, int index, const Value& value) const {
     std::visit([stmt, index](auto&& v) {
         using T = std::decay_t<decltype(v)>;
         if constexpr (std::is_same_v<T, std::nullptr_t>) {
@@ -136,21 +196,19 @@ void Database::bind_value(sqlite3_stmt* stmt, int index, const Value& value) {
 }
 
 bool Database::execute_impl(const std::string& sql, const std::vector<Value>& params) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);  // Write lock for modifications
 
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-        LOG_ERROR("Failed to prepare statement: {} - {}", sqlite3_errmsg(db_), sql);
+    StmtGuard guard(this, sql);
+    if (!guard) {
         return false;
     }
 
+    sqlite3_stmt* stmt = guard.get();
     for (size_t i = 0; i < params.size(); ++i) {
         bind_value(stmt, static_cast<int>(i + 1), params[i]);
     }
 
     int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-
     if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
         LOG_ERROR("Execute failed: {} - {}", sqlite3_errmsg(db_), sql);
         return false;
@@ -163,15 +221,15 @@ std::vector<Database::Row> Database::query(const std::string& sql) {
 }
 
 std::vector<Database::Row> Database::query_impl(const std::string& sql, const std::vector<Value>& params) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    ReadLock lock(mutex_);  // Read lock for queries
     std::vector<Row> results;
 
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-        LOG_ERROR("Failed to prepare query: {} - {}", sqlite3_errmsg(db_), sql);
+    StmtGuard guard(this, sql);
+    if (!guard) {
         return results;
     }
 
+    sqlite3_stmt* stmt = guard.get();
     for (size_t i = 0; i < params.size(); ++i) {
         bind_value(stmt, static_cast<int>(i + 1), params[i]);
     }
@@ -208,7 +266,6 @@ std::vector<Database::Row> Database::query_impl(const std::string& sql, const st
         results.push_back(std::move(row));
     }
 
-    sqlite3_finalize(stmt);
     return results;
 }
 
@@ -217,7 +274,7 @@ std::vector<Database::Row> Database::query_impl(const std::string& sql, const st
 // ============================================================================
 
 std::optional<Network> Database::get_network(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "SELECT id, name, subnet, description, created_at, updated_at FROM networks WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -245,7 +302,7 @@ std::optional<Network> Database::get_network(uint32_t id) {
 }
 
 std::optional<Network> Database::get_network_by_name(const std::string& name) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "SELECT id, name, subnet, description, created_at, updated_at FROM networks WHERE name = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -273,7 +330,7 @@ std::optional<Network> Database::get_network_by_name(const std::string& name) {
 }
 
 std::vector<Network> Database::list_networks() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<Network> networks;
     
     const char* sql = "SELECT id, name, subnet, description, created_at, updated_at FROM networks ORDER BY id";
@@ -299,7 +356,7 @@ std::vector<Network> Database::list_networks() {
 }
 
 uint32_t Database::create_network(const Network& network) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "INSERT INTO networks (name, subnet, description) VALUES (?, ?, ?)";
     sqlite3_stmt* stmt = nullptr;
@@ -325,7 +382,7 @@ uint32_t Database::create_network(const Network& network) {
 }
 
 bool Database::update_network(const Network& network) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "UPDATE networks SET name = ?, subnet = ?, description = ?, updated_at = ? WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -346,7 +403,7 @@ bool Database::update_network(const Network& network) {
 }
 
 bool Database::delete_network(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "DELETE FROM networks WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -367,7 +424,7 @@ bool Database::delete_network(uint32_t id) {
 // ============================================================================
 
 std::optional<Node> Database::get_node(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         SELECT id, network_id, name, machine_key_pub, node_key_pub, node_key_updated_at,
@@ -411,7 +468,7 @@ std::optional<Node> Database::get_node(uint32_t id) {
 }
 
 std::optional<Node> Database::get_node_by_machine_key(const std::string& machine_key_pub) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         SELECT id, network_id, name, machine_key_pub, node_key_pub, node_key_updated_at,
@@ -455,7 +512,7 @@ std::optional<Node> Database::get_node_by_machine_key(const std::string& machine
 }
 
 std::vector<Node> Database::list_nodes(uint32_t network_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<Node> nodes;
     
     std::string sql = R"(
@@ -505,7 +562,7 @@ std::vector<Node> Database::list_nodes(uint32_t network_id) {
 }
 
 std::vector<Node> Database::list_online_nodes(uint32_t network_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<Node> nodes;
     
     std::string sql = R"(
@@ -555,7 +612,7 @@ std::vector<Node> Database::list_online_nodes(uint32_t network_id) {
 }
 
 uint32_t Database::create_node(const Node& node) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         INSERT INTO nodes (network_id, name, machine_key_pub, node_key_pub, virtual_ip,
@@ -593,7 +650,7 @@ uint32_t Database::create_node(const Node& node) {
 }
 
 bool Database::update_node(const Node& node) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         UPDATE nodes SET name = ?, node_key_pub = ?, hostname = ?, os = ?, arch = ?,
@@ -626,7 +683,7 @@ bool Database::update_node(const Node& node) {
 }
 
 bool Database::delete_node(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "DELETE FROM nodes WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -643,7 +700,7 @@ bool Database::delete_node(uint32_t id) {
 }
 
 bool Database::set_node_online(uint32_t id, bool online) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "UPDATE nodes SET online = ?, last_seen = ?, updated_at = ? WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -664,7 +721,7 @@ bool Database::set_node_online(uint32_t id, bool online) {
 }
 
 bool Database::update_node_key(uint32_t id, const std::string& node_key_pub) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "UPDATE nodes SET node_key_pub = ?, node_key_updated_at = ?, updated_at = ? WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -702,7 +759,7 @@ std::string Database::allocate_virtual_ip(uint32_t network_id) {
     uint32_t num_hosts = (1u << host_bits) - 2; // Exclude network and broadcast
     uint32_t first_host = base_ip + 1; // .1 is often gateway, start from .2
     
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     // Get all used IPs
     const char* sql = "SELECT virtual_ip FROM nodes WHERE network_id = ?";
@@ -740,7 +797,7 @@ std::string Database::allocate_virtual_ip(uint32_t network_id) {
 // ============================================================================
 
 std::vector<NodeEndpoint> Database::get_node_endpoints(uint32_t node_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<NodeEndpoint> endpoints;
     
     const char* sql = R"(
@@ -772,7 +829,7 @@ std::vector<NodeEndpoint> Database::get_node_endpoints(uint32_t node_id) {
 }
 
 bool Database::update_node_endpoints(uint32_t node_id, const std::vector<NodeEndpoint>& endpoints) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     // Delete existing endpoints
     const char* del_sql = "DELETE FROM node_endpoints WHERE node_id = ?";
@@ -816,7 +873,7 @@ bool Database::update_node_endpoints(uint32_t node_id, const std::vector<NodeEnd
 // ============================================================================
 
 std::vector<NodeRoute> Database::get_node_routes(uint32_t node_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<NodeRoute> routes;
     
     const char* sql = R"(
@@ -848,7 +905,7 @@ std::vector<NodeRoute> Database::get_node_routes(uint32_t node_id) {
 }
 
 std::vector<NodeRoute> Database::get_all_routes(uint32_t network_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<NodeRoute> routes;
     
     std::string sql = R"(
@@ -888,7 +945,7 @@ std::vector<NodeRoute> Database::get_all_routes(uint32_t network_id) {
 }
 
 uint32_t Database::create_node_route(const NodeRoute& route) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         INSERT INTO node_routes (node_id, cidr, priority, weight, enabled)
@@ -917,7 +974,7 @@ uint32_t Database::create_node_route(const NodeRoute& route) {
 }
 
 bool Database::update_node_route(const NodeRoute& route) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "UPDATE node_routes SET cidr = ?, priority = ?, weight = ?, enabled = ? WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -938,7 +995,7 @@ bool Database::update_node_route(const NodeRoute& route) {
 }
 
 bool Database::delete_node_route(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "DELETE FROM node_routes WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -959,7 +1016,7 @@ bool Database::delete_node_route(uint32_t id) {
 // ============================================================================
 
 std::optional<Server> Database::get_server(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         SELECT id, name, type, url, region, capabilities, stun_ip, stun_ip2, stun_port,
@@ -998,7 +1055,7 @@ std::optional<Server> Database::get_server(uint32_t id) {
 }
 
 std::vector<Server> Database::list_servers() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<Server> servers;
     
     const char* sql = R"(
@@ -1035,7 +1092,7 @@ std::vector<Server> Database::list_servers() {
 }
 
 std::vector<Server> Database::list_enabled_servers() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<Server> servers;
     
     const char* sql = R"(
@@ -1072,7 +1129,7 @@ std::vector<Server> Database::list_enabled_servers() {
 }
 
 uint32_t Database::create_server(const Server& server) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         INSERT INTO servers (name, type, url, region, capabilities, stun_ip, stun_ip2,
@@ -1107,7 +1164,7 @@ uint32_t Database::create_server(const Server& server) {
 }
 
 bool Database::update_server(const Server& server) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         UPDATE servers SET name = ?, type = ?, url = ?, region = ?, capabilities = ?,
@@ -1138,7 +1195,7 @@ bool Database::update_server(const Server& server) {
 }
 
 bool Database::delete_server(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "DELETE FROM servers WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -1155,7 +1212,7 @@ bool Database::delete_server(uint32_t id) {
 }
 
 bool Database::update_server_heartbeat(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "UPDATE servers SET last_heartbeat = ? WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -1179,7 +1236,7 @@ bool Database::update_server_heartbeat(uint32_t id) {
 bool Database::update_latency(const std::string& src_type, uint32_t src_id,
                               const std::string& dst_type, uint32_t dst_id,
                               uint32_t rtt_ms) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         INSERT INTO latency_records (src_type, src_id, dst_type, dst_id, rtt_ms, recorded_at)
@@ -1207,7 +1264,7 @@ bool Database::update_latency(const std::string& src_type, uint32_t src_id,
 }
 
 std::vector<LatencyRecord> Database::get_latencies() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<LatencyRecord> records;
     
     const char* sql = "SELECT id, src_type, src_id, dst_type, dst_id, rtt_ms, recorded_at FROM latency_records";
@@ -1235,7 +1292,7 @@ std::vector<LatencyRecord> Database::get_latencies() {
 
 std::optional<uint32_t> Database::get_latency(const std::string& src_type, uint32_t src_id,
                                                const std::string& dst_type, uint32_t dst_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "SELECT rtt_ms FROM latency_records WHERE src_type = ? AND src_id = ? AND dst_type = ? AND dst_id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -1264,7 +1321,7 @@ std::optional<uint32_t> Database::get_latency(const std::string& src_type, uint3
 
 bool Database::blacklist_token(const std::string& jti, uint32_t node_id,
                                const std::string& reason, int64_t expires_at) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         INSERT OR REPLACE INTO token_blacklist (jti, node_id, reason, expires_at)
@@ -1287,7 +1344,7 @@ bool Database::blacklist_token(const std::string& jti, uint32_t node_id,
 }
 
 bool Database::is_token_blacklisted(const std::string& jti) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "SELECT 1 FROM token_blacklist WHERE jti = ? AND expires_at > ?";
     sqlite3_stmt* stmt = nullptr;
@@ -1305,7 +1362,7 @@ bool Database::is_token_blacklisted(const std::string& jti) {
 }
 
 std::vector<TokenBlacklistEntry> Database::get_blacklist() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<TokenBlacklistEntry> entries;
     
     const char* sql = "SELECT jti, node_id, reason, expires_at, created_at FROM token_blacklist WHERE expires_at > ?";
@@ -1332,7 +1389,7 @@ std::vector<TokenBlacklistEntry> Database::get_blacklist() {
 }
 
 bool Database::cleanup_blacklist() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "DELETE FROM token_blacklist WHERE expires_at <= ?";
     sqlite3_stmt* stmt = nullptr;
@@ -1353,7 +1410,7 @@ bool Database::cleanup_blacklist() {
 // ============================================================================
 
 std::optional<std::string> Database::get_setting(const std::string& key) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "SELECT value FROM settings WHERE key = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -1374,7 +1431,7 @@ std::optional<std::string> Database::get_setting(const std::string& key) {
 }
 
 bool Database::set_setting(const std::string& key, const std::string& value) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
@@ -1400,7 +1457,7 @@ bool Database::set_setting(const std::string& key, const std::string& value) {
 // ============================================================================
 
 bool Database::update_node_server_connection(uint32_t node_id, uint32_t server_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         INSERT INTO node_server_connections (node_id, server_id, connected_at, last_ping)
@@ -1425,7 +1482,7 @@ bool Database::update_node_server_connection(uint32_t node_id, uint32_t server_i
 }
 
 bool Database::remove_node_server_connection(uint32_t node_id, uint32_t server_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "DELETE FROM node_server_connections WHERE node_id = ? AND server_id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -1443,7 +1500,7 @@ bool Database::remove_node_server_connection(uint32_t node_id, uint32_t server_i
 }
 
 std::vector<uint32_t> Database::get_node_connected_servers(uint32_t node_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<uint32_t> server_ids;
     
     const char* sql = "SELECT server_id FROM node_server_connections WHERE node_id = ?";
@@ -1464,7 +1521,7 @@ std::vector<uint32_t> Database::get_node_connected_servers(uint32_t node_id) {
 }
 
 std::vector<uint32_t> Database::get_server_connected_nodes(uint32_t server_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<uint32_t> node_ids;
     
     const char* sql = "SELECT node_id FROM node_server_connections WHERE server_id = ?";
@@ -1489,7 +1546,7 @@ std::vector<uint32_t> Database::get_server_connected_nodes(uint32_t server_id) {
 // ============================================================================
 
 std::optional<AuthKey> Database::get_auth_key(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         SELECT id, key, network_id, description, reusable, ephemeral, 
@@ -1529,7 +1586,7 @@ std::optional<AuthKey> Database::get_auth_key(uint32_t id) {
 }
 
 std::optional<AuthKey> Database::get_auth_key_by_key(const std::string& key_str) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         SELECT id, key, network_id, description, reusable, ephemeral, 
@@ -1569,7 +1626,7 @@ std::optional<AuthKey> Database::get_auth_key_by_key(const std::string& key_str)
 }
 
 std::vector<AuthKey> Database::list_auth_keys(uint32_t network_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     std::vector<AuthKey> keys;
     
     std::string sql = R"(
@@ -1614,7 +1671,7 @@ std::vector<AuthKey> Database::list_auth_keys(uint32_t network_id) {
 }
 
 uint32_t Database::create_auth_key(const AuthKey& auth_key) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = R"(
         INSERT INTO auth_keys (key, network_id, description, reusable, ephemeral, 
@@ -1657,7 +1714,7 @@ uint32_t Database::create_auth_key(const AuthKey& auth_key) {
 }
 
 bool Database::delete_auth_key(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "DELETE FROM auth_keys WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -1674,7 +1731,7 @@ bool Database::delete_auth_key(uint32_t id) {
 }
 
 bool Database::increment_auth_key_usage(uint32_t id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    WriteLock lock(mutex_);
     
     const char* sql = "UPDATE auth_keys SET used_count = used_count + 1 WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
