@@ -299,7 +299,7 @@ void ControlStreamHandler::send_config() {
 
     // Get network config
     auto network_result = db_->query(
-        "SELECT id, name, cidr FROM networks WHERE id = ?", network_id_);
+        "SELECT id, name, subnet FROM networks WHERE id = ?", network_id_);
 
     if (network_result.empty()) {
         send_error(edgelink::ERROR_INTERNAL, "Network not found");
@@ -312,7 +312,7 @@ void ControlStreamHandler::send_config() {
     auto* config = msg.mutable_config();
     config->set_network_id(std::get<int64_t>(network["id"]));
     config->set_network_name(std::get<std::string>(network["name"]));
-    config->set_subnet(std::get<std::string>(network["cidr"]));
+    config->set_subnet(std::get<std::string>(network["subnet"]));
 
     // Get peers
     auto peers_result = db_->query(
@@ -774,13 +774,13 @@ grpc::Status AdminServiceImpl::Health(grpc::ServerContext* context,
 grpc::Status AdminServiceImpl::ListNetworks(grpc::ServerContext* context,
                                              const edgelink::ListNetworksRequest* request,
                                              edgelink::ListNetworksResponse* response) {
-    auto result = db_->query("SELECT id, name, cidr, description FROM networks");
+    auto result = db_->query("SELECT id, name, subnet, description FROM networks");
 
     for (const auto& row : result) {
         auto* network = response->add_networks();
         network->set_id(std::get<int64_t>(row.at("id")));
         network->set_name(std::get<std::string>(row.at("name")));
-        network->set_subnet(std::get<std::string>(row.at("cidr")));
+        network->set_subnet(std::get<std::string>(row.at("subnet")));
         if (row.count("description") && std::holds_alternative<std::string>(row.at("description"))) {
             network->set_description(std::get<std::string>(row.at("description")));
         }
@@ -794,7 +794,7 @@ grpc::Status AdminServiceImpl::CreateNetwork(grpc::ServerContext* context,
                                               edgelink::CreateNetworkResponse* response) {
     try {
         db_->execute(
-            "INSERT INTO networks (name, cidr, description) VALUES (?, ?, ?)",
+            "INSERT INTO networks (name, subnet, description) VALUES (?, ?, ?)",
             request->name(), request->subnet(), request->description());
 
         auto result = db_->query("SELECT last_insert_rowid() as id");
