@@ -80,12 +80,20 @@ struct BuiltinSTUNConfig {
 // Controller Configuration
 // ============================================================================
 
-// Fixed WebSocket paths (not configurable)
+// gRPC service names (for reference)
+namespace services {
+    constexpr const char* CONTROL_SERVICE = "edgelink.ControlService";   // Client -> Controller
+    constexpr const char* SERVER_SERVICE = "edgelink.ServerService";     // Server -> Controller
+    constexpr const char* RELAY_SERVICE = "edgelink.RelayService";       // Client -> Relay (data)
+    constexpr const char* MESH_SERVICE = "edgelink.MeshService";         // Relay <-> Relay (mesh)
+}
+
+// Legacy WebSocket paths (deprecated, kept for backwards compatibility during migration)
 namespace paths {
-    constexpr const char* WS_CONTROL = "/ws/control";  // Client -> Controller
-    constexpr const char* WS_SERVER = "/ws/server";    // Server -> Controller
-    constexpr const char* WS_DATA = "/ws/data";        // Client -> Relay (data)
-    constexpr const char* WS_MESH = "/ws/mesh";        // Relay <-> Relay (mesh)
+    constexpr const char* WS_CONTROL = "/ws/control";  // Client -> Controller (deprecated)
+    constexpr const char* WS_SERVER = "/ws/server";    // Server -> Controller (deprecated)
+    constexpr const char* WS_DATA = "/ws/data";        // Client -> Relay (deprecated)
+    constexpr const char* WS_MESH = "/ws/mesh";        // Relay <-> Relay (deprecated)
 }
 
 struct ControllerConfig {

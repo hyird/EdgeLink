@@ -99,6 +99,59 @@ set(SODIUM_INCLUDE_DIRS "")
 # jwt-cpp (header-only, from vcpkg)
 find_package(jwt-cpp CONFIG REQUIRED)
 
+# gRPC and Protocol Buffers
+find_package(protobuf CONFIG REQUIRED)
+find_package(gRPC CONFIG REQUIRED)
+
+# Get protoc and grpc_cpp_plugin executables
+find_program(_PROTOBUF_PROTOC protoc)
+find_program(_GRPC_CPP_PLUGIN_EXECUTABLE grpc_cpp_plugin)
+
+# =============================================================================
+# Proto Library (generated from .proto files)
+# =============================================================================
+set(PROTO_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proto")
+set(PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
+
+# Define proto file
+set(PROTO_FILE "${PROTO_SRC_DIR}/edgelink.proto")
+
+# Generated file paths
+set(PROTO_SRCS "${PROTO_GEN_DIR}/edgelink.pb.cc")
+set(PROTO_HDRS "${PROTO_GEN_DIR}/edgelink.pb.h")
+set(GRPC_SRCS "${PROTO_GEN_DIR}/edgelink.grpc.pb.cc")
+set(GRPC_HDRS "${PROTO_GEN_DIR}/edgelink.grpc.pb.h")
+
+# Custom command to generate protobuf and gRPC source files
+add_custom_command(
+    OUTPUT "${PROTO_SRCS}" "${PROTO_HDRS}" "${GRPC_SRCS}" "${GRPC_HDRS}"
+    COMMAND ${_PROTOBUF_PROTOC}
+    ARGS --grpc_out "${PROTO_GEN_DIR}"
+         --cpp_out "${PROTO_GEN_DIR}"
+         -I "${PROTO_SRC_DIR}"
+         --plugin=protoc-gen-grpc="${_GRPC_CPP_PLUGIN_EXECUTABLE}"
+         "${PROTO_FILE}"
+    DEPENDS "${PROTO_FILE}"
+    COMMENT "Generating gRPC and protobuf C++ sources from ${PROTO_FILE}"
+)
+
+# Create proto library
+add_library(edgelink-proto STATIC
+    ${PROTO_SRCS}
+    ${GRPC_SRCS}
+)
+
+target_include_directories(edgelink-proto PUBLIC
+    ${PROTO_GEN_DIR}
+)
+
+target_link_libraries(edgelink-proto PUBLIC
+    protobuf::libprotobuf
+    gRPC::grpc++
+    gRPC::grpc++_reflection
+)
+
 # =============================================================================
 # Common Library
 # =============================================================================
@@ -150,6 +203,7 @@ if(BUILD_CONTROLLER)
         src/controller/db/database.cpp
         src/controller/db/migrations.cpp
         src/controller/api/http_server.cpp
+        src/controller/api/grpc_server.cpp
         src/controller/api/services.cpp
         src/controller/api/control_handler.cpp
         src/controller/services/path_service.cpp
@@ -159,6 +213,7 @@ if(BUILD_CONTROLLER)
 
     target_link_libraries(edgelink-controller PRIVATE
         edgelink-common
+        edgelink-proto
         SQLite::SQLite3
     )
 endif()
@@ -171,6 +226,7 @@ if(BUILD_SERVER)
         src/server/main.cpp
         src/server/relay_server.cpp
         src/server/relay_session.cpp
+        src/server/grpc_relay_server.cpp
         src/server/stun_server.cpp
         src/server/controller_client.cpp
         src/server/mesh_manager.cpp
@@ -181,6 +237,7 @@ if(BUILD_SERVER)
 
     target_link_libraries(edgelink-server PRIVATE
         edgelink-common
+        edgelink-proto
     )
 endif()
 
@@ -237,6 +294,7 @@ if(BUILD_CLIENT)
 
     target_link_libraries(edgelink-client PRIVATE
         edgelink-common
+        edgelink-proto
     )
 
     if(WIN32)

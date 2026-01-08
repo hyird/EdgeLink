@@ -1,0 +1,473 @@
+syntax = "proto3";
+
+package edgelink;
+
+option cc_enable_arenas = true;
+
+// ============================================================================
+// Common Types
+// ============================================================================
+
+enum ErrorCode {
+    ERROR_SUCCESS = 0;
+    ERROR_INVALID_ARGUMENT = 1;
+    ERROR_SYSTEM = 2;
+    ERROR_NOT_CONNECTED = 3;
+    ERROR_DISCONNECTED = 4;
+    ERROR_TIMEOUT = 5;
+
+    // Authentication errors (1xxx)
+    ERROR_INVALID_TOKEN = 1001;
+    ERROR_TOKEN_EXPIRED = 1002;
+    ERROR_TOKEN_REVOKED = 1003;
+    ERROR_INVALID_MACHINE_KEY = 1004;
+    ERROR_SIGNATURE_FAILED = 1005;
+    ERROR_NODE_UNAUTHORIZED = 1006;
+    ERROR_AUTH_FAILED = 1007;
+    ERROR_NOT_AUTHORIZED = 1008;
+    ERROR_MAX_RETRIES = 1009;
+
+    // Protocol errors (2xxx)
+    ERROR_UNSUPPORTED_VERSION = 2001;
+    ERROR_INVALID_MESSAGE = 2002;
+    ERROR_MESSAGE_TOO_LARGE = 2003;
+    ERROR_INVALID_FRAME = 2004;
+
+    // Routing errors (3xxx)
+    ERROR_NODE_NOT_FOUND = 3001;
+    ERROR_NODE_OFFLINE = 3002;
+    ERROR_NO_ROUTE = 3003;
+    ERROR_PEER_NOT_FOUND = 3004;
+    ERROR_NO_RELAY = 3005;
+
+    // Server errors (4xxx)
+    ERROR_INTERNAL = 4001;
+    ERROR_SERVICE_UNAVAILABLE = 4002;
+    ERROR_OVERLOADED = 4003;
+
+    // Crypto errors (5xxx)
+    ERROR_CRYPTO = 5001;
+    ERROR_REPLAY_DETECTED = 5002;
+    ERROR_KEY_EXCHANGE_FAILED = 5003;
+    ERROR_INVALID_KEY = 5004;
+}
+
+enum NATType {
+    NAT_UNKNOWN = 0;
+    NAT_OPEN = 1;
+    NAT_FULL_CONE = 2;
+    NAT_RESTRICTED_CONE = 3;
+    NAT_PORT_RESTRICTED = 4;
+    NAT_SYMMETRIC = 5;
+}
+
+enum EndpointType {
+    ENDPOINT_UNKNOWN = 0;
+    ENDPOINT_LAN = 1;
+    ENDPOINT_STUN = 2;
+    ENDPOINT_UPNP = 3;
+    ENDPOINT_RELAY = 4;
+}
+
+enum UpdateAction {
+    ACTION_UNKNOWN = 0;
+    ACTION_ADD = 1;
+    ACTION_UPDATE = 2;
+    ACTION_REMOVE = 3;
+}
+
+message Endpoint {
+    EndpointType type = 1;
+    string ip = 2;
+    uint32 port = 3;
+    uint32 priority = 4;
+}
+
+message Error {
+    ErrorCode code = 1;
+    string message = 2;
+    string details = 3;
+}
+
+// ============================================================================
+// Authentication Messages
+// ============================================================================
+
+message AuthRequest {
+    string machine_key_pub = 1;     // Base64 encoded Ed25519 public key
+    string node_key_pub = 2;        // Base64 encoded X25519 public key
+    string hostname = 3;
+    string os = 4;
+    string arch = 5;
+    string version = 6;
+    string signature = 7;           // Ed25519 signature
+    uint64 timestamp = 8;
+}
+
+message AuthResponse {
+    bool success = 1;
+    uint32 node_id = 2;
+    string virtual_ip = 3;
+    string auth_token = 4;          // JWT auth token
+    string relay_token = 5;         // JWT relay token
+    string error_message = 6;
+}
+
+// ============================================================================
+// Configuration Messages
+// ============================================================================
+
+message RelayInfo {
+    uint32 server_id = 1;
+    string name = 2;
+    string url = 3;
+    string region = 4;
+}
+
+message STUNInfo {
+    uint32 server_id = 1;
+    string name = 2;
+    string ip = 3;
+    uint32 port = 4;
+    string secondary_ip = 5;
+}
+
+message PeerInfo {
+    uint32 node_id = 1;
+    string name = 2;
+    string virtual_ip = 3;
+    string node_key_pub = 4;        // Base64 encoded X25519 public key
+    bool online = 5;
+    repeated Endpoint endpoints = 6;
+}
+
+message RouteInfo {
+    string cidr = 1;
+    uint32 gateway_node_id = 2;
+    uint32 priority = 3;
+    uint32 weight = 4;
+    bool enabled = 5;
+}
+
+message Config {
+    uint64 version = 1;
+    uint32 network_id = 2;
+    string network_name = 3;
+    string subnet = 4;
+    repeated RelayInfo relays = 5;
+    repeated STUNInfo stun_servers = 6;
+    repeated PeerInfo peers = 7;
+    repeated RouteInfo routes = 8;
+    string new_relay_token = 9;
+    int64 relay_token_expires_at = 10;
+}
+
+// Config updates
+message PeerUpdate {
+    UpdateAction action = 1;
+    PeerInfo peer = 2;
+}
+
+message RouteUpdate {
+    UpdateAction action = 1;
+    RouteInfo route = 2;
+}
+
+message ServerUpdate {
+    UpdateAction action = 1;
+    oneof server {
+        RelayInfo relay = 2;
+        STUNInfo stun = 3;
+    }
+}
+
+message ConfigUpdate {
+    uint64 version = 1;
+    repeated PeerUpdate peer_updates = 2;
+    repeated RouteUpdate route_updates = 3;
+    repeated ServerUpdate server_updates = 4;
+    optional string new_relay_token = 5;
+    optional int64 relay_token_expires_at = 6;
+}
+
+// ============================================================================
+// Data Messages
+// ============================================================================
+
+message DataPacket {
+    uint32 src_node_id = 1;
+    uint32 dst_node_id = 2;
+    bytes nonce = 3;                // 12 bytes
+    bytes encrypted_data = 4;       // Includes auth tag
+}
+
+// ============================================================================
+// Heartbeat Messages
+// ============================================================================
+
+message Ping {
+    uint64 timestamp = 1;
+}
+
+message Pong {
+    uint64 timestamp = 1;
+}
+
+message LatencyEntry {
+    string dst_type = 1;            // "relay" or "node"
+    uint32 dst_id = 2;
+    uint32 rtt_ms = 3;
+}
+
+message LatencyReport {
+    repeated LatencyEntry entries = 1;
+}
+
+// ============================================================================
+// P2P Messages
+// ============================================================================
+
+message P2PInit {
+    uint32 peer_node_id = 1;
+}
+
+message P2PEndpoint {
+    uint32 peer_node_id = 1;
+    repeated Endpoint endpoints = 2;
+    NATType nat_type = 3;
+}
+
+message P2PPing {
+    uint32 peer_node_id = 1;
+    uint64 timestamp = 2;
+    bytes nonce = 3;
+}
+
+message P2PPong {
+    uint32 peer_node_id = 1;
+    uint64 timestamp = 2;
+    bytes nonce = 3;
+}
+
+message P2PKeepalive {
+    uint32 peer_node_id = 1;
+}
+
+message P2PStatus {
+    uint32 peer_node_id = 1;
+    bool connected = 2;
+    string endpoint_ip = 3;
+    uint32 endpoint_port = 4;
+    uint32 rtt_ms = 5;
+}
+
+// ============================================================================
+// Server Messages
+// ============================================================================
+
+message ServerRegister {
+    string server_token = 1;
+    string name = 2;
+    uint32 capabilities = 3;        // ServerCapability flags
+    string region = 4;
+    string relay_url = 5;
+    string stun_ip = 6;
+    uint32 stun_port = 7;
+    string stun_ip2 = 8;
+}
+
+message ServerRegisterResponse {
+    bool success = 1;
+    uint32 server_id = 2;
+    string error_message = 3;
+}
+
+message NodeLocation {
+    uint32 node_id = 1;
+    repeated uint32 connected_relay_ids = 2;
+}
+
+message ServerNodeLoc {
+    repeated NodeLocation nodes = 1;
+}
+
+message BlacklistEntry {
+    string jti = 1;
+    int64 expires_at = 2;
+}
+
+message ServerBlacklist {
+    bool full_sync = 1;
+    repeated BlacklistEntry entries = 2;
+}
+
+message ServerHeartbeat {
+    uint32 server_id = 1;
+    uint64 timestamp = 2;
+    uint32 connected_clients = 3;
+}
+
+message ServerLatency {
+    uint32 server_id = 1;
+    uint32 target_server_id = 2;
+    uint32 rtt_ms = 3;
+}
+
+message ServerRelayList {
+    repeated RelayInfo relays = 1;
+}
+
+message MeshLatencyEntry {
+    uint32 target_server_id = 1;
+    uint32 rtt_ms = 2;
+}
+
+message ServerLatencyReport {
+    uint32 server_id = 1;
+    repeated MeshLatencyEntry entries = 2;
+}
+
+// ============================================================================
+// Relay Messages
+// ============================================================================
+
+message RelayAuth {
+    string relay_token = 1;
+}
+
+message RelayAuthResponse {
+    bool success = 1;
+    uint32 node_id = 2;
+    string error_message = 3;
+}
+
+// ============================================================================
+// Mesh Messages (Relay-to-Relay)
+// ============================================================================
+
+message MeshHello {
+    uint32 server_id = 1;
+    string server_token = 2;
+}
+
+message MeshHelloAck {
+    bool success = 1;
+    uint32 server_id = 2;
+    string error_message = 3;
+}
+
+message MeshForward {
+    uint32 src_server_id = 1;
+    uint32 dst_server_id = 2;
+    DataPacket data = 3;
+}
+
+message MeshPing {
+    uint32 server_id = 1;
+    uint64 timestamp = 2;
+}
+
+message MeshPong {
+    uint32 server_id = 1;
+    uint64 timestamp = 2;
+}
+
+// ============================================================================
+// Control Service (Client <-> Controller)
+// ============================================================================
+
+// Bidirectional streaming for control channel
+message ControlMessage {
+    oneof message {
+        // Client -> Controller
+        AuthRequest auth_request = 1;
+        LatencyReport latency_report = 2;
+        P2PInit p2p_init = 3;
+        P2PStatus p2p_status = 4;
+        Ping ping = 5;
+
+        // Controller -> Client
+        AuthResponse auth_response = 10;
+        Config config = 11;
+        ConfigUpdate config_update = 12;
+        P2PEndpoint p2p_endpoint = 13;
+        Pong pong = 14;
+        Error error = 15;
+    }
+}
+
+service ControlService {
+    // Bidirectional streaming for real-time control channel
+    rpc Control(stream ControlMessage) returns (stream ControlMessage);
+}
+
+// ============================================================================
+// Server Service (Server <-> Controller)
+// ============================================================================
+
+message ServerMessage {
+    oneof message {
+        // Server -> Controller
+        ServerRegister server_register = 1;
+        ServerHeartbeat server_heartbeat = 2;
+        ServerLatencyReport server_latency_report = 3;
+        Ping ping = 4;
+
+        // Controller -> Server
+        ServerRegisterResponse server_register_response = 10;
+        ServerNodeLoc server_node_loc = 11;
+        ServerBlacklist server_blacklist = 12;
+        ServerRelayList server_relay_list = 13;
+        Pong pong = 14;
+        Error error = 15;
+    }
+}
+
+service ServerService {
+    // Bidirectional streaming for server-controller communication
+    rpc ServerChannel(stream ServerMessage) returns (stream ServerMessage);
+}
+
+// ============================================================================
+// Relay Service (Client <-> Relay)
+// ============================================================================
+
+message RelayMessage {
+    oneof message {
+        // Client -> Relay
+        RelayAuth relay_auth = 1;
+        DataPacket data = 2;
+        Ping ping = 3;
+
+        // Relay -> Client
+        RelayAuthResponse relay_auth_response = 10;
+        DataPacket relay_data = 11;
+        Pong pong = 12;
+        Error error = 13;
+    }
+}
+
+service RelayService {
+    // Bidirectional streaming for data relay
+    rpc Relay(stream RelayMessage) returns (stream RelayMessage);
+}
+
+// ============================================================================
+// Mesh Service (Relay <-> Relay)
+// ============================================================================
+
+message MeshMessage {
+    oneof message {
+        MeshHello mesh_hello = 1;
+        MeshHelloAck mesh_hello_ack = 2;
+        MeshForward mesh_forward = 3;
+        MeshPing mesh_ping = 4;
+        MeshPong mesh_pong = 5;
+        Error error = 6;
+    }
+}
+
+service MeshService {
+    // Bidirectional streaming for mesh network
+    rpc Mesh(stream MeshMessage) returns (stream MeshMessage);
+}
