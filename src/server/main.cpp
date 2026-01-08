@@ -166,15 +166,18 @@ int main(int argc, char* argv[]) {
     // Initialize logging
     log::init_from_env();
     
-    LOG_INFO("EdgeLink Relay Server starting...");
-    LOG_INFO("Version: 1.0.0, Protocol: {}", static_cast<int>(PROTOCOL_VERSION));
-    
     // Load configuration
     auto config_opt = load_config(config_path);
     if (!config_opt) {
-        LOG_ERROR("Failed to load configuration");
+        std::cerr << "Error: Failed to load configuration from '" << config_path << "'\n\n";
+        std::cerr << "Create a config file or specify one with -c option.\n\n";
+        print_usage(argv[0]);
         return 1;
     }
+    
+    LOG_INFO("EdgeLink Relay Server starting...");
+    LOG_INFO("Version: 1.0.0, Protocol: {}", static_cast<int>(PROTOCOL_VERSION));
+    LOG_INFO("Configuration loaded from: {}", config_path);
     
     ServerConfig config = std::move(*config_opt);
     

@@ -97,10 +97,10 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
         
         // Register in database
         std::string relay_url = "ws://localhost:" + std::to_string(config.http.listen_port) + 
-                                config.builtin_relay.ws_data_path;
+                                paths::WS_DATA;
         register_builtin_server("builtin-relay", "builtin", relay_url, "", 0);
         
-        LOG_INFO("Built-in Relay enabled (path: {})", config.builtin_relay.ws_data_path);
+        LOG_INFO("Built-in Relay enabled (path: {})", paths::WS_DATA);
     }
     
     // Start HTTP server after relay is set
@@ -162,8 +162,9 @@ int main(int argc, char* argv[]) {
     bool quiet = false;
     std::string command = "serve";
     std::vector<std::string> cmd_args;
+    int cmd_start = -1;  // Index where command starts
     
-    // Parse arguments
+    // First pass: find command and options before it
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-c" || arg == "--config") {
@@ -176,13 +177,31 @@ int main(int argc, char* argv[]) {
             print_usage(argv[0]);
             return 0;
         } else if (arg[0] != '-') {
+            // Found command
             command = arg;
-            for (int j = i; j < argc; ++j) {
-                cmd_args.push_back(argv[j]);
-            }
+            cmd_start = i;
             break;
         }
     }
+    
+    // Second pass: parse options after command (for flexibility)
+    if (cmd_start >= 0) {
+        for (int i = cmd_start + 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "-c" || arg == "--config") {
+                if (i + 1 < argc) config_file = argv[++i];
+            } else if (arg == "--db") {
+                if (i + 1 < argc) db_path = argv[++i];
+            } else if (arg == "-q" || arg == "--quiet") {
+                quiet = true;
+            } else {
+                // Collect remaining args for command
+                cmd_args.push_back(arg);
+            }
+        }
+    }
+    // Add command itself to cmd_args for CLI processing
+    cmd_args.insert(cmd_args.begin(), command);
     
     // Initialize logging
     if (quiet) {
@@ -197,7 +216,8 @@ int main(int argc, char* argv[]) {
     auto config_opt = ControllerConfig::load(config_path);
     if (config_opt) {
         config = *config_opt;
-        if (!quiet) LOG_INFO("Configuration loaded from: {}", config_file);
+        LOG_INFO("Configuration loaded from: {}", config_file);
+        LOG_INFO("HTTP listen: {}:{}", config.http.listen_address, config.http.listen_port);
         
         // Resolve relative database path relative to config file directory
         if (!config.database.path.empty()) {
@@ -208,13 +228,14 @@ int main(int argc, char* argv[]) {
                 db_path_fs = config_dir / db_path_fs;
             }
             config.database.path = db_path_fs.string();
-            if (!quiet) LOG_INFO("Database path resolved to: {}", config.database.path);
+            LOG_INFO("Database path resolved to: {}", config.database.path);
         }
     } else {
-        config.http.listen_address = "0.0.0.0";
-        config.http.listen_port = 8080;
-        config.database.path = "edgelink.db";
-        config.jwt.secret = "change-this-secret-in-production";
+        std::cerr << "Error: Failed to load configuration from '" << config_file << "'\n\n";
+        std::cerr << "Create a config file or specify one with -c option.\n";
+        std::cerr << "Use 'edgelink-controller init' to generate a sample config.\n\n";
+        print_usage(argv[0]);
+        return 1;
     }
     
     // Override database path if specified on command line (absolute or relative to cwd)

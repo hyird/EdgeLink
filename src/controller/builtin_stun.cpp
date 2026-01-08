@@ -27,10 +27,6 @@ BuiltinSTUN::BuiltinSTUN(net::io_context& ioc, const BuiltinSTUNConfig& config)
     
     external_ip_ = config_.external_ip;
     external_ip2_ = config_.secondary_ip;
-    
-    if (external_ip_.empty()) {
-        LOG_WARN("BuiltinSTUN: external_ip not configured, STUN may not work correctly");
-    }
 }
 
 BuiltinSTUN::~BuiltinSTUN() {
@@ -40,6 +36,13 @@ BuiltinSTUN::~BuiltinSTUN() {
 void BuiltinSTUN::start() {
     if (!config_.enabled) {
         LOG_INFO("BuiltinSTUN: Disabled in configuration");
+        return;
+    }
+    
+    // external_ip is required for STUN to work correctly
+    if (external_ip_.empty()) {
+        LOG_ERROR("BuiltinSTUN: external_ip is required but not configured");
+        LOG_ERROR("BuiltinSTUN: Please set builtin_stun.external_ip to your server's public IP");
         return;
     }
     

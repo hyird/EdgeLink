@@ -62,8 +62,6 @@ struct JWTConfig {
 // ============================================================================
 struct BuiltinRelayConfig {
     bool enabled{false};
-    std::string ws_data_path{"/ws/data"};
-    std::string ws_mesh_path{"/ws/mesh"};
 };
 
 // ============================================================================
@@ -79,11 +77,18 @@ struct BuiltinSTUNConfig {
 // ============================================================================
 // Controller Configuration
 // ============================================================================
+
+// Fixed WebSocket paths (not configurable)
+namespace paths {
+    constexpr const char* WS_CONTROL = "/ws/control";  // Client -> Controller
+    constexpr const char* WS_SERVER = "/ws/server";    // Server -> Controller
+    constexpr const char* WS_DATA = "/ws/data";        // Client -> Relay (data)
+    constexpr const char* WS_MESH = "/ws/mesh";        // Relay <-> Relay (mesh)
+}
+
 struct ControllerConfig {
     // HTTP settings
     HttpConfig http;
-    std::string ws_control_path{"/ws/control"};
-    std::string ws_server_path{"/ws/server"};
     
     // TLS
     TLSConfig tls;
@@ -191,13 +196,6 @@ struct ClientConfig {
     };
     std::vector<RouteAd> advertise_routes;
     bool accept_routes{true};
-    
-    // Gateway mode
-    struct GatewayConfig {
-        bool enabled{false};
-        bool snat{true};
-        std::string lan_interface;
-    } gateway;
     
     // P2P settings
     struct P2PConfig {

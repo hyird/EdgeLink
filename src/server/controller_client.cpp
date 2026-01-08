@@ -2,6 +2,7 @@
 #include "relay_server.hpp"
 #include "mesh_manager.hpp"
 #include "common/log.hpp"
+#include "common/config.hpp"
 
 #include <regex>
 
@@ -19,7 +20,7 @@ ControllerClient::ControllerClient(asio::io_context& ioc, RelayServer& server, c
     , ssl_ctx_(ssl::context::tlsv12_client)
 {
     // Parse controller URL
-    // Expected format: wss://host:port/path or ws://host:port/path
+    // Expected format: wss://host:port or ws://host:port (path is fixed)
     std::regex url_regex(R"(^(wss?):\/\/([^:\/]+)(?::(\d+))?(\/.*)?$)");
     std::smatch match;
     
@@ -27,7 +28,7 @@ ControllerClient::ControllerClient(asio::io_context& ioc, RelayServer& server, c
         std::string scheme = match[1];
         host_ = match[2];
         port_ = match[3].matched ? match[3].str() : (scheme == "wss" ? "443" : "80");
-        path_ = match[4].matched ? match[4].str() : "/ws/server";
+        path_ = paths::WS_SERVER;  // Fixed path, ignore any path in URL
         use_ssl_ = (scheme == "wss");
         
         LOG_DEBUG("Controller URL parsed: scheme={}, host={}, port={}, path={}", 
@@ -46,7 +47,8 @@ ControllerClient::ControllerClient(asio::io_context& ioc, RelayServer& server, c
         // ssl_ctx_.set_verify_mode(ssl::verify_none);
     }
     
-    LOG_INFO("ControllerClient initialized for {}", config_.controller.url);
+    LOG_INFO("ControllerClient connecting to {}://{}:{}{}", 
+             use_ssl_ ? "wss" : "ws", host_, port_, path_);
 }
 
 ControllerClient::~ControllerClient() {

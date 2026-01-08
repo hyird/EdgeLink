@@ -1,31 +1,8 @@
 {
-    "controller": {
-        "url": "wss://controller.example.com:8443"
-    },
-    "identity": {
-        "hostname": "",
-        "key_file": "~/.edgelink/keys.json"
-    },
-    "tun": {
-        "name": "wss0",
-        "mtu": 1400
-    },
-    "routes": {
-        "advertise": [],
-        "priority": 100,
-        "weight": 100
-    },
-    "gateway": {
-        "enabled": false,
-        "snat": true,
-        "lan_interface": "eth0"
-    },
-    "p2p": {
-        "enabled": true,
-        "keepalive_interval_ms": 25000
-    },
-    "relay": {
-        "connect_all": false,
-        "report_latency": true
-    }
+    "controller_url": "wss://controller.example.com",
+    "machine_key_pub": "",
+    "machine_key_priv": "",
+    "auth_key": "",
+    "tun_name": "wss0",
+    "log_level": "info"
 }

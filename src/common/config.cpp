@@ -54,7 +54,9 @@ std::string DatabaseConfig::connection_string() const {
 
 std::optional<ControllerConfig> ControllerConfig::load(const std::filesystem::path& path) {
     std::ifstream file(path);
-    if (!file) return std::nullopt;
+    if (!file) {
+        return std::nullopt;
+    }
     
     std::stringstream buffer;
     buffer << file.rdbuf();
@@ -62,7 +64,9 @@ std::optional<ControllerConfig> ControllerConfig::load(const std::filesystem::pa
     try {
         auto json = boost::json::parse(buffer.str());
         return from_json(json);
-    } catch (...) {
+    } catch (const std::exception& e) {
+        // Log parsing error for debugging
+        std::cerr << "Config parse error: " << e.what() << std::endl;
         return std::nullopt;
     }
 }
@@ -84,8 +88,6 @@ boost::json::object ControllerConfig::to_json() const {
             {"port", http.listen_port},
             {"enable_tls", http.enable_tls}
         }},
-        {"ws_control_path", ws_control_path},
-        {"ws_server_path", ws_server_path},
         {"tls", {
             {"cert", tls.cert_path},
             {"key", tls.key_path}
@@ -108,9 +110,7 @@ boost::json::object ControllerConfig::to_json() const {
             {"server_token", server_token}
         }},
         {"builtin_relay", {
-            {"enabled", builtin_relay.enabled},
-            {"ws_data", builtin_relay.ws_data_path},
-            {"ws_mesh", builtin_relay.ws_mesh_path}
+            {"enabled", builtin_relay.enabled}
         }},
         {"builtin_stun", {
             {"enabled", builtin_stun.enabled},
@@ -126,6 +126,13 @@ std::optional<ControllerConfig> ControllerConfig::from_json(const boost::json::v
         const auto& obj = v.as_object();
         ControllerConfig cfg;
         
+        // Helper to get number as double (handles both int and double in JSON)
+        auto get_double = [](const boost::json::value& val) -> double {
+            if (val.is_int64()) return static_cast<double>(val.as_int64());
+            if (val.is_uint64()) return static_cast<double>(val.as_uint64());
+            return val.as_double();
+        };
+        
         // HTTP
         if (obj.contains("http")) {
             const auto& http = obj.at("http").as_object();
@@ -133,10 +140,6 @@ std::optional<ControllerConfig> ControllerConfig::from_json(const boost::json::v
             if (http.contains("port")) cfg.http.listen_port = static_cast<uint16_t>(http.at("port").as_int64());
             if (http.contains("enable_tls")) cfg.http.enable_tls = http.at("enable_tls").as_bool();
         }
-        
-        // WebSocket paths
-        if (obj.contains("ws_control_path")) cfg.ws_control_path = obj.at("ws_control_path").as_string().c_str();
-        if (obj.contains("ws_server_path")) cfg.ws_server_path = obj.at("ws_server_path").as_string().c_str();
         
         // TLS
         if (obj.contains("tls")) {
@@ -163,16 +166,16 @@ std::optional<ControllerConfig> ControllerConfig::from_json(const boost::json::v
         if (obj.contains("tokens")) {
             const auto& tokens = obj.at("tokens").as_object();
             if (tokens.contains("auth_expire_hours")) 
-                cfg.jwt.auth_expire_hours = tokens.at("auth_expire_hours").as_double();
+                cfg.jwt.auth_expire_hours = get_double(tokens.at("auth_expire_hours"));
             if (tokens.contains("relay_expire_hours")) 
-                cfg.jwt.relay_expire_hours = tokens.at("relay_expire_hours").as_double();
+                cfg.jwt.relay_expire_hours = get_double(tokens.at("relay_expire_hours"));
         }
         
         // Security
         if (obj.contains("security")) {
             const auto& sec = obj.at("security").as_object();
             if (sec.contains("node_key_rotate_hours")) 
-                cfg.node_key_rotate_hours = sec.at("node_key_rotate_hours").as_double();
+                cfg.node_key_rotate_hours = get_double(sec.at("node_key_rotate_hours"));
             if (sec.contains("require_authorization")) 
                 cfg.require_authorization = sec.at("require_authorization").as_bool();
             if (sec.contains("server_token"))
@@ -183,8 +186,6 @@ std::optional<ControllerConfig> ControllerConfig::from_json(const boost::json::v
         if (obj.contains("builtin_relay")) {
             const auto& relay = obj.at("builtin_relay").as_object();
             if (relay.contains("enabled")) cfg.builtin_relay.enabled = relay.at("enabled").as_bool();
-            if (relay.contains("ws_data")) cfg.builtin_relay.ws_data_path = relay.at("ws_data").as_string().c_str();
-            if (relay.contains("ws_mesh")) cfg.builtin_relay.ws_mesh_path = relay.at("ws_mesh").as_string().c_str();
         }
         
         // Builtin STUN
@@ -197,7 +198,8 @@ std::optional<ControllerConfig> ControllerConfig::from_json(const boost::json::v
         }
         
         return cfg;
-    } catch (...) {
+    } catch (const std::exception& e) {
+        std::cerr << "Config from_json error: " << e.what() << std::endl;
         return std::nullopt;
     }
 }
@@ -208,7 +210,9 @@ std::optional<ControllerConfig> ControllerConfig::from_json(const boost::json::v
 
 std::optional<ServerConfig> ServerConfig::load(const std::filesystem::path& path) {
     std::ifstream file(path);
-    if (!file) return std::nullopt;
+    if (!file) {
+        return std::nullopt;
+    }
     
     std::stringstream buffer;
     buffer << file.rdbuf();
@@ -216,7 +220,8 @@ std::optional<ServerConfig> ServerConfig::load(const std::filesystem::path& path
     try {
         auto json = boost::json::parse(buffer.str());
         return from_json(json);
-    } catch (...) {
+    } catch (const std::exception& e) {
+        std::cerr << "ServerConfig parse error: " << e.what() << std::endl;
         return std::nullopt;
     }
 }
@@ -320,7 +325,8 @@ std::optional<ServerConfig> ServerConfig::from_json(const boost::json::value& v)
         }
         
         return cfg;
-    } catch (...) {
+    } catch (const std::exception& e) {
+        std::cerr << "ServerConfig from_json error: " << e.what() << std::endl;
         return std::nullopt;
     }
 }
@@ -331,7 +337,9 @@ std::optional<ServerConfig> ServerConfig::from_json(const boost::json::value& v)
 
 std::optional<ClientConfig> ClientConfig::load(const std::filesystem::path& path) {
     std::ifstream file(path);
-    if (!file) return std::nullopt;
+    if (!file) {
+        return std::nullopt;
+    }
     
     std::stringstream buffer;
     buffer << file.rdbuf();
@@ -339,7 +347,8 @@ std::optional<ClientConfig> ClientConfig::load(const std::filesystem::path& path
     try {
         auto json = boost::json::parse(buffer.str());
         return from_json(json);
-    } catch (...) {
+    } catch (const std::exception& e) {
+        std::cerr << "ClientConfig parse error: " << e.what() << std::endl;
         return std::nullopt;
     }
 }
@@ -374,11 +383,6 @@ boost::json::object ClientConfig::to_json() const {
         }},
         {"advertise_routes", routes},
         {"accept_routes", accept_routes},
-        {"gateway_mode", {
-            {"enabled", gateway.enabled},
-            {"snat", gateway.snat},
-            {"lan_interface", gateway.lan_interface}
-        }},
         {"p2p", {
             {"enabled", p2p.enabled},
             {"keepalive_interval_seconds", p2p.keepalive_interval_sec}
@@ -420,14 +424,6 @@ std::optional<ClientConfig> ClientConfig::from_json(const boost::json::value& v)
         
         if (obj.contains("accept_routes")) cfg.accept_routes = obj.at("accept_routes").as_bool();
         
-        // Gateway
-        if (obj.contains("gateway_mode")) {
-            const auto& gw = obj.at("gateway_mode").as_object();
-            if (gw.contains("enabled")) cfg.gateway.enabled = gw.at("enabled").as_bool();
-            if (gw.contains("snat")) cfg.gateway.snat = gw.at("snat").as_bool();
-            if (gw.contains("lan_interface")) cfg.gateway.lan_interface = gw.at("lan_interface").as_string().c_str();
-        }
-        
         // P2P
         if (obj.contains("p2p")) {
             const auto& p2p = obj.at("p2p").as_object();
@@ -445,7 +441,8 @@ std::optional<ClientConfig> ClientConfig::from_json(const boost::json::value& v)
         }
         
         return cfg;
-    } catch (...) {
+    } catch (const std::exception& e) {
+        std::cerr << "ClientConfig from_json error: " << e.what() << std::endl;
         return std::nullopt;
     }
 }
@@ -456,7 +453,9 @@ std::optional<ClientConfig> ClientConfig::from_json(const boost::json::value& v)
 
 std::optional<KeyStorage> KeyStorage::load(const std::filesystem::path& path) {
     std::ifstream file(expand_path(path.string()));
-    if (!file) return std::nullopt;
+    if (!file) {
+        return std::nullopt;
+    }
     
     std::stringstream buffer;
     buffer << file.rdbuf();
@@ -473,7 +472,8 @@ std::optional<KeyStorage> KeyStorage::load(const std::filesystem::path& path) {
         ks.node_key_created_at = obj.at("node_key_created_at").as_int64();
         
         return ks;
-    } catch (...) {
+    } catch (const std::exception& e) {
+        std::cerr << "KeyStorage parse error: " << e.what() << std::endl;
         return std::nullopt;
     }
 }

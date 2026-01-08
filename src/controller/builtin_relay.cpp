@@ -243,7 +243,7 @@ BuiltinRelay::BuiltinRelay(net::io_context& ioc,
     
     if (config_.enabled) {
         LOG_INFO("BuiltinRelay initialized (data: {}, mesh: {})", 
-                 config_.ws_data_path, config_.ws_mesh_path);
+                 paths::WS_DATA, paths::WS_MESH);
     }
 }
 

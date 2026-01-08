@@ -1,6 +1,7 @@
 #include "client/control_channel.hpp"
 #include "common/log.hpp"
 #include "common/jwt.hpp"
+#include "common/config.hpp"
 
 #include <nlohmann/json.hpp>
 #include <regex>
@@ -70,7 +71,7 @@ ControlChannel::ControlChannel(
     , machine_key_priv_b64_(machine_key_priv_b64)
     , auth_key_(auth_key)
 {
-    // Parse controller URL: ws://host:port/path or wss://host:port/path
+    // Parse controller URL: ws://host:port or wss://host:port (path is fixed)
     std::regex url_regex(R"((wss?)://([^:/]+)(?::(\d+))?(/.*)?)", std::regex::icase);
     std::smatch match;
     
@@ -79,12 +80,12 @@ ControlChannel::ControlChannel(
         use_ssl_ = (scheme == "wss" || scheme == "WSS");
         controller_host_ = match[2].str();
         controller_port_ = match[3].matched ? match[3].str() : (use_ssl_ ? "443" : "80");
-        controller_path_ = match[4].matched ? match[4].str() : "/ws/control";
+        controller_path_ = paths::WS_CONTROL;  // Fixed path, ignore any path in URL
     } else {
         LOG_ERROR("ControlChannel: Invalid controller URL: {}", controller_url);
         controller_host_ = controller_url;
         controller_port_ = "443";
-        controller_path_ = "/ws/control";
+        controller_path_ = paths::WS_CONTROL;
         use_ssl_ = true;
     }
     

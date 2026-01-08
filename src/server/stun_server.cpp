@@ -36,6 +36,13 @@ void STUNServer::start() {
         return;
     }
     
+    // external_ip is required for STUN to work correctly
+    if (external_ip_.empty()) {
+        LOG_ERROR("STUNServer: external_ip is required but not configured");
+        LOG_ERROR("STUNServer: Please set stun.external_ip to your server's public IP");
+        return;
+    }
+    
     running_ = true;
     
     try {
@@ -47,7 +54,8 @@ void STUNServer::start() {
         socket_.set_option(asio::socket_base::reuse_address(true));
         socket_.bind(endpoint);
         
-        LOG_INFO("STUNServer listening on {}:{}", config_.stun.listen_address, port_);
+        LOG_INFO("STUNServer listening on {}:{} (external: {})", 
+                 config_.stun.listen_address, port_, external_ip_);
         
         // Setup secondary socket if alternate IP is configured (for full NAT detection)
         if (!external_ip2_.empty()) {
@@ -246,7 +254,7 @@ std::vector<uint8_t> STUNServer::build_binding_response(
     add_mapped_address(buffer, client_endpoint);
     
     // Add RESPONSE-ORIGIN (local address)
-    add_response_origin(buffer, external_ip_.empty() ? config_.stun.listen_address : external_ip_, port_);
+    add_response_origin(buffer, external_ip_, port_);
     
     // Add OTHER-ADDRESS if available
     if (include_other_address && !external_ip2_.empty()) {

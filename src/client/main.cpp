@@ -43,7 +43,7 @@ void print_usage(const char* program) {
               << "  -h, --help            Show help\n\n"
               << "Examples:\n"
               << "  " << program << " connect -c /etc/edgelink/client.json\n"
-              << "  " << program << " connect -u ws://controller:8080/ws/control --auth-key <KEY>\n"
+              << "  " << program << " connect -u ws://controller:8080 --auth-key <KEY>\n"
               << "  " << program << " keygen\n"
               << "  " << program << " init --output client.json\n"
               << std::endl;
@@ -135,7 +135,7 @@ int cmd_init(const std::vector<std::string>& args) {
     }
     
     f << "{\n";
-    f << "  \"controller_url\": \"" << (url.empty() ? "wss://controller.example.com/ws/control" : url) << "\",\n";
+    f << "  \"controller_url\": \"" << (url.empty() ? "wss://controller.example.com" : url) << "\",\n";
     f << "  \"machine_key_pub\": \"" << pub_b64 << "\",\n";
     f << "  \"machine_key_priv\": \"" << priv_b64 << "\",\n";
     f << "  \"tun_name\": \"wss0\",\n";
@@ -366,15 +366,29 @@ int main(int argc, char* argv[]) {
     
     // Load config
     ClientConfig config;
+    bool config_loaded = false;
     try {
         std::ifstream f(config_file);
         if (f.good()) {
             f.close();
             config = load_client_config(config_file);
+            config_loaded = true;
             if (!quiet) LOG_INFO("Config loaded: {}", config_file);
         }
     } catch (const std::exception& e) {
         if (!quiet) LOG_WARN("Config load failed: {}", e.what());
+    }
+    
+    // If no config loaded and no controller URL provided, show help
+    if (!config_loaded && controller_url.empty()) {
+        std::cerr << "Error: No configuration found.\n\n";
+        std::cerr << "Either:\n";
+        std::cerr << "  1. Create config file at " << config_file << "\n";
+        std::cerr << "  2. Specify config with -c <file>\n";
+        std::cerr << "  3. Provide controller URL with -u <url>\n\n";
+        std::cerr << "Use 'edgelink-client init' to generate a sample config.\n\n";
+        print_usage(argv[0]);
+        return 1;
     }
     
     // Override with command line

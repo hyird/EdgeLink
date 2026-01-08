@@ -1,36 +1,37 @@
 {
     "http": {
-        "listen_address": "0.0.0.0",
-        "listen_port": 8080,
-        "enable_tls": false,
-        "tls_cert_file": "",
-        "tls_key_file": ""
+        "address": "0.0.0.0",
+        "port": 8080,
+        "enable_tls": false
     },
-    "wss": {
-        "listen_address": "0.0.0.0",
-        "listen_port": 8443,
-        "enable_tls": true,
-        "tls_cert_file": "/etc/edgelink/cert.pem",
-        "tls_key_file": "/etc/edgelink/key.pem"
+    "tls": {
+        "cert": "/etc/edgelink/cert.pem",
+        "key": "/etc/edgelink/key.pem"
     },
     "database": {
         "type": "sqlite",
-        "path": "/var/lib/edgelink/edgelink.db"
+        "path": "edgelink.db"
     },
     "jwt": {
         "secret": "CHANGE_THIS_SECRET_IN_PRODUCTION_USE_32_CHARS_MIN",
-        "algorithm": "HS256",
-        "auth_expiry_seconds": 86400,
-        "relay_expiry_seconds": 5400
+        "algorithm": "HS256"
+    },
+    "tokens": {
+        "auth_expire_hours": 24,
+        "relay_expire_hours": 1.5
     },
     "security": {
-        "key_rotation_days": 90,
-        "require_authorization": true
+        "node_key_rotate_hours": 24,
+        "require_authorization": true,
+        "server_token": "CHANGE_THIS_TO_A_RANDOM_TOKEN_FOR_RELAY_SERVERS"
     },
-    "builtin": {
-        "enable_relay": false,
-        "enable_stun": false,
-        "relay_port": 8444,
-        "stun_port": 3478
+    "builtin_relay": {
+        "enabled": true
+    },
+    "builtin_stun": {
+        "enabled": true,
+        "listen": "0.0.0.0:3478",
+        "external_ip": "YOUR_PUBLIC_IP_HERE",
+        "secondary_ip": ""
     }
 }

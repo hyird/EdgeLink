@@ -22,7 +22,7 @@ namespace ssl = net::ssl;
 // 客户端配置
 struct ClientConfig {
     // Controller连接
-    std::string controller_url;     // e.g., "wss://controller.example.com/ws/control"
+    std::string controller_url;     // e.g., "wss://controller.example.com"
     std::string machine_key_pub;    // Base64编码的machine公钥
     std::string machine_key_priv;   // Base64编码的machine私钥
     std::string auth_key;           // 注册用的 auth key (可选)

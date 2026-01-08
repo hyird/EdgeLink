@@ -1,24 +1,28 @@
 {
+    "name": "relay-server-1",
     "controller": {
-        "url": "wss://controller.example.com:8443",
+        "url": "wss://controller.example.com",
         "token": "YOUR_SERVER_TOKEN_HERE"
     },
     "relay": {
+        "enabled": true,
         "listen_address": "0.0.0.0",
         "listen_port": 8443,
         "external_url": "wss://relay1.example.com:8443",
-        "enable_tls": true,
-        "tls_cert_file": "/etc/edgelink/cert.pem",
-        "tls_key_file": "/etc/edgelink/key.pem"
+        "region": "us-east",
+        "tls": {
+            "enabled": true,
+            "cert_file": "/etc/edgelink/cert.pem",
+            "key_file": "/etc/edgelink/key.pem"
+        }
     },
     "stun": {
         "enabled": true,
         "listen_address": "0.0.0.0",
         "listen_port": 3478,
-        "external_ip": "203.0.113.10",
-        "external_ip2": "203.0.113.11"
+        "external_port": 3478,
+        "external_ip": "YOUR_PUBLIC_IP_HERE",
+        "external_ip2": ""
     },
-    "mesh": {
-        "peers": []
-    }
+    "mesh_peers": []
 }
