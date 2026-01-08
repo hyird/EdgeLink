@@ -1,6 +1,7 @@
 #include "common/config.hpp"
 #include <fstream>
 #include <sstream>
+#include <iostream>
 
 namespace edgelink {
 
