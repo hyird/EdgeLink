@@ -164,7 +164,8 @@ enum class ErrorCode : uint16_t {
     // Crypto errors (5xxx)
     CRYPTO_ERROR          = 5001,
     REPLAY_DETECTED       = 5002,
-    KEY_EXCHANGE_FAILED   = 5003
+    KEY_EXCHANGE_FAILED   = 5003,
+    INVALID_KEY           = 5004   // Invalid or weak cryptographic key
 };
 
 constexpr std::string_view error_code_to_string(ErrorCode code) {
@@ -199,6 +200,7 @@ constexpr std::string_view error_code_to_string(ErrorCode code) {
         case ErrorCode::CRYPTO_ERROR:        return "Cryptographic error";
         case ErrorCode::REPLAY_DETECTED:     return "Replay attack detected";
         case ErrorCode::KEY_EXCHANGE_FAILED: return "Key exchange failed";
+        case ErrorCode::INVALID_KEY:         return "Invalid or weak cryptographic key";
         default:                             return "Unknown error";
     }
 }

@@ -506,8 +506,8 @@ void Client::on_config_received(const ConfigUpdate& config) {
             LOG_ERROR("Failed to set TUN address");
         }
         
-        tun_device_->set_mtu(static_cast<uint16_t>(config_.mtu));
-        tun_device_->bring_up();
+        (void)tun_device_->set_mtu(static_cast<uint16_t>(config_.mtu));
+        (void)tun_device_->bring_up();
     }
     
     if (!route_manager_) {
@@ -536,7 +536,7 @@ void Client::on_config_received(const ConfigUpdate& config) {
     
     // 更新peer列表
     for (const auto& peer : config.peers) {
-        crypto_engine_->add_peer(peer.node_id, peer.node_key_pub);
+        (void)crypto_engine_->add_peer(peer.node_id, peer.node_key_pub);
         route_manager_->add_peer(peer.node_id, peer.virtual_ip);
         
         if (peer.online) {
@@ -622,7 +622,7 @@ void Client::on_config_received(const ConfigUpdate& config) {
     tun_device_->start_reading();
     
     // 应用路由
-    route_manager_->apply_routes();
+    (void)route_manager_->apply_routes();
     
     set_state(ClientState::RUNNING);
     LOG_INFO("Client is now running");
@@ -654,7 +654,7 @@ void Client::on_peer_online(uint32_t node_id, const PeerInfo& peer) {
     LOG_INFO("Peer {} ({}) came online", node_id, peer.virtual_ip);
     
     if (crypto_engine_) {
-        crypto_engine_->add_peer(node_id, peer.node_key_pub);
+        (void)crypto_engine_->add_peer(node_id, peer.node_key_pub);
     }
     
     if (route_manager_) {

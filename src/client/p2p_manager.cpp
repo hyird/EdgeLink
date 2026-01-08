@@ -516,7 +516,7 @@ void P2PManager::on_punch_timer(std::shared_ptr<P2PConnection> conn) {
             net::ip::address addr = net::ip::make_address(ep.address);
             udp::endpoint target(addr, ep.port);
             send_punch_packet(conn, target);
-        } catch (const std::exception& e) {
+        } catch ([[maybe_unused]] const std::exception& e) {
             LOG_DEBUG("P2PManager: Invalid endpoint {}: {}", ep.to_string(), e.what());
         }
     }

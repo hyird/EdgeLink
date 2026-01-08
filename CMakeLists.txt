@@ -209,12 +209,16 @@ if(BUILD_CLIENT)
         if(DEFINED WINTUN_DLL_PATH AND EXISTS "${WINTUN_DLL_PATH}")
             message(STATUS "Embedding wintun.dll from: ${WINTUN_DLL_PATH}")
             
+            # Convert Windows backslashes to forward slashes for RC file
+            # This prevents escape sequence issues (e.g., \a being interpreted as bell character)
+            string(REPLACE "\\" "/" WINTUN_DLL_PATH_ESCAPED "${WINTUN_DLL_PATH}")
+            
             # Generate resource file
             set(WINTUN_RC_FILE "${CMAKE_CURRENT_BINARY_DIR}/wintun.rc")
             file(WRITE ${WINTUN_RC_FILE}
                 "// Embedded wintun.dll\n"
                 "#define IDR_WINTUN_DLL 301\n"
-                "IDR_WINTUN_DLL RCDATA \"${WINTUN_DLL_PATH}\"\n"
+                "IDR_WINTUN_DLL RCDATA \"${WINTUN_DLL_PATH_ESCAPED}\"\n"
             )
             
             list(APPEND CLIENT_SOURCE ${WINTUN_RC_FILE})

@@ -118,10 +118,32 @@ std::expected<void, ErrorCode> CryptoEngine::add_peer(
         return std::unexpected(ErrorCode::INVALID_ARGUMENT);
     }
     
+    // Validate peer's public key to prevent attacks using weak/invalid keys
+    if (!crypto::X25519::validate_public_key(peer_node_pub)) {
+        LOG_ERROR("CryptoEngine: Invalid public key from peer {} (weak or low-order point)", 
+                  peer_node_id);
+        return std::unexpected(ErrorCode::INVALID_KEY);
+    }
+    
     // Compute shared secret via X25519 ECDH
     std::array<uint8_t, 32> shared_secret;
     if (crypto_scalarmult(shared_secret.data(), node_priv_.data(), peer_node_pub.data()) != 0) {
         LOG_ERROR("CryptoEngine: X25519 key exchange failed for peer {}", peer_node_id);
+        return std::unexpected(ErrorCode::CRYPTO_ERROR);
+    }
+    
+    // Additional check: verify shared secret is not all zeros (would indicate weak key attack)
+    bool all_zero = true;
+    for (auto b : shared_secret) {
+        if (b != 0) {
+            all_zero = false;
+            break;
+        }
+    }
+    if (all_zero) {
+        LOG_ERROR("CryptoEngine: X25519 produced zero shared secret for peer {} (possible attack)", 
+                  peer_node_id);
+        sodium_memzero(shared_secret.data(), shared_secret.size());
         return std::unexpected(ErrorCode::CRYPTO_ERROR);
     }
     
@@ -296,8 +318,16 @@ std::expected<std::vector<uint8_t>, ErrorCode> CryptoEngine::decrypt(
     std::array<uint8_t, 12> nonce;
     std::memcpy(nonce.data(), ciphertext.data(), 12);
     
-    uint64_t counter;
-    std::memcpy(&counter, nonce.data() + 4, 8);
+    // Extract counter in big-endian (network byte order) for cross-platform compatibility
+    uint64_t counter = 
+        (static_cast<uint64_t>(nonce[4]) << 56) |
+        (static_cast<uint64_t>(nonce[5]) << 48) |
+        (static_cast<uint64_t>(nonce[6]) << 40) |
+        (static_cast<uint64_t>(nonce[7]) << 32) |
+        (static_cast<uint64_t>(nonce[8]) << 24) |
+        (static_cast<uint64_t>(nonce[9]) << 16) |
+        (static_cast<uint64_t>(nonce[10]) << 8) |
+        static_cast<uint64_t>(nonce[11]);
     
     // Check for replay
     if (!session.recv_window.check_and_update(counter)) {
@@ -359,9 +389,17 @@ std::expected<std::vector<uint8_t>, ErrorCode> CryptoEngine::encrypt_with_header
         return std::unexpected(encrypted.error());
     }
     
-    // Get counter from nonce
-    uint64_t counter;
-    std::memcpy(&counter, encrypted->data() + 4, 8);
+    // Extract counter from nonce in big-endian (network byte order)
+    const uint8_t* nonce_ptr = encrypted->data();
+    uint64_t counter = 
+        (static_cast<uint64_t>(nonce_ptr[4]) << 56) |
+        (static_cast<uint64_t>(nonce_ptr[5]) << 48) |
+        (static_cast<uint64_t>(nonce_ptr[6]) << 40) |
+        (static_cast<uint64_t>(nonce_ptr[7]) << 32) |
+        (static_cast<uint64_t>(nonce_ptr[8]) << 24) |
+        (static_cast<uint64_t>(nonce_ptr[9]) << 16) |
+        (static_cast<uint64_t>(nonce_ptr[10]) << 8) |
+        static_cast<uint64_t>(nonce_ptr[11]);
     
     // Create header: src_node_id(4) + dst_node_id(4) + counter(8)
     std::vector<uint8_t> result(16 + encrypted->size());
@@ -371,7 +409,17 @@ std::expected<std::vector<uint8_t>, ErrorCode> CryptoEngine::encrypt_with_header
     
     std::memcpy(result.data(), &src_be, 4);
     std::memcpy(result.data() + 4, &dst_be, 4);
-    std::memcpy(result.data() + 8, &counter, 8);
+    
+    // Store counter in big-endian (network byte order) for cross-platform compatibility
+    result[8]  = static_cast<uint8_t>((counter >> 56) & 0xFF);
+    result[9]  = static_cast<uint8_t>((counter >> 48) & 0xFF);
+    result[10] = static_cast<uint8_t>((counter >> 40) & 0xFF);
+    result[11] = static_cast<uint8_t>((counter >> 32) & 0xFF);
+    result[12] = static_cast<uint8_t>((counter >> 24) & 0xFF);
+    result[13] = static_cast<uint8_t>((counter >> 16) & 0xFF);
+    result[14] = static_cast<uint8_t>((counter >> 8) & 0xFF);
+    result[15] = static_cast<uint8_t>(counter & 0xFF);
+    
     std::memcpy(result.data() + 16, encrypted->data(), encrypted->size());
     
     return result;
@@ -556,8 +604,21 @@ std::array<uint8_t, 12> CryptoEngine::generate_nonce(
     uint64_t counter
 ) {
     std::array<uint8_t, 12> nonce;
+    
+    // Copy prefix (first 4 bytes)
     std::memcpy(nonce.data(), prefix.data(), 4);
-    std::memcpy(nonce.data() + 4, &counter, 8);
+    
+    // Counter in big-endian (network byte order) for cross-platform compatibility
+    // This matches the format used in chacha20.cpp::create_nonce
+    nonce[4]  = static_cast<uint8_t>((counter >> 56) & 0xFF);
+    nonce[5]  = static_cast<uint8_t>((counter >> 48) & 0xFF);
+    nonce[6]  = static_cast<uint8_t>((counter >> 40) & 0xFF);
+    nonce[7]  = static_cast<uint8_t>((counter >> 32) & 0xFF);
+    nonce[8]  = static_cast<uint8_t>((counter >> 24) & 0xFF);
+    nonce[9]  = static_cast<uint8_t>((counter >> 16) & 0xFF);
+    nonce[10] = static_cast<uint8_t>((counter >> 8) & 0xFF);
+    nonce[11] = static_cast<uint8_t>(counter & 0xFF);
+    
     return nonce;
 }
 

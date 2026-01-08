@@ -25,7 +25,7 @@ RouteManager::RouteManager(const std::string& tun_name)
 }
 
 RouteManager::~RouteManager() {
-    remove_routes();
+    (void)remove_routes();  // Ignore return value in destructor
 }
 
 // ============================================================================
@@ -325,7 +325,7 @@ uint32_t RouteManager::get_node_by_ip(uint32_t ip) const {
 
 std::expected<void, ErrorCode> RouteManager::apply_routes() {
     // First, remove existing routes
-    remove_routes();
+    (void)remove_routes();  // Ignore return value - best effort cleanup
     
     // Add route for entire virtual network
     if (network_addr_ != 0) {
