@@ -74,25 +74,44 @@ private:
 
         bool success = true;
         
-        #define LOAD_FUNC(name) \
-            name = (WINTUN_##name##_FUNC)GetProcAddress(module_, "Wintun" #name); \
-            if (!name) { LOG_ERROR("WintunInterface: Failed to load Wintun" #name); success = false; }
-
-        LOAD_FUNC(CreateAdapter);
-        LOAD_FUNC(OpenAdapter);
-        LOAD_FUNC(CloseAdapter);
-        LOAD_FUNC(GetAdapterLUID);
-        LOAD_FUNC(StartSession);
-        LOAD_FUNC(EndSession);
-        LOAD_FUNC(GetReadWaitEvent);
-        LOAD_FUNC(ReceivePacket);
-        LOAD_FUNC(ReleaseReceivePacket);
-        LOAD_FUNC(AllocateSendPacket);
-        LOAD_FUNC(SendPacket);
-        LOAD_FUNC(SetLogger);
-        LOAD_FUNC(GetRunningDriverVersion);
-
-        #undef LOAD_FUNC
+        CreateAdapter = (WINTUN_CREATE_ADAPTER_FUNC)GetProcAddress(module_, "WintunCreateAdapter");
+        if (!CreateAdapter) { LOG_ERROR("WintunInterface: Failed to load WintunCreateAdapter"); success = false; }
+        
+        OpenAdapter = (WINTUN_OPEN_ADAPTER_FUNC)GetProcAddress(module_, "WintunOpenAdapter");
+        if (!OpenAdapter) { LOG_ERROR("WintunInterface: Failed to load WintunOpenAdapter"); success = false; }
+        
+        CloseAdapter = (WINTUN_CLOSE_ADAPTER_FUNC)GetProcAddress(module_, "WintunCloseAdapter");
+        if (!CloseAdapter) { LOG_ERROR("WintunInterface: Failed to load WintunCloseAdapter"); success = false; }
+        
+        GetAdapterLUID = (WINTUN_GET_ADAPTER_LUID_FUNC)GetProcAddress(module_, "WintunGetAdapterLUID");
+        if (!GetAdapterLUID) { LOG_ERROR("WintunInterface: Failed to load WintunGetAdapterLUID"); success = false; }
+        
+        StartSession = (WINTUN_START_SESSION_FUNC)GetProcAddress(module_, "WintunStartSession");
+        if (!StartSession) { LOG_ERROR("WintunInterface: Failed to load WintunStartSession"); success = false; }
+        
+        EndSession = (WINTUN_END_SESSION_FUNC)GetProcAddress(module_, "WintunEndSession");
+        if (!EndSession) { LOG_ERROR("WintunInterface: Failed to load WintunEndSession"); success = false; }
+        
+        GetReadWaitEvent = (WINTUN_GET_READ_WAIT_EVENT_FUNC)GetProcAddress(module_, "WintunGetReadWaitEvent");
+        if (!GetReadWaitEvent) { LOG_ERROR("WintunInterface: Failed to load WintunGetReadWaitEvent"); success = false; }
+        
+        ReceivePacket = (WINTUN_RECEIVE_PACKET_FUNC)GetProcAddress(module_, "WintunReceivePacket");
+        if (!ReceivePacket) { LOG_ERROR("WintunInterface: Failed to load WintunReceivePacket"); success = false; }
+        
+        ReleaseReceivePacket = (WINTUN_RELEASE_RECEIVE_PACKET_FUNC)GetProcAddress(module_, "WintunReleaseReceivePacket");
+        if (!ReleaseReceivePacket) { LOG_ERROR("WintunInterface: Failed to load WintunReleaseReceivePacket"); success = false; }
+        
+        AllocateSendPacket = (WINTUN_ALLOCATE_SEND_PACKET_FUNC)GetProcAddress(module_, "WintunAllocateSendPacket");
+        if (!AllocateSendPacket) { LOG_ERROR("WintunInterface: Failed to load WintunAllocateSendPacket"); success = false; }
+        
+        SendPacket = (WINTUN_SEND_PACKET_FUNC)GetProcAddress(module_, "WintunSendPacket");
+        if (!SendPacket) { LOG_ERROR("WintunInterface: Failed to load WintunSendPacket"); success = false; }
+        
+        SetLogger = (WINTUN_SET_LOGGER_FUNC)GetProcAddress(module_, "WintunSetLogger");
+        if (!SetLogger) { LOG_ERROR("WintunInterface: Failed to load WintunSetLogger"); success = false; }
+        
+        GetRunningDriverVersion = (WINTUN_GET_RUNNING_DRIVER_VERSION_FUNC)GetProcAddress(module_, "WintunGetRunningDriverVersion");
+        if (!GetRunningDriverVersion) { LOG_ERROR("WintunInterface: Failed to load WintunGetRunningDriverVersion"); success = false; }
 
         if (!success) {
             FreeLibrary(module_);
@@ -120,7 +139,7 @@ private:
 
 #ifdef EDGELINK_WINTUN_EMBEDDED
     bool ExtractEmbeddedDll() {
-        HRSRC hRes = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_WINTUN_DLL), RT_RCDATA);
+        HRSRC hRes = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_WINTUN_DLL), MAKEINTRESOURCEW(10));  // RT_RCDATA = 10
         if (!hRes) return false;
 
         HGLOBAL hData = LoadResource(nullptr, hRes);

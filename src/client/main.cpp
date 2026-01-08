@@ -259,6 +259,9 @@ int cmd_connect(const ClientConfig& config, bool daemon_mode) {
     LOG_INFO("EdgeLink Client v0.1.0");
     LOG_INFO("Controller: {}", config.controller_url);
     LOG_INFO("Interface: {}", config.tun_name);
+    if (!config.auth_key.empty()) {
+        LOG_INFO("Auth key: {}...", config.auth_key.substr(0, 8));
+    }
     
     try {
         Client client(config);
@@ -299,10 +302,16 @@ int main(int argc, char* argv[]) {
     std::string log_level = "info";
     bool daemon_mode = false;
     bool quiet = false;
-    std::string command = "connect";
+    std::string command;  // Empty by default - will show help
     std::vector<std::string> cmd_args;
     
-    // Parse arguments
+    // No arguments - show help
+    if (argc == 1) {
+        print_usage(argv[0]);
+        return 0;
+    }
+    
+    // Parse arguments - options can appear before or after command
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         
@@ -338,16 +347,22 @@ int main(int argc, char* argv[]) {
             quiet = true;
         }
         else if (arg[0] != '-') {
-            command = arg;
-            for (int j = i + 1; j < argc; ++j) {
-                cmd_args.push_back(argv[j]);
+            // Non-option argument - command or positional arg
+            if (arg == "connect" || arg == "keygen" || arg == "init" || arg == "status") {
+                command = arg;
+            } else {
+                cmd_args.push_back(arg);
             }
-            break;
         }
         else {
             std::cerr << "Unknown option: " << arg << "\n";
             return 1;
         }
+    }
+    
+    // Default command is connect if not specified but have options
+    if (command.empty() && (!controller_url.empty() || !config_file.empty())) {
+        command = "connect";
     }
     
     // Commands that don't need config/logging
@@ -399,8 +414,42 @@ int main(int argc, char* argv[]) {
     if (!tun_name.empty()) config.tun_name = tun_name;
     config.log_level = log_level;
     
+    // Auto-generate machine key if not provided
+    if (config.machine_key_pub.empty() || config.machine_key_priv.empty()) {
+        LOG_INFO("No machine key found, generating new key pair...");
+        auto [pub_key, priv_key] = crypto::Ed25519::generate_keypair();
+        config.machine_key_pub = crypto::Ed25519::to_base64(pub_key);
+        config.machine_key_priv = crypto::Ed25519::to_base64(priv_key);
+        
+        // Save to config file if we loaded from one
+        if (config_loaded && !config.config_file.empty()) {
+            try {
+                std::ifstream f(config.config_file);
+                std::string content((std::istreambuf_iterator<char>(f)),
+                                    std::istreambuf_iterator<char>());
+                f.close();
+                
+                nlohmann::json j = nlohmann::json::parse(content);
+                j["machine_key_pub"] = config.machine_key_pub;
+                j["machine_key_priv"] = config.machine_key_priv;
+                
+                std::ofstream out(config.config_file);
+                out << j.dump(4) << std::endl;
+                LOG_INFO("Machine key saved to {}", config.config_file);
+            } catch (const std::exception& e) {
+                LOG_WARN("Could not save machine key to config: {}", e.what());
+            }
+        }
+    }
+    
     if (command == "connect") {
         return cmd_connect(config, daemon_mode);
+    }
+    
+    // Unknown or empty command
+    if (command.empty()) {
+        print_usage(argv[0]);
+        return 0;
     }
     
     std::cerr << "Unknown command: " << command << "\n";

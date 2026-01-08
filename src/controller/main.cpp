@@ -13,6 +13,7 @@
 #include <vector>
 #include <filesystem>
 #include <cstdio>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <process.h>
@@ -23,6 +24,20 @@
 
 using namespace edgelink;
 using namespace edgelink::controller;
+
+// Get platform-specific state file path
+static std::string get_state_file_path() {
+#ifdef _WIN32
+    // Windows: use %TEMP% directory
+    const char* temp = std::getenv("TEMP");
+    if (!temp) temp = std::getenv("TMP");
+    if (!temp) temp = "C:\\Windows\\Temp";
+    return std::string(temp) + "\\edgelink-controller.state";
+#else
+    // Linux/macOS: use /tmp
+    return "/tmp/edgelink-controller.state";
+#endif
+}
 
 void print_usage(const char* prog) {
     std::cout << "EdgeLink Controller\n\n"
@@ -55,7 +70,7 @@ void print_usage(const char* prog) {
 
 int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
     // Write state file for CLI commands
-    const std::string state_file = "/tmp/edgelink-controller.state";
+    const std::string state_file = get_state_file_path();
     {
         std::ofstream f(state_file);
         if (f) {
@@ -271,7 +286,7 @@ int main(int argc, char* argv[]) {
     }
     
     // CLI commands: read state file from running instance
-    const std::string state_file = "/tmp/edgelink-controller.state";
+    const std::string state_file = get_state_file_path();
     std::string db_path;
     std::string jwt_secret;
     

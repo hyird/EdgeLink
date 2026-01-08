@@ -100,6 +100,9 @@ ClientConfig load_client_config(const std::string& config_file) {
     if (j.contains("machine_key_priv")) {
         config.machine_key_priv = j["machine_key_priv"].get<std::string>();
     }
+    if (j.contains("auth_key")) {
+        config.auth_key = j["auth_key"].get<std::string>();
+    }
     if (j.contains("tun_name")) {
         config.tun_name = j["tun_name"].get<std::string>();
     }
