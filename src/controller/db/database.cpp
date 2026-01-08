@@ -501,7 +501,8 @@ bool Database::update_node(const Node& node) {
     
     const char* sql = R"(
         UPDATE nodes SET name = ?, node_key_pub = ?, hostname = ?, os = ?, arch = ?,
-                        version = ?, nat_type = ?, authorized = ?, updated_at = ?
+                        version = ?, nat_type = ?, authorized = ?, online = ?, 
+                        last_seen = ?, updated_at = ?
         WHERE id = ?
     )";
     sqlite3_stmt* stmt = nullptr;
@@ -518,8 +519,10 @@ bool Database::update_node(const Node& node) {
     sqlite3_bind_text(stmt, 6, node.version.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 7, node.nat_type.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 8, node.authorized ? 1 : 0);
-    sqlite3_bind_int64(stmt, 9, current_timestamp());
-    sqlite3_bind_int(stmt, 10, static_cast<int>(node.id));
+    sqlite3_bind_int(stmt, 9, node.online ? 1 : 0);
+    sqlite3_bind_int64(stmt, 10, node.last_seen);
+    sqlite3_bind_int64(stmt, 11, current_timestamp());
+    sqlite3_bind_int(stmt, 12, static_cast<int>(node.id));
     
     bool success = sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);

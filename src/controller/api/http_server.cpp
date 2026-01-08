@@ -842,6 +842,22 @@ void WebSocketSession::on_read(beast::error_code ec, std::size_t bytes_transferr
     boost::ignore_unused(bytes_transferred);
     
     if (ec == websocket::error::closed) {
+        // Normal close - still need to update offline status
+        LOG_INFO("WebSocket: Connection closed normally for node {}", node_id_);
+        
+        if (type_ == WSSessionType::CONTROL && authenticated_) {
+            notify_peer_status(false);
+            if (node_id_ > 0) {
+                db_->set_node_online(node_id_, false);
+            }
+        }
+        
+        // Remove from manager
+        if (ws_manager_ && registered_) {
+            ws_manager_->remove_session(shared_from_this());
+            registered_ = false;
+        }
+        
         if (close_callback_) {
             close_callback_(shared_from_this());
         }
