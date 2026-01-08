@@ -1020,7 +1020,7 @@ void ControlChannel::send_frame(Frame frame) {
 }
 
 void ControlChannel::do_write() {
-    std::vector<uint8_t> data;
+    std::shared_ptr<std::vector<uint8_t>> data;
     
     {
         std::lock_guard<std::mutex> lock(write_mutex_);
@@ -1028,7 +1028,8 @@ void ControlChannel::do_write() {
             writing_ = false;
             return;
         }
-        data = std::move(write_queue_.front());
+        // Use shared_ptr to ensure data lifetime during async operation
+        data = std::make_shared<std::vector<uint8_t>>(std::move(write_queue_.front()));
         write_queue_.pop();
     }
     
@@ -1037,11 +1038,12 @@ void ControlChannel::do_write() {
     if (use_ssl_) {
         ssl_ws_->binary(true);
         ssl_ws_->async_write(
-            net::buffer(data),
-            [self = shared_from_this(), gen, data = std::move(data)](beast::error_code ec, std::size_t) mutable {
+            net::buffer(*data),
+            [self = shared_from_this(), gen, data](beast::error_code ec, std::size_t) {
                 if (gen != self->connection_gen_) return;
                 if (ec) {
                     LOG_ERROR("ControlChannel: Write error: {}", ec.message());
+                    self->reconnect();
                     return;
                 }
                 self->do_write();
@@ -1050,11 +1052,12 @@ void ControlChannel::do_write() {
     } else {
         plain_ws_->binary(true);
         plain_ws_->async_write(
-            net::buffer(data),
-            [self = shared_from_this(), gen, data = std::move(data)](beast::error_code ec, std::size_t) mutable {
+            net::buffer(*data),
+            [self = shared_from_this(), gen, data](beast::error_code ec, std::size_t) {
                 if (gen != self->connection_gen_) return;
                 if (ec) {
                     LOG_ERROR("ControlChannel: Write error: {}", ec.message());
+                    self->reconnect();
                     return;
                 }
                 self->do_write();
@@ -1064,7 +1067,7 @@ void ControlChannel::do_write() {
 }
 
 void ControlChannel::do_write_text() {
-    std::vector<uint8_t> data;
+    std::shared_ptr<std::vector<uint8_t>> data;
     
     {
         std::lock_guard<std::mutex> lock(write_mutex_);
@@ -1072,7 +1075,8 @@ void ControlChannel::do_write_text() {
             writing_ = false;
             return;
         }
-        data = std::move(write_queue_.front());
+        // Use shared_ptr to ensure data lifetime during async operation
+        data = std::make_shared<std::vector<uint8_t>>(std::move(write_queue_.front()));
         write_queue_.pop();
     }
     
@@ -1081,11 +1085,12 @@ void ControlChannel::do_write_text() {
     if (use_ssl_) {
         ssl_ws_->text(true);  // Send as text, not binary
         ssl_ws_->async_write(
-            net::buffer(data),
-            [self = shared_from_this(), gen, data = std::move(data)](beast::error_code ec, std::size_t) mutable {
+            net::buffer(*data),
+            [self = shared_from_this(), gen, data](beast::error_code ec, std::size_t) {
                 if (gen != self->connection_gen_) return;
                 if (ec) {
                     LOG_ERROR("ControlChannel: Write error: {}", ec.message());
+                    self->reconnect();
                     return;
                 }
                 self->do_write_text();
@@ -1094,11 +1099,12 @@ void ControlChannel::do_write_text() {
     } else {
         plain_ws_->text(true);  // Send as text, not binary
         plain_ws_->async_write(
-            net::buffer(data),
-            [self = shared_from_this(), gen, data = std::move(data)](beast::error_code ec, std::size_t) mutable {
+            net::buffer(*data),
+            [self = shared_from_this(), gen, data](beast::error_code ec, std::size_t) {
                 if (gen != self->connection_gen_) return;
                 if (ec) {
                     LOG_ERROR("ControlChannel: Write error: {}", ec.message());
+                    self->reconnect();
                     return;
                 }
                 self->do_write_text();
