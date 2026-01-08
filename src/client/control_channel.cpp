@@ -201,14 +201,19 @@ void ControlChannel::connect() {
     
     state_ = State::CONNECTING;
     reconnect_attempts_ = 0;
+    last_pong_ = std::chrono::steady_clock::now();  // 初始化以避免虚假超时
     
     LOG_INFO("ControlChannel: Connecting to {}:{}", controller_host_, controller_port_);
     do_resolve();
 }
 
 void ControlChannel::disconnect() {
+    // 增加连接代数，使所有旧的异步回调失效
+    connection_gen_++;
+    
     heartbeat_timer_.cancel();
     reconnect_timer_.cancel();
+    resolver_.cancel();
     
     beast::error_code ec;
     if (use_ssl_) {
@@ -223,6 +228,14 @@ void ControlChannel::disconnect() {
         plain_ws_.reset();
     }
     
+    // 清空写队列
+    {
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        std::queue<std::vector<uint8_t>> empty;
+        write_queue_.swap(empty);
+    }
+    writing_ = false;
+    
     state_ = State::DISCONNECTED;
     
     LOG_INFO("ControlChannel: Disconnected");
@@ -233,6 +246,35 @@ void ControlChannel::reconnect() {
         return;
     }
     
+    // 增加连接代数，使所有进行中的异步操作失效
+    connection_gen_++;
+    
+    // 取消所有进行中的操作
+    heartbeat_timer_.cancel();
+    resolver_.cancel();
+    
+    // 关闭WebSocket连接（如果有的话）
+    beast::error_code ec;
+    if (use_ssl_) {
+        if (ssl_ws_ && ssl_ws_->is_open()) {
+            ssl_ws_->close(websocket::close_code::going_away, ec);
+        }
+        ssl_ws_.reset();
+    } else {
+        if (plain_ws_ && plain_ws_->is_open()) {
+            plain_ws_->close(websocket::close_code::going_away, ec);
+        }
+        plain_ws_.reset();
+    }
+    
+    // 清空写队列
+    {
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        std::queue<std::vector<uint8_t>> empty;
+        write_queue_.swap(empty);
+    }
+    writing_ = false;
+    
     state_ = State::RECONNECTING;
     schedule_reconnect();
 }
@@ -242,10 +284,16 @@ void ControlChannel::reconnect() {
 // ============================================================================
 
 void ControlChannel::do_resolve() {
+    auto gen = connection_gen_.load();
     resolver_.async_resolve(
         controller_host_,
         controller_port_,
-        [self = shared_from_this()](beast::error_code ec, tcp::resolver::results_type results) {
+        [self = shared_from_this(), gen](beast::error_code ec, tcp::resolver::results_type results) {
+            // 检查是否是旧的回调
+            if (gen != self->connection_gen_) {
+                LOG_DEBUG("ControlChannel: Ignoring stale resolve callback");
+                return;
+            }
             self->on_resolve(ec, results);
         }
     );
@@ -263,6 +311,8 @@ void ControlChannel::on_resolve(beast::error_code ec, tcp::resolver::results_typ
 }
 
 void ControlChannel::do_connect(tcp::resolver::results_type::endpoint_type ep) {
+    auto gen = connection_gen_.load();
+    
     if (use_ssl_) {
         ssl_ws_ = std::make_unique<SslWsStream>(ioc_, ssl_ctx_);
         
@@ -276,7 +326,8 @@ void ControlChannel::do_connect(tcp::resolver::results_type::endpoint_type ep) {
         
         beast::get_lowest_layer(*ssl_ws_).async_connect(
             ep,
-            [self = shared_from_this()](beast::error_code ec) {
+            [self = shared_from_this(), gen](beast::error_code ec) {
+                if (gen != self->connection_gen_) return;
                 self->on_connect(ec);
             }
         );
@@ -288,7 +339,8 @@ void ControlChannel::do_connect(tcp::resolver::results_type::endpoint_type ep) {
         
         beast::get_lowest_layer(*plain_ws_).async_connect(
             ep,
-            [self = shared_from_this()](beast::error_code ec) {
+            [self = shared_from_this(), gen](beast::error_code ec) {
+                if (gen != self->connection_gen_) return;
                 self->on_connect(ec);
             }
         );
@@ -312,11 +364,13 @@ void ControlChannel::on_connect(beast::error_code ec) {
 }
 
 void ControlChannel::do_ssl_handshake() {
+    auto gen = connection_gen_.load();
     beast::get_lowest_layer(*ssl_ws_).expires_after(std::chrono::seconds(30));
     
     ssl_ws_->next_layer().async_handshake(
         ssl::stream_base::client,
-        [self = shared_from_this()](beast::error_code ec) {
+        [self = shared_from_this(), gen](beast::error_code ec) {
+            if (gen != self->connection_gen_) return;
             self->on_ssl_handshake(ec);
         }
     );
@@ -334,6 +388,7 @@ void ControlChannel::on_ssl_handshake(beast::error_code ec) {
 }
 
 void ControlChannel::do_ws_handshake() {
+    auto gen = connection_gen_.load();
     // Include machine_key_pub in query string for initial identification
     std::string target = controller_path_ + "?key=" + machine_key_pub_b64_;
     
@@ -351,7 +406,8 @@ void ControlChannel::do_ws_handshake() {
         ssl_ws_->async_handshake(
             controller_host_,
             target,
-            [self = shared_from_this()](beast::error_code ec) {
+            [self = shared_from_this(), gen](beast::error_code ec) {
+                if (gen != self->connection_gen_) return;
                 self->on_ws_handshake(ec);
             }
         );
@@ -369,7 +425,8 @@ void ControlChannel::do_ws_handshake() {
         plain_ws_->async_handshake(
             controller_host_,
             target,
-            [self = shared_from_this()](beast::error_code ec) {
+            [self = shared_from_this(), gen](beast::error_code ec) {
+                if (gen != self->connection_gen_) return;
                 self->on_ws_handshake(ec);
             }
         );
@@ -511,17 +568,21 @@ void ControlChannel::on_auth_response(const Frame& frame) {
 // ============================================================================
 
 void ControlChannel::do_read() {
+    auto gen = connection_gen_.load();
+    
     if (use_ssl_) {
         ssl_ws_->async_read(
             read_buffer_,
-            [self = shared_from_this()](beast::error_code ec, std::size_t bytes) {
+            [self = shared_from_this(), gen](beast::error_code ec, std::size_t bytes) {
+                if (gen != self->connection_gen_) return;
                 self->on_read(ec, bytes);
             }
         );
     } else {
         plain_ws_->async_read(
             read_buffer_,
-            [self = shared_from_this()](beast::error_code ec, std::size_t bytes) {
+            [self = shared_from_this(), gen](beast::error_code ec, std::size_t bytes) {
+                if (gen != self->connection_gen_) return;
                 self->on_read(ec, bytes);
             }
         );
@@ -953,11 +1014,14 @@ void ControlChannel::do_write() {
         write_queue_.pop();
     }
     
+    auto gen = connection_gen_.load();
+    
     if (use_ssl_) {
         ssl_ws_->binary(true);
         ssl_ws_->async_write(
             net::buffer(data),
-            [self = shared_from_this()](beast::error_code ec, std::size_t) {
+            [self = shared_from_this(), gen, data = std::move(data)](beast::error_code ec, std::size_t) mutable {
+                if (gen != self->connection_gen_) return;
                 if (ec) {
                     LOG_ERROR("ControlChannel: Write error: {}", ec.message());
                     return;
@@ -969,7 +1033,8 @@ void ControlChannel::do_write() {
         plain_ws_->binary(true);
         plain_ws_->async_write(
             net::buffer(data),
-            [self = shared_from_this()](beast::error_code ec, std::size_t) {
+            [self = shared_from_this(), gen, data = std::move(data)](beast::error_code ec, std::size_t) mutable {
+                if (gen != self->connection_gen_) return;
                 if (ec) {
                     LOG_ERROR("ControlChannel: Write error: {}", ec.message());
                     return;
@@ -993,11 +1058,14 @@ void ControlChannel::do_write_text() {
         write_queue_.pop();
     }
     
+    auto gen = connection_gen_.load();
+    
     if (use_ssl_) {
         ssl_ws_->text(true);  // Send as text, not binary
         ssl_ws_->async_write(
             net::buffer(data),
-            [self = shared_from_this()](beast::error_code ec, std::size_t) {
+            [self = shared_from_this(), gen, data = std::move(data)](beast::error_code ec, std::size_t) mutable {
+                if (gen != self->connection_gen_) return;
                 if (ec) {
                     LOG_ERROR("ControlChannel: Write error: {}", ec.message());
                     return;
@@ -1009,7 +1077,8 @@ void ControlChannel::do_write_text() {
         plain_ws_->text(true);  // Send as text, not binary
         plain_ws_->async_write(
             net::buffer(data),
-            [self = shared_from_this()](beast::error_code ec, std::size_t) {
+            [self = shared_from_this(), gen, data = std::move(data)](beast::error_code ec, std::size_t) mutable {
+                if (gen != self->connection_gen_) return;
                 if (ec) {
                     LOG_ERROR("ControlChannel: Write error: {}", ec.message());
                     return;
@@ -1025,9 +1094,10 @@ void ControlChannel::do_write_text() {
 // ============================================================================
 
 void ControlChannel::start_heartbeat() {
+    auto gen = connection_gen_.load();
     heartbeat_timer_.expires_after(std::chrono::seconds(NetworkConstants::DEFAULT_HEARTBEAT_INTERVAL));
-    heartbeat_timer_.async_wait([self = shared_from_this()](boost::system::error_code ec) {
-        if (!ec) {
+    heartbeat_timer_.async_wait([self = shared_from_this(), gen](boost::system::error_code ec) {
+        if (!ec && gen == self->connection_gen_) {
             self->on_heartbeat_timer();
         }
     });
@@ -1087,9 +1157,10 @@ void ControlChannel::schedule_reconnect() {
              std::chrono::duration_cast<std::chrono::seconds>(delay).count(),
              reconnect_attempts_ + 1);
     
+    auto gen = connection_gen_.load();
     reconnect_timer_.expires_after(delay);
-    reconnect_timer_.async_wait([self = shared_from_this()](boost::system::error_code ec) {
-        if (!ec) {
+    reconnect_timer_.async_wait([self = shared_from_this(), gen](boost::system::error_code ec) {
+        if (!ec && gen == self->connection_gen_) {
             self->on_reconnect_timer();
         }
     });
@@ -1098,25 +1169,11 @@ void ControlChannel::schedule_reconnect() {
 void ControlChannel::on_reconnect_timer() {
     reconnect_attempts_++;
     
-    // Reset connection
-    beast::error_code ec;
-    if (use_ssl_) {
-        if (ssl_ws_) {
-            if (ssl_ws_->is_open()) {
-                ssl_ws_->close(websocket::close_code::going_away, ec);
-            }
-            ssl_ws_.reset();
-        }
-    } else {
-        if (plain_ws_) {
-            if (plain_ws_->is_open()) {
-                plain_ws_->close(websocket::close_code::going_away, ec);
-            }
-            plain_ws_.reset();
-        }
-    }
+    // 初始化 last_pong_ 以避免立即超时
+    last_pong_ = std::chrono::steady_clock::now();
     
     state_ = State::CONNECTING;
+    LOG_INFO("ControlChannel: Connecting to {}:{}", controller_host_, controller_port_);
     do_resolve();
 }
 

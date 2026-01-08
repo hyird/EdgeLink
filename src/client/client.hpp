@@ -11,6 +11,7 @@
 #include <string>
 #include <atomic>
 #include <thread>
+#include <mutex>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 
@@ -172,6 +173,9 @@ private:
     net::io_context ioc_;
     net::executor_work_guard<net::io_context::executor_type> work_guard_;
     std::vector<std::thread> io_threads_;
+    
+    // Strand for serializing callbacks (避免竞争条件)
+    net::strand<net::io_context::executor_type> callback_strand_;
     
     // SSL上下文
     ssl::context ssl_ctx_;

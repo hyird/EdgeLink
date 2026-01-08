@@ -277,6 +277,7 @@ private:
     
     // Connection state
     std::atomic<State> state_{State::DISCONNECTED};
+    std::atomic<uint32_t> connection_gen_{0};  // 连接代数，用于使旧的回调失效
     std::string controller_host_;
     std::string controller_port_;
     std::string controller_path_;
@@ -306,7 +307,7 @@ private:
     
     // Heartbeat
     net::steady_timer heartbeat_timer_;
-    std::chrono::steady_clock::time_point last_pong_;
+    std::chrono::steady_clock::time_point last_pong_{std::chrono::steady_clock::now()};  // 初始化！
     uint32_t missed_pongs_ = 0;
     
     // Reconnection

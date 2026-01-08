@@ -124,6 +124,7 @@ ClientConfig load_client_config(const std::string& config_file) {
 Client::Client(const ClientConfig& config)
     : config_(config)
     , work_guard_(boost::asio::make_work_guard(ioc_))
+    , callback_strand_(net::make_strand(ioc_))
     , ssl_ctx_(ssl::context::tlsv12_client)
     , latency_report_timer_(ioc_)
 {
@@ -285,28 +286,42 @@ bool Client::init_control_channel() {
         
         ControlCallbacks callbacks;
         
+        // Wrap all callbacks with strand to serialize execution
+        // This prevents race conditions when multiple threads process messages
         callbacks.on_config_update = [this](const ConfigUpdate& config) {
-            on_config_received(config);
+            net::post(callback_strand_, [this, config]() {
+                on_config_received(config);
+            });
         };
         
         callbacks.on_connected = [this]() {
-            on_connected();
+            net::post(callback_strand_, [this]() {
+                on_connected();
+            });
         };
         
         callbacks.on_disconnected = [this](ErrorCode ec) {
-            on_disconnected(ec);
+            net::post(callback_strand_, [this, ec]() {
+                on_disconnected(ec);
+            });
         };
         
         callbacks.on_peer_online = [this](uint32_t node_id, const PeerInfo& peer) {
-            on_peer_online(node_id, peer);
+            net::post(callback_strand_, [this, node_id, peer]() {
+                on_peer_online(node_id, peer);
+            });
         };
         
         callbacks.on_peer_offline = [this](uint32_t node_id) {
-            on_peer_offline(node_id);
+            net::post(callback_strand_, [this, node_id]() {
+                on_peer_offline(node_id);
+            });
         };
         
         callbacks.on_token_refresh = [this](const std::string& auth, const std::string& relay) {
-            on_token_refresh(auth, relay);
+            net::post(callback_strand_, [this, auth, relay]() {
+                on_token_refresh(auth, relay);
+            });
         };
         
         control_channel_->set_callbacks(callbacks);
@@ -594,6 +609,7 @@ void Client::on_config_received(const ConfigUpdate& config) {
         info.host = relay.host;
         info.port = relay.port;
         info.path = relay.path;
+        info.use_tls = relay.use_tls;  // 重要：传递 TLS 设置
         relay_infos.push_back(info);
     }
     
