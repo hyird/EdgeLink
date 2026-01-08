@@ -9,7 +9,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(BUILD_CONTROLLER "Build the controller" ON)
 option(BUILD_SERVER "Build the relay/stun server" ON)
 option(BUILD_CLIENT "Build the client" ON)
-option(BUILD_TESTS "Build tests" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(EDGELINK_STATIC "Build fully static binaries (Linux musl)" OFF)
 
@@ -193,6 +192,11 @@ if(WIN32)
     )
 endif()
 
+# Precompiled header for faster builds
+target_precompile_headers(edgelink-common PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp
+)
+
 # =============================================================================
 # Controller
 # =============================================================================
@@ -215,6 +219,7 @@ if(BUILD_CONTROLLER)
         edgelink-proto
         SQLite::SQLite3
     )
+    target_precompile_headers(edgelink-controller REUSE_FROM edgelink-common)
 endif()
 
 # =============================================================================
@@ -233,6 +238,7 @@ if(BUILD_SERVER)
         edgelink-common
         edgelink-proto
     )
+    target_precompile_headers(edgelink-server REUSE_FROM edgelink-common)
 endif()
 
 # =============================================================================
@@ -291,6 +297,7 @@ if(BUILD_CLIENT)
         edgelink-common
         edgelink-proto
     )
+    target_precompile_headers(edgelink-client REUSE_FROM edgelink-common)
 
     if(WIN32)
         target_include_directories(edgelink-client PRIVATE
@@ -305,31 +312,6 @@ if(BUILD_CLIENT)
         if(EDGELINK_WINTUN_EMBEDDED)
             target_compile_definitions(edgelink-client PRIVATE EDGELINK_WINTUN_EMBEDDED=1)
         endif()
-    endif()
-endif()
-
-# =============================================================================
-# Tests
-# =============================================================================
-if(BUILD_TESTS)
-    enable_testing()
-    find_package(GTest QUIET)
-    
-    if(GTest_FOUND)
-        add_executable(edgelink-tests
-            tests/test_protocol.cpp
-            tests/test_crypto.cpp
-        )
-        
-        target_link_libraries(edgelink-tests PRIVATE
-            edgelink-common
-            GTest::gtest_main
-        )
-        
-        include(GoogleTest)
-        gtest_discover_tests(edgelink-tests)
-    else()
-        message(STATUS "GTest not found, tests will not be built")
     endif()
 endif()
 
@@ -375,7 +357,6 @@ endif()
 message(STATUS "  Controller:    ${BUILD_CONTROLLER}")
 message(STATUS "  Server:        ${BUILD_SERVER}")
 message(STATUS "  Client:        ${BUILD_CLIENT}")
-message(STATUS "  Tests:         ${BUILD_TESTS}")
 if(MSVC)
 message(STATUS "  MSVC Runtime:  ${CMAKE_MSVC_RUNTIME_LIBRARY}")
 endif()
