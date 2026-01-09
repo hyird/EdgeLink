@@ -253,12 +253,6 @@ jobs:
       actions: write
 
     steps:
-    - name: Cancel excess in-progress runs (keep 2)
-      uses: styfle/cancel-workflow-action@0.12.1
-      with:
-        access_token: ${{ secrets.GITHUB_TOKEN }}
-        all_but_latest: true
-
     - name: Delete failed/cancelled/skipped runs
       uses: Mattraks/delete-workflow-runs@v2
       with:
@@ -276,12 +270,3 @@ jobs:
         retain_days: 0
         keep_minimum_runs: 3
         delete_run_by_conclusion_pattern: "success"
-
-    - name: Keep only 2 in-progress runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        repository: ${{ github.repository }}
-        retain_days: 0
-        keep_minimum_runs: 2
-        delete_run_by_conclusion_pattern: "in_progress,queued"
