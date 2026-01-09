@@ -1,8 +1,9 @@
-#include "ws_relay_server.hpp"
+#include "ws_relay_server_coro.hpp"
 #include "stun_server.hpp"
 #include "controller_client.hpp"
 #include "common/config.hpp"
 #include "common/log.hpp"
+#include "common/io_context_pool.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>
@@ -196,20 +197,27 @@ int main(int argc, char* argv[]) {
         // Shutdown flag
         std::atomic<bool> shutdown_requested{false};
 
-        // Create IO context for all services
-        boost::asio::io_context ioc;
+        // Create IO context pool (thread-per-core model)
+        unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+        IOContextPool pool(num_threads);
 
-        // Create WebSocket relay server
-        WsRelayServer relay_server(ioc, config);
+        // Get a reference to the first io_context for control connections
+        // (STUN server and controller client don't need thread distribution)
+        auto& control_ioc = pool.get_io_context(0);
 
-        // Create STUN server (if enabled)
+        // Create WebSocket relay server (coroutine-based)
+        WsRelayServerCoro relay_server(pool, config);
+
+        // Create STUN server (if enabled) - runs on control io_context
         std::unique_ptr<STUNServer> stun_server;
         if (config.stun.enabled) {
-            stun_server = std::make_unique<STUNServer>(ioc, config);
+            stun_server = std::make_unique<STUNServer>(control_ioc, config);
         }
 
-        // Create controller client (WebSocket)
-        auto controller_client = std::make_shared<ControllerClient>(ioc, relay_server, config);
+        // Create controller client (WebSocket) - runs on control io_context
+        // Note: ControllerClient still uses the old callback-based WsClient
+        // TODO: Migrate to WsClientCoro in a future phase
+        auto controller_client = std::make_shared<ControllerClient>(control_ioc, relay_server, config);
 
         // Set controller client for control plane
         relay_server.set_controller_client(controller_client);
@@ -230,7 +238,7 @@ int main(int argc, char* argv[]) {
         // Node location updates
         controller_client->set_node_loc_callback([&relay_server](
             const std::vector<std::pair<uint32_t, std::vector<uint32_t>>>& locations) {
-            relay_server.session_manager()->update_node_locations(locations);
+            relay_server.update_node_locations(locations);
         });
 
         // Token blacklist updates
@@ -238,15 +246,15 @@ int main(int argc, char* argv[]) {
             bool full_sync, const std::vector<std::pair<std::string, int64_t>>& entries) {
             if (full_sync) {
                 // Clear existing blacklist for full sync
-                // Note: This should be implemented in session manager if needed
+                // Note: This could be implemented if needed
             }
             for (const auto& [jti, expires_at] : entries) {
-                relay_server.session_manager()->add_to_blacklist(jti, expires_at);
+                relay_server.add_to_blacklist(jti, expires_at);
             }
         });
 
-        // Setup signal handling
-        boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
+        // Setup signal handling on control io_context
+        boost::asio::signal_set signals(control_ioc, SIGINT, SIGTERM);
         signals.async_wait([&](boost::system::error_code ec, int signal_number) {
             if (!ec) {
                 LOG_INFO("Received signal {}, shutting down...", signal_number);
@@ -259,7 +267,7 @@ int main(int argc, char* argv[]) {
                 }
                 controller_client->disconnect();
 
-                ioc.stop();
+                pool.stop();
             }
         });
 
@@ -277,27 +285,9 @@ int main(int argc, char* argv[]) {
         LOG_INFO("Connecting to controller at {}...", config.controller.url);
         controller_client->connect();
 
-        // Run IO context
-        LOG_INFO("Server running");
-
-        // Use multiple threads for IO
-        std::vector<std::thread> io_threads;
-        unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
-        for (unsigned int i = 0; i < num_threads - 1; ++i) {
-            io_threads.emplace_back([&ioc]() {
-                ioc.run();
-            });
-        }
-
-        // Main thread also runs IO
-        ioc.run();
-
-        // Wait for all threads
-        for (auto& t : io_threads) {
-            if (t.joinable()) {
-                t.join();
-            }
-        }
+        // Run IO context pool (blocks until stopped)
+        LOG_INFO("Server running with {} IO threads", num_threads);
+        pool.run();
 
         LOG_INFO("Server stopped");
         return 0;

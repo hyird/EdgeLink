@@ -18,7 +18,7 @@ namespace edgelink {
 namespace net = boost::asio;
 
 // Forward declarations
-class WsRelayServer;
+class WsRelayServerCoro;
 
 // ============================================================================
 // ControllerClient - WebSocket client to connect relay to controller
@@ -38,7 +38,7 @@ public:
     // Callback for token blacklist updates
     using BlacklistCallback = std::function<void(bool full_sync, const std::vector<std::pair<std::string, int64_t>>&)>;
 
-    ControllerClient(net::io_context& ioc, WsRelayServer& server, const ServerConfig& config);
+    ControllerClient(net::io_context& ioc, WsRelayServerCoro& server, const ServerConfig& config);
     ~ControllerClient() override = default;
 
     // Non-copyable
@@ -76,7 +76,7 @@ private:
     void handle_error(const wire::Frame& frame);
 
     // References
-    WsRelayServer& server_;
+    WsRelayServerCoro& server_;
     const ServerConfig& config_;
 
     // Server info

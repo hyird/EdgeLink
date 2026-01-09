@@ -1,7 +1,8 @@
 #include "common/config.hpp"
 #include "common/log.hpp"
+#include "common/io_context_pool.hpp"
 #include "controller/db/database.hpp"
-#include "controller/api/ws_server.hpp"
+#include "controller/api/ws_server_coro.hpp"
 #include "controller/builtin_relay.hpp"
 #include "controller/builtin_stun.hpp"
 #include "controller/commands.hpp"
@@ -101,16 +102,20 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
         LOG_INFO("Created default network with ID {}", id);
     }
 
-    // Create IO context
-    boost::asio::io_context ioc;
+    // Create IO context pool (thread-per-core model)
+    unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+    IOContextPool pool(num_threads);
 
-    // Create WebSocket server
-    controller::WsServer ws_server(ioc, config, db);
+    // Get a reference to the first io_context for control connections
+    auto& control_ioc = pool.get_io_context(0);
+
+    // Create WebSocket server (coroutine-based)
+    controller::WsControllerServerCoro ws_server(pool, config, db);
 
     // Create built-in Relay if enabled
     std::unique_ptr<BuiltinRelay> builtin_relay;
     if (config.builtin_relay.enabled) {
-        builtin_relay = std::make_unique<BuiltinRelay>(ioc, config.builtin_relay, db, config.jwt.secret);
+        builtin_relay = std::make_unique<BuiltinRelay>(control_ioc, config.builtin_relay, db, config.jwt.secret);
         ws_server.set_builtin_relay(builtin_relay.get());
         LOG_INFO("Built-in Relay enabled via WebSocket");
     }
@@ -118,7 +123,7 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
     // Create built-in STUN if enabled
     std::unique_ptr<BuiltinSTUN> builtin_stun;
     if (config.builtin_stun.enabled) {
-        builtin_stun = std::make_unique<BuiltinSTUN>(ioc, config.builtin_stun);
+        builtin_stun = std::make_unique<BuiltinSTUN>(control_ioc, config.builtin_stun);
         builtin_stun->start();
         LOG_INFO("Built-in STUN enabled ({})", config.builtin_stun.listen);
     }
@@ -199,8 +204,8 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
         }
     }
 
-    // Setup signal handling
-    boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
+    // Setup signal handling on control io_context
+    boost::asio::signal_set signals(control_ioc, SIGINT, SIGTERM);
     signals.async_wait([&](boost::system::error_code ec, int signal_number) {
         if (!ec) {
             LOG_INFO("Received signal {}, shutting down...", signal_number);
@@ -214,7 +219,7 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
                 builtin_relay->stop();
             }
 
-            ioc.stop();
+            pool.stop();
         }
     });
 
@@ -223,26 +228,9 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
              config.http.listen_address, config.http.listen_port);
     ws_server.start();
 
-    // Run IO context with multiple threads
-    std::vector<std::thread> io_threads;
-    unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+    // Run IO context pool (blocks until stopped)
     LOG_INFO("Running with {} IO threads", num_threads);
-
-    for (unsigned int i = 0; i < num_threads - 1; ++i) {
-        io_threads.emplace_back([&ioc]() {
-            ioc.run();
-        });
-    }
-
-    // Main thread also runs IO
-    ioc.run();
-
-    // Wait for all threads
-    for (auto& t : io_threads) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
+    pool.run();
 
     LOG_INFO("Controller shutdown complete");
     cleanup_state();

@@ -1,5 +1,5 @@
 #include "controller_client.hpp"
-#include "ws_relay_server.hpp"
+#include "ws_relay_server_coro.hpp"
 #include "common/config.hpp"
 #include "common/log.hpp"
 
@@ -9,7 +9,7 @@ namespace edgelink {
 // ControllerClient Implementation (using WsClient base class)
 // ============================================================================
 
-ControllerClient::ControllerClient(net::io_context& ioc, WsRelayServer& server, const ServerConfig& config)
+ControllerClient::ControllerClient(net::io_context& ioc, WsRelayServerCoro& server, const ServerConfig& config)
     : WsClient(ioc, config.controller.url + paths::WS_SERVER, "ControllerClient")
     , server_(server)
     , config_(config)
@@ -226,7 +226,7 @@ void ControllerClient::handle_blacklist(const wire::Frame& frame) {
 
     // Update relay server's blacklist directly
     for (const auto& [jti, expires_at] : entries) {
-        server_.session_manager()->add_to_blacklist(jti, expires_at);
+        server_.add_to_blacklist(jti, expires_at);
     }
 
     if (blacklist_callback_) {
@@ -260,7 +260,7 @@ void ControllerClient::send_heartbeat() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
     payload["connected_clients"] = static_cast<uint64_t>(
-        server_.session_manager()->client_count());
+        server_.client_count());
 
     auto frame = wire::create_json_frame(wire::MessageType::SERVER_HEARTBEAT, payload);
     send_frame(frame);

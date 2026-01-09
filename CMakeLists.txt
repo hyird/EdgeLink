@@ -88,6 +88,14 @@ add_library(edgelink-common STATIC
     src/common/crypto/chacha20.cpp
     src/common/crypto/ed25519.cpp
     src/common/crypto/hkdf.cpp
+    # Coroutine-based concurrency model (per architecture.md Section 8)
+    src/common/io_context_pool.cpp
+    src/common/thread_inbox.cpp
+    src/common/thread_local_session.cpp
+    src/common/data_forwarder.cpp
+    src/common/ws_session_coro.cpp
+    src/common/ws_client_coro.cpp
+    src/common/ws_server_coro.cpp
 )
 
 target_include_directories(edgelink-common PUBLIC
@@ -99,6 +107,8 @@ target_link_libraries(edgelink-common PUBLIC
     Boost::beast
     Boost::json
     Boost::url
+    Boost::coroutine
+    Boost::context
     OpenSSL::SSL
     OpenSSL::Crypto
     spdlog::spdlog
@@ -132,7 +142,7 @@ if(BUILD_CONTROLLER)
         src/controller/commands.cpp
         src/controller/db/database.cpp
         src/controller/db/migrations.cpp
-        src/controller/api/ws_server.cpp
+        src/controller/api/ws_server_coro.cpp
         src/controller/api/services.cpp
         src/controller/api/control_handler.cpp
         src/controller/services/path_service.cpp
@@ -153,7 +163,8 @@ endif()
 if(BUILD_SERVER)
     add_executable(edgelink-server
         src/server/main.cpp
-        src/server/ws_relay_server.cpp
+        src/server/ws_relay_server_coro.cpp
+        src/server/ws_relay_session_coro.cpp
         src/server/stun_server.cpp
         src/server/controller_client.cpp
         src/server/node_location_cache.cpp
@@ -173,6 +184,7 @@ if(BUILD_CLIENT)
     set(CLIENT_SOURCE
         src/client/main.cpp
         src/client/control_channel.cpp
+        src/client/control_channel_coro.cpp
         src/client/ws_relay_manager.cpp
         src/client/crypto_engine.cpp
         src/client/route_manager.cpp
