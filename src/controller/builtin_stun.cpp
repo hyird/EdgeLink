@@ -25,7 +25,7 @@ BuiltinSTUN::BuiltinSTUN(net::io_context& ioc, const BuiltinSTUNConfig& config)
         port_ = static_cast<uint16_t>(std::stoi(config_.listen.substr(pos + 1)));
     }
     
-    external_ip_ = config_.external_ip;
+    external_ip_ = config_.ip;
     external_ip2_ = config_.secondary_ip;
 }
 
@@ -42,7 +42,7 @@ void BuiltinSTUN::start() {
     // external_ip is required for STUN to work correctly
     if (external_ip_.empty()) {
         LOG_ERROR("BuiltinSTUN: external_ip is required but not configured");
-        LOG_ERROR("BuiltinSTUN: Please set builtin_stun.external_ip to your server's public IP");
+        LOG_ERROR("BuiltinSTUN: Please set builtin_stun.ip to your server's public IP");
         return;
     }
     

@@ -103,11 +103,11 @@ std::optional<ServerConfig> load_config(const std::string& path) {
             if (stun.contains("external_port")) {
                 config.stun.external_port = static_cast<uint16_t>(stun["external_port"].as_int64());
             }
-            if (stun.contains("external_ip")) {
-                config.stun.external_ip = stun["external_ip"].as_string().c_str();
+            if (stun.contains("ip")) {
+                config.stun.ip = stun["ip"].as_string().c_str();
             }
-            if (stun.contains("external_ip2")) {
-                config.stun.external_ip2 = stun["external_ip2"].as_string().c_str();
+            if (stun.contains("secondary_ip")) {
+                config.stun.secondary_ip = stun["secondary_ip"].as_string().c_str();
             }
         }
 

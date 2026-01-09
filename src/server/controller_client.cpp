@@ -53,11 +53,11 @@ void ControllerClient::do_authenticate() {
     // STUN info
     if (config_.stun.enabled) {
         payload["stun_port"] = config_.stun.external_port;
-        if (!config_.stun.external_ip.empty()) {
-            payload["stun_ip"] = config_.stun.external_ip;
+        if (!config_.stun.ip.empty()) {
+            payload["stun_ip"] = config_.stun.ip;
         }
-        if (!config_.stun.external_ip2.empty()) {
-            payload["stun_ip2"] = config_.stun.external_ip2;
+        if (!config_.stun.secondary_ip.empty()) {
+            payload["stun_ip2"] = config_.stun.secondary_ip;
         }
     }
 

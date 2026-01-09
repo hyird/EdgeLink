@@ -158,11 +158,9 @@ boost::json::object ControllerConfig::to_json() const {
         }},
         {"jwt", {
             {"secret", jwt.secret},
-            {"algorithm", jwt.algorithm}
-        }},
-        {"tokens", {
-            {"auth_expire_hours", jwt.auth_expire_hours},
-            {"relay_expire_hours", jwt.relay_expire_hours}
+            {"algorithm", jwt.algorithm},
+            {"auth_token_ttl", jwt.auth_token_ttl},
+            {"relay_token_ttl", jwt.relay_token_ttl}
         }},
         {"security", {
             {"node_key_rotate_hours", node_key_rotate_hours},
@@ -176,7 +174,7 @@ boost::json::object ControllerConfig::to_json() const {
         {"builtin_stun", {
             {"enabled", builtin_stun.enabled},
             {"listen", builtin_stun.listen},
-            {"external_ip", builtin_stun.external_ip},
+            {"ip", builtin_stun.ip},
             {"secondary_ip", builtin_stun.secondary_ip}
         }}
     };
@@ -221,15 +219,10 @@ std::optional<ControllerConfig> ControllerConfig::from_json(const boost::json::v
             const auto& jwt = obj.at("jwt").as_object();
             if (jwt.contains("secret")) cfg.jwt.secret = jwt.at("secret").as_string().c_str();
             if (jwt.contains("algorithm")) cfg.jwt.algorithm = jwt.at("algorithm").as_string().c_str();
-        }
-        
-        // Tokens
-        if (obj.contains("tokens")) {
-            const auto& tokens = obj.at("tokens").as_object();
-            if (tokens.contains("auth_expire_hours")) 
-                cfg.jwt.auth_expire_hours = get_double(tokens.at("auth_expire_hours"));
-            if (tokens.contains("relay_expire_hours")) 
-                cfg.jwt.relay_expire_hours = get_double(tokens.at("relay_expire_hours"));
+            if (jwt.contains("auth_token_ttl"))
+                cfg.jwt.auth_token_ttl = static_cast<uint32_t>(jwt.at("auth_token_ttl").as_int64());
+            if (jwt.contains("relay_token_ttl"))
+                cfg.jwt.relay_token_ttl = static_cast<uint32_t>(jwt.at("relay_token_ttl").as_int64());
         }
         
         // Security
@@ -255,7 +248,7 @@ std::optional<ControllerConfig> ControllerConfig::from_json(const boost::json::v
             const auto& stun = obj.at("builtin_stun").as_object();
             if (stun.contains("enabled")) cfg.builtin_stun.enabled = stun.at("enabled").as_bool();
             if (stun.contains("listen")) cfg.builtin_stun.listen = stun.at("listen").as_string().c_str();
-            if (stun.contains("external_ip")) cfg.builtin_stun.external_ip = stun.at("external_ip").as_string().c_str();
+            if (stun.contains("ip")) cfg.builtin_stun.ip = stun.at("ip").as_string().c_str();
             if (stun.contains("secondary_ip")) cfg.builtin_stun.secondary_ip = stun.at("secondary_ip").as_string().c_str();
         }
         
@@ -328,8 +321,8 @@ boost::json::object ServerConfig::to_json() const {
             {"listen_address", stun.listen_address},
             {"listen_port", stun.listen_port},
             {"external_port", stun.external_port},
-            {"external_ip", stun.external_ip},
-            {"external_ip2", stun.external_ip2}
+            {"ip", stun.ip},
+            {"secondary_ip", stun.secondary_ip}
         }},
         {"mesh_peers", peers}
     };
@@ -376,8 +369,8 @@ std::optional<ServerConfig> ServerConfig::from_json(const boost::json::value& v)
             if (stun.contains("listen_address")) cfg.stun.listen_address = stun.at("listen_address").as_string().c_str();
             if (stun.contains("listen_port")) cfg.stun.listen_port = static_cast<uint16_t>(stun.at("listen_port").as_int64());
             if (stun.contains("external_port")) cfg.stun.external_port = static_cast<uint16_t>(stun.at("external_port").as_int64());
-            if (stun.contains("external_ip")) cfg.stun.external_ip = stun.at("external_ip").as_string().c_str();
-            if (stun.contains("external_ip2")) cfg.stun.external_ip2 = stun.at("external_ip2").as_string().c_str();
+            if (stun.contains("ip")) cfg.stun.ip = stun.at("ip").as_string().c_str();
+            if (stun.contains("secondary_ip")) cfg.stun.secondary_ip = stun.at("secondary_ip").as_string().c_str();
         }
         
         // Mesh peers
@@ -428,15 +421,16 @@ bool ClientConfig::save(const std::filesystem::path& path) const {
 }
 
 boost::json::object ClientConfig::to_json() const {
-    boost::json::array routes;
-    for (const auto& r : advertise_routes) {
-        routes.push_back({
-            {"cidr", r.cidr},
-            {"priority", r.priority},
-            {"weight", r.weight}
-        });
+    boost::json::array advertise_arr;
+    for (const auto& r : routes.advertise) {
+        advertise_arr.push_back(boost::json::value(r));
     }
-    
+
+    boost::json::array accept_arr;
+    for (const auto& r : routes.accept) {
+        accept_arr.push_back(boost::json::value(r));
+    }
+
     return {
         {"controller", controller_url},
         {"auth_key", auth_key},
@@ -446,8 +440,10 @@ boost::json::object ClientConfig::to_json() const {
             {"name", tun.name},
             {"mtu", tun.mtu}
         }},
-        {"advertise_routes", routes},
-        {"accept_routes", accept_routes},
+        {"routes", {
+            {"advertise", advertise_arr},
+            {"accept", accept_arr}
+        }},
         {"p2p", {
             {"enabled", p2p.enabled},
             {"keepalive_interval_seconds", p2p.keepalive_interval_sec}
@@ -477,18 +473,19 @@ std::optional<ClientConfig> ClientConfig::from_json(const boost::json::value& v)
         }
         
         // Routes
-        if (obj.contains("advertise_routes")) {
-            for (const auto& r : obj.at("advertise_routes").as_array()) {
-                const auto& route = r.as_object();
-                ClientConfig::RouteAd ra;
-                ra.cidr = route.at("cidr").as_string().c_str();
-                if (route.contains("priority")) ra.priority = static_cast<uint16_t>(route.at("priority").as_int64());
-                if (route.contains("weight")) ra.weight = static_cast<uint16_t>(route.at("weight").as_int64());
-                cfg.advertise_routes.push_back(ra);
+        if (obj.contains("routes")) {
+            const auto& routes_obj = obj.at("routes").as_object();
+            if (routes_obj.contains("advertise")) {
+                for (const auto& r : routes_obj.at("advertise").as_array()) {
+                    cfg.routes.advertise.push_back(r.as_string().c_str());
+                }
+            }
+            if (routes_obj.contains("accept")) {
+                for (const auto& r : routes_obj.at("accept").as_array()) {
+                    cfg.routes.accept.push_back(r.as_string().c_str());
+                }
             }
         }
-        
-        if (obj.contains("accept_routes")) cfg.accept_routes = obj.at("accept_routes").as_bool();
         
         // P2P
         if (obj.contains("p2p")) {

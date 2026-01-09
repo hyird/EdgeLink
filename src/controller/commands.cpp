@@ -806,7 +806,7 @@ int ControllerCLI::cmd_config_init(const std::vector<std::string>& args) {
     
     if (config.save(path)) {
         std::cout << "Config created: " << path << "\n";
-        std::cout << "Update builtin_stun.external_ip with your public IP!\n";
+        std::cout << "Update builtin_stun.ip with your public IP!\n";
         std::cout << "\nServer Token (for relay registration): " << server_token << "\n";
         return 0;
     }

@@ -101,7 +101,7 @@ public:
 
     // HTTP request (available after HTTP reading)
     const http::request<http::string_body>& http_request() const { return http_request_; }
-    const std::string& path() const { return std::string(http_request_.target()); }
+    std::string path() const { return std::string(http_request_.target()); }
 
 protected:
     // Override for custom auth handling

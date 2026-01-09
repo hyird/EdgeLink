@@ -161,7 +161,7 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
 
         // Always update STUN info from config
         if (config.builtin_stun.enabled) {
-            srv.stun_ip = config.builtin_stun.external_ip;
+            srv.stun_ip = config.builtin_stun.ip;
             srv.stun_ip2 = config.builtin_stun.secondary_ip;
 
             uint16_t stun_port = 3478;

@@ -4,7 +4,10 @@
 include(FetchContent)
 
 # Allow legacy FetchContent_Populate for non-CMake projects
-cmake_policy(SET CMP0169 OLD)
+# CMP0169 was introduced in CMake 3.30
+if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)
+endif()
 
 FetchContent_Declare(
     sqlite3

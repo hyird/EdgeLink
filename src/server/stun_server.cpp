@@ -14,8 +14,8 @@ STUNServer::STUNServer(asio::io_context& ioc, const ServerConfig& config)
     : ioc_(ioc)
     , config_(config)
     , socket_(ioc)
-    , external_ip_(config.stun.external_ip)
-    , external_ip2_(config.stun.external_ip2)
+    , external_ip_(config.stun.ip)
+    , external_ip2_(config.stun.secondary_ip)
     , port_(config.stun.listen_port)
 {
     LOG_INFO("STUNServer initializing on {}:{}", config_.stun.listen_address, port_);

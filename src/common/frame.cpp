@@ -239,7 +239,7 @@ boost::json::object AuthRequestPayload::to_json() const {
         {"os", os},
         {"arch", arch},
         {"version", version},
-        {"signature", signature},
+        {"signature", signature_b64},
         {"timestamp", timestamp}
     };
 }
@@ -254,7 +254,7 @@ std::expected<AuthRequestPayload, ErrorCode> AuthRequestPayload::from_json(const
         p.os = obj.at("os").as_string().c_str();
         p.arch = obj.at("arch").as_string().c_str();
         p.version = obj.at("version").as_string().c_str();
-        p.signature = obj.at("signature").as_string().c_str();
+        p.signature_b64 = obj.at("signature").as_string().c_str();
         p.timestamp = obj.at("timestamp").as_int64();
         return p;
     } catch (...) {
