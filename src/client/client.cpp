@@ -193,7 +193,7 @@ bool Client::start() {
         });
     }
     
-    // 初始化ControlChannel
+    // 初始化ControlChannelCoro
     if (!init_control_channel()) {
         LOG_ERROR("Failed to initialize control channel");
         stop();
@@ -341,7 +341,7 @@ bool Client::init_control_channel() {
             LOG_INFO("init_control_channel: Generated new X25519 keypair");
         }
         
-        control_channel_ = std::make_shared<ControlChannel>(
+        control_channel_ = std::make_shared<ControlChannelCoro>(
             ioc_,
             config_.controller_url,
             *machine_pub,
@@ -556,7 +556,7 @@ bool Client::init_p2p_manager() {
 }
 
 // ============================================================================
-// ControlChannel Callbacks
+// ControlChannelCoro Callbacks
 // ============================================================================
 
 void Client::on_config_received(const ConfigUpdate& config) {
@@ -769,7 +769,7 @@ void Client::on_disconnected(ErrorCode ec) {
     
     if (state_ != ClientState::STOPPING && state_ != ClientState::STOPPED) {
         set_state(ClientState::RECONNECTING);
-        // ControlChannel会自动重连
+        // ControlChannelCoro会自动重连
     }
 }
 
@@ -852,7 +852,7 @@ void Client::on_latency_measured(uint32_t relay_id, uint32_t peer_id, uint32_t l
     // 缓存延迟数据，批量上报
     {
         std::lock_guard<std::mutex> lock(latency_mutex_);
-        ControlChannel::LatencyMeasurement m;
+        ControlChannelCoro::LatencyMeasurement m;
         m.dst_type = peer_id > 0 ? "node" : "relay";
         m.dst_id = peer_id > 0 ? peer_id : relay_id;
         m.rtt_ms = latency_ms;
@@ -871,7 +871,7 @@ void Client::start_latency_report_timer() {
 
 void Client::on_latency_report_timer() {
     // 收集所有 relay 的延迟数据
-    std::vector<ControlChannel::LatencyMeasurement> measurements;
+    std::vector<ControlChannelCoro::LatencyMeasurement> measurements;
     
     // 从 pending 报告中收集
     {
@@ -891,7 +891,7 @@ void Client::on_latency_report_timer() {
                 // 这里我们获取其缓存的延迟值
                 uint32_t latency = relay_manager_->get_latency(0, relay_id);  // peer_id=0 表示到 relay 本身
                 if (latency > 0 && latency < UINT32_MAX) {
-                    ControlChannel::LatencyMeasurement m;
+                    ControlChannelCoro::LatencyMeasurement m;
                     m.dst_type = "relay";
                     m.dst_id = relay_id;
                     m.rtt_ms = latency;
@@ -966,7 +966,7 @@ void Client::on_p2p_punch_request(uint32_t peer_id) {
     LOG_DEBUG("P2P punch request for peer {}", peer_id);
     
     // 向Controller请求P2P打洞
-    // TODO: 通过ControlChannel发送P2P请求
+    // TODO: 通过ControlChannelCoro发送P2P请求
     // 当前简化实现：等待Controller推送peer的端点信息
 }
 

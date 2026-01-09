@@ -15,7 +15,7 @@
 #include "common/protocol.hpp"
 #include "common/frame.hpp"
 #include "common/ws_client.hpp"
-#include "client/control_channel.hpp"
+#include "client/control_channel_types.hpp"
 
 namespace edgelink::client {
 

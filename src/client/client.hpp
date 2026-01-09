@@ -1,6 +1,6 @@
 #pragma once
 
-#include "control_channel.hpp"
+#include "control_channel_coro.hpp"
 #include "ws_relay_manager.hpp"
 #include "crypto_engine.hpp"
 #include "tun_device.hpp"
@@ -101,7 +101,7 @@ public:
     bool is_running() const { return state_ == ClientState::RUNNING; }
     
     // 获取组件
-    std::shared_ptr<ControlChannel> get_control_channel() { return control_channel_; }
+    std::shared_ptr<ControlChannelCoro> get_control_channel() { return control_channel_; }
     std::shared_ptr<WsRelayManager> get_relay_manager() { return relay_manager_; }
     std::shared_ptr<CryptoEngine> get_crypto_engine() { return crypto_engine_; }
     std::shared_ptr<TunDevice> get_tun_device() { return tun_device_; }
@@ -188,7 +188,7 @@ private:
     ssl::context ssl_ctx_;
     
     // 组件
-    std::shared_ptr<ControlChannel> control_channel_;
+    std::shared_ptr<ControlChannelCoro> control_channel_;
     std::shared_ptr<WsRelayManager> relay_manager_;
     std::shared_ptr<CryptoEngine> crypto_engine_;
     std::shared_ptr<TunDevice> tun_device_;
@@ -221,7 +221,7 @@ private:
     // Latency reporting timer
     net::steady_timer latency_report_timer_;
     std::mutex latency_mutex_;
-    std::vector<ControlChannel::LatencyMeasurement> pending_latency_reports_;
+    std::vector<ControlChannelCoro::LatencyMeasurement> pending_latency_reports_;
     static constexpr auto LATENCY_REPORT_INTERVAL = std::chrono::seconds(30);
 
     void start_latency_report_timer();
