@@ -30,7 +30,7 @@ struct ClientConfig {
     std::string auth_key;           // 注册用的 auth key (可选)
     
     // TUN设备
-    std::string tun_name = "wss0";
+    std::string tun_name = "edge";
     int mtu = 1400;
     
     // 本地节点信息 (Controller分配后填充)

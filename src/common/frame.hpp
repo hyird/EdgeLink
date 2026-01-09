@@ -371,12 +371,15 @@ struct ConfigUpdatePayload {
 // ============================================================================
 struct LatencyReportPayload {
     struct LatencyEntry {
-        std::string dst_type;   // "relay" or "node"
-        uint32_t dst_id;
-        uint32_t rtt_ms;
+        uint8_t dst_type{0};    // 0=relay, 1=node
+        uint32_t dst_id{0};
+        uint32_t rtt_ms{0};
     };
     std::vector<LatencyEntry> entries;
-    
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<LatencyReportPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
+
     boost::json::object to_json() const;
     static std::expected<LatencyReportPayload, ErrorCode> from_json(const boost::json::value& v);
 };
@@ -385,9 +388,12 @@ struct LatencyReportPayload {
 // P2P_ENDPOINT Payload
 // ============================================================================
 struct P2PEndpointPayload {
-    uint32_t peer_node_id;
+    uint32_t peer_node_id{0};
     std::vector<Endpoint> endpoints;
     NATType nat_type{NATType::UNKNOWN};
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<P2PEndpointPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
 
     boost::json::object to_json() const;
     static std::expected<P2PEndpointPayload, ErrorCode> from_json(const boost::json::value& v);
@@ -397,12 +403,15 @@ struct P2PEndpointPayload {
 // P2P_STATUS Payload
 // ============================================================================
 struct P2PStatusPayload {
-    uint32_t peer_node_id;
+    uint32_t peer_node_id{0};
     bool connected{false};
-    std::string endpoint_ip;
+    uint32_t endpoint_ip{0};    // IPv4 in network byte order
     uint16_t endpoint_port{0};
     uint32_t rtt_ms{0};
-    
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<P2PStatusPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
+
     boost::json::object to_json() const;
     static std::expected<P2PStatusPayload, ErrorCode> from_json(const boost::json::value& v);
 };
@@ -419,9 +428,90 @@ struct ServerRegisterPayload {
     std::string stun_ip;        // Optional, if stun enabled
     uint16_t stun_port{0};
     std::string stun_ip2;       // Optional secondary IP
-    
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<ServerRegisterPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
+
     boost::json::object to_json() const;
     static std::expected<ServerRegisterPayload, ErrorCode> from_json(const boost::json::value& v);
+};
+
+// ============================================================================
+// SERVER_REGISTER_RESP Payload (Response to server registration)
+// ============================================================================
+// Binary format:
+// ┌──────────┬───────────┬─────────────────┐
+// │ success  │ server_id │ error_message   │
+// │  (1 B)   │  (4 B)    │ (len + string)  │
+// └──────────┴───────────┴─────────────────┘
+struct ServerRegisterRespPayload {
+    bool success{false};
+    uint32_t server_id{0};
+    std::string error_message;
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<ServerRegisterRespPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
+};
+
+// ============================================================================
+// PONG Payload (Response to PING)
+// ============================================================================
+// Binary format:
+// ┌─────────────┐
+// │  timestamp  │
+// │   (8 B)     │
+// └─────────────┘
+struct PongPayload {
+    uint64_t timestamp{0};  // Milliseconds since epoch
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<PongPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
+};
+
+// ============================================================================
+// CONFIG_ACK Payload (Acknowledgment of config update)
+// ============================================================================
+// Binary format:
+// ┌───────────┐
+// │  version  │
+// │   (8 B)   │
+// └───────────┘
+struct ConfigAckPayload {
+    uint64_t version{0};  // Config version acknowledged
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<ConfigAckPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
+};
+
+// ============================================================================
+// P2P_INIT Payload (Request P2P connection to peer)
+// ============================================================================
+// Binary format:
+// ┌───────────────┐
+// │ peer_node_id  │
+// │   (4 B)       │
+// └───────────────┘
+struct P2PInitPayload {
+    uint32_t peer_node_id{0};
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<P2PInitPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
+};
+
+// ============================================================================
+// SERVER_STATS Payload (Server statistics report)
+// ============================================================================
+// Binary format:
+// ┌────────────────────┬────────────────┐
+// │ active_connections │ bytes_relayed  │
+// │      (4 B)         │    (8 B)       │
+// └────────────────────┴────────────────┘
+struct ServerStatsPayload {
+    uint32_t active_connections{0};
+    uint64_t bytes_relayed{0};
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<ServerStatsPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
 };
 
 // ============================================================================
@@ -467,7 +557,10 @@ struct ServerBlacklistPayload {
 // ============================================================================
 struct RelayAuthPayload {
     std::string relay_token;    // JWT relay token from controller
-    
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<RelayAuthPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
+
     boost::json::object to_json() const;
     bool from_json(const boost::json::value& v);  // Returns true on success
 };
@@ -476,9 +569,12 @@ struct RelayAuthPayload {
 // ERROR Payload
 // ============================================================================
 struct ErrorPayload {
-    int code{static_cast<int>(ErrorCode::INTERNAL_ERROR)};
+    uint16_t code{static_cast<uint16_t>(ErrorCode::INTERNAL_ERROR)};
     std::string message;
     std::string details;
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<ErrorPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
 
     boost::json::object to_json() const;
     bool from_json(const boost::json::value& v);  // Returns true on success

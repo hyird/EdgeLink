@@ -1,5 +1,6 @@
 #include "builtin_relay.hpp"
 #include "common/log.hpp"
+#include "common/ws_session_coro.hpp"
 
 #include <boost/json.hpp>
 
@@ -163,8 +164,9 @@ bool BuiltinRelay::send_to_node(uint32_t node_id, const std::vector<uint8_t>& fr
         return false;
     }
 
-    auto* session = static_cast<WsRelaySession*>(session_ptr);
-    session->send(frame_data);
+    // Cast to WsSessionCoro - works with WsBuiltinRelaySessionCoro
+    auto* session = static_cast<WsSessionCoro*>(session_ptr);
+    session->send_binary(frame_data);
     return true;
 }
 
@@ -447,31 +449,39 @@ void WsRelaySession::handle_ping(const boost::json::object& payload) {
 }
 
 void WsRelaySession::send_auth_response(bool success, uint32_t node_id, const std::string& error) {
-    boost::json::object response;
-    response["success"] = success;
-    response["node_id"] = node_id;
-    if (!error.empty()) {
-        response["error"] = error;
-    }
+    wire::AuthResponsePayload payload;
+    payload.success = success;
+    payload.node_id = node_id;
+    payload.error_message = error;
 
-    auto frame = wire::create_json_frame(wire::MessageType::RELAY_AUTH_RESP, response);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::RELAY_AUTH_RESP, std::move(binary));
     send(frame.serialize());
 }
 
 void WsRelaySession::send_pong(uint64_t timestamp) {
-    boost::json::object response;
-    response["timestamp"] = timestamp;
+    wire::PongPayload payload;
+    payload.timestamp = timestamp;
 
-    auto frame = wire::create_json_frame(wire::MessageType::PONG, response);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::PONG, std::move(binary));
     send(frame.serialize());
 }
 
 void WsRelaySession::send_error(const std::string& code, const std::string& message) {
-    boost::json::object response;
-    response["error"] = code;
-    response["message"] = message;
+    wire::ErrorPayload payload;
+    if (code == "AUTH_REQUIRED") {
+        payload.code = static_cast<uint16_t>(wire::ErrorCode::NODE_NOT_AUTHORIZED);
+    } else if (code == "ALREADY_AUTH") {
+        payload.code = static_cast<uint16_t>(wire::ErrorCode::INVALID_MESSAGE);
+    } else {
+        payload.code = static_cast<uint16_t>(wire::ErrorCode::INTERNAL_ERROR);
+    }
+    payload.message = message;
+    payload.details = code;
 
-    auto frame = wire::create_json_frame(wire::MessageType::ERROR_MSG, response);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::ERROR_MSG, std::move(binary));
     send(frame.serialize());
 }
 

@@ -8,7 +8,26 @@
       "Glob:*",
       "Grep:*",
       "Bash(mingw32-make:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nSync code with config.hpp refactoring and fix CMake issues\n\n- Update config.cpp to match refactored config.hpp structure:\n  - JWTConfig: auth_expire_hours -> auth_token_ttl, relay_expire_hours -> relay_token_ttl\n  - BuiltinSTUNConfig: external_ip -> ip\n  - ServerConfig::STUNConfig: external_ip/external_ip2 -> ip/secondary_ip\n  - ClientConfig: advertise_routes/accept_routes -> routes.advertise/routes.accept\n\n- Fix frame.cpp: use signature_b64 instead of signature for JSON serialization\n\n- Fix ws_server.hpp: return by value instead of reference to temporary\n\n- Update controller and server files for renamed STUN config fields\n\n- Fix CMake issues:\n  - sqlite3.cmake: wrap CMP0169 in version check for older CMake\n  - jwt_cpp.cmake: add FindOpenSSL shim for BoringSSL compatibility\n  - jwt_cpp.cmake: suppress CMP0135 deprecation warning\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push)",
+      "Bash(tree:*)",
+      "Bash(git commit:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(cmake:*)",
+      "Bash(ninja:*)",
+      "Bash(tasklist:*)",
+      "Bash(taskkill:*)",
+      "Bash(./edgelink-controller.exe authkey create:*)",
+      "Bash(timeout 10 ./edgelink-client.exe:*)",
+      "Bash(python test_ws.py:*)",
+      "Bash(pip install:*)",
+      "Bash(pip3 install:*)",
+      "Bash(/d/msys64/mingw64/bin/pip install websockets)",
+      "Bash(curl:*)",
+      "Bash(ls:*)"
     ]
   }
 }

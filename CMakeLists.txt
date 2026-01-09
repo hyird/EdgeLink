@@ -183,7 +183,6 @@ if(BUILD_CLIENT)
     # Common client source files
     set(CLIENT_SOURCE
         src/client/main.cpp
-        src/client/control_channel.cpp
         src/client/control_channel_coro.cpp
         src/client/ws_relay_manager.cpp
         src/client/crypto_engine.cpp

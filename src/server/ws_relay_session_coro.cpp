@@ -21,13 +21,9 @@ net::awaitable<void> WsRelaySessionCoro::on_connected() {
 
 net::awaitable<void> WsRelaySessionCoro::process_frame(const wire::Frame& frame) {
     switch (frame.header.type) {
-        case wire::MessageType::RELAY_AUTH: {
-            auto json_result = wire::parse_json_payload(frame);
-            if (json_result) {
-                co_await handle_relay_auth(json_result->as_object());
-            }
+        case wire::MessageType::RELAY_AUTH:
+            co_await handle_relay_auth(frame);
             break;
-        }
 
         case wire::MessageType::DATA:
             if (is_authenticated()) {
@@ -37,13 +33,9 @@ net::awaitable<void> WsRelaySessionCoro::process_frame(const wire::Frame& frame)
             }
             break;
 
-        case wire::MessageType::PING: {
-            auto json_result = wire::parse_json_payload(frame);
-            if (json_result) {
-                co_await handle_ping(json_result->as_object());
-            }
+        case wire::MessageType::PING:
+            co_await handle_ping(frame);
             break;
-        }
 
         case wire::MessageType::MESH_FORWARD:
             co_await handle_mesh_forward(frame);
@@ -58,7 +50,8 @@ net::awaitable<void> WsRelaySessionCoro::process_frame(const wire::Frame& frame)
             break;
 
         default:
-            LOG_DEBUG("WsRelaySessionCoro: Unhandled message type: {}",
+            LOG_DEBUG("WsRelaySessionCoro: Unhandled message type: {} (0x{:02x})",
+                      wire::message_type_to_string(frame.header.type),
                       static_cast<int>(frame.header.type));
             break;
     }
@@ -83,19 +76,32 @@ net::awaitable<void> WsRelaySessionCoro::on_disconnected(const std::string& reas
     co_return;
 }
 
-net::awaitable<void> WsRelaySessionCoro::handle_relay_auth(const boost::json::object& payload) {
+net::awaitable<void> WsRelaySessionCoro::handle_relay_auth(const wire::Frame& frame) {
     if (is_authenticated()) {
         send_error("ALREADY_AUTH", "Already authenticated");
         co_return;
     }
 
-    if (!payload.contains("relay_token")) {
-        send_auth_response(false, 0, "Missing relay_token");
-        server_->stats().auth_failures++;
-        co_return;
-    }
+    std::string token;
 
-    std::string token = payload.at("relay_token").as_string().c_str();
+    // Try binary deserialization first
+    auto binary_result = wire::RelayAuthPayload::deserialize_binary(frame.payload);
+    if (binary_result) {
+        token = binary_result->relay_token;
+        LOG_DEBUG("WsRelaySessionCoro: Parsed binary RELAY_AUTH");
+    } else {
+        // Fall back to JSON
+        auto json_result = wire::parse_json_payload(frame);
+        if (!json_result || !json_result->as_object().contains("relay_token")) {
+            LOG_WARN("WsRelaySessionCoro: Invalid RELAY_AUTH - not binary (error={}) and not JSON",
+                     static_cast<int>(binary_result.error()));
+            send_auth_response(false, 0, "Missing relay_token");
+            server_->stats().auth_failures++;
+            co_return;
+        }
+        token = json_result->as_object().at("relay_token").as_string().c_str();
+        LOG_DEBUG("WsRelaySessionCoro: Parsed JSON RELAY_AUTH");
+    }
 
     uint32_t node_id = 0;
     std::string virtual_ip;
@@ -135,10 +141,19 @@ net::awaitable<void> WsRelaySessionCoro::handle_data(const wire::Frame& frame) {
     co_return;
 }
 
-net::awaitable<void> WsRelaySessionCoro::handle_ping(const boost::json::object& payload) {
+net::awaitable<void> WsRelaySessionCoro::handle_ping(const wire::Frame& frame) {
     uint64_t timestamp = 0;
-    if (payload.contains("timestamp")) {
-        timestamp = static_cast<uint64_t>(payload.at("timestamp").as_int64());
+
+    // Try binary deserialization first (MeshPingPayload has timestamp)
+    auto binary_result = wire::MeshPingPayload::deserialize_binary(frame.payload);
+    if (binary_result) {
+        timestamp = binary_result->timestamp;
+    } else {
+        // Fall back to JSON
+        auto json_result = wire::parse_json_payload(frame);
+        if (json_result && json_result->as_object().contains("timestamp")) {
+            timestamp = static_cast<uint64_t>(json_result->as_object().at("timestamp").as_int64());
+        }
     }
     send_pong(timestamp);
     co_return;
@@ -220,23 +235,23 @@ net::awaitable<void> WsRelaySessionCoro::handle_mesh_ping(const wire::Frame& fra
 }
 
 void WsRelaySessionCoro::send_auth_response(bool success, uint32_t node_id, const std::string& error) {
-    boost::json::object payload;
-    payload["success"] = success;
-    if (success) {
-        payload["node_id"] = node_id;
-    } else {
-        payload["error_message"] = error;
-    }
+    wire::AuthResponsePayload payload;
+    payload.success = success;
+    payload.node_id = node_id;
+    payload.error_message = error;
 
-    auto frame = wire::create_json_frame(wire::MessageType::AUTH_RESPONSE, payload);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::AUTH_RESPONSE, std::move(binary));
     send_frame(frame);
+    LOG_DEBUG("WsRelaySessionCoro: AUTH_RESPONSE sent (success={}, {} bytes)", success, frame.payload.size());
 }
 
 void WsRelaySessionCoro::send_pong(uint64_t timestamp) {
-    boost::json::object payload;
-    payload["timestamp"] = static_cast<int64_t>(timestamp);
+    wire::PongPayload payload;
+    payload.timestamp = timestamp;
 
-    auto frame = wire::create_json_frame(wire::MessageType::PONG, payload);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::PONG, std::move(binary));
     send_frame(frame);
 }
 
@@ -264,11 +279,22 @@ void WsRelaySessionCoro::send_mesh_hello_ack(bool success, const std::string& er
 }
 
 void WsRelaySessionCoro::send_error(const std::string& code, const std::string& message) {
-    boost::json::object payload;
-    payload["code"] = code;
-    payload["message"] = message;
+    LOG_DEBUG("WsRelaySessionCoro: Sending ERROR (code={}, msg={})", code, message);
 
-    auto frame = wire::create_json_frame(wire::MessageType::ERROR_MSG, payload);
+    wire::ErrorPayload payload;
+    // Convert string code to int (hash or use known codes)
+    if (code == "AUTH_REQUIRED") {
+        payload.code = static_cast<uint16_t>(wire::ErrorCode::NODE_NOT_AUTHORIZED);
+    } else if (code == "ALREADY_AUTH") {
+        payload.code = static_cast<uint16_t>(wire::ErrorCode::INVALID_MESSAGE);
+    } else {
+        payload.code = static_cast<uint16_t>(wire::ErrorCode::INTERNAL_ERROR);
+    }
+    payload.message = message;
+    payload.details = code;
+
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::ERROR_MSG, std::move(binary));
     send_frame(frame);
 }
 

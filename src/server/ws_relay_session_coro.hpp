@@ -39,9 +39,9 @@ protected:
 
 private:
     // Frame handlers
-    net::awaitable<void> handle_relay_auth(const boost::json::object& payload);
+    net::awaitable<void> handle_relay_auth(const wire::Frame& frame);
     net::awaitable<void> handle_data(const wire::Frame& frame);
-    net::awaitable<void> handle_ping(const boost::json::object& payload);
+    net::awaitable<void> handle_ping(const wire::Frame& frame);
     net::awaitable<void> handle_mesh_forward(const wire::Frame& frame);
     net::awaitable<void> handle_mesh_hello(const wire::Frame& frame);
     net::awaitable<void> handle_mesh_ping(const wire::Frame& frame);

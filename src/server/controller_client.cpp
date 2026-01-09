@@ -36,11 +36,11 @@ ControllerClient::ControllerClient(net::io_context& ioc, WsRelayServerCoro& serv
 void ControllerClient::do_authenticate() {
     LOG_INFO("ControllerClient: Registering with controller...");
 
-    // Build SERVER_REGISTER payload
-    boost::json::object payload;
-    payload["server_token"] = config_.controller.token;
-    payload["name"] = config_.name;
-    payload["region"] = config_.relay.region;
+    // Build SERVER_REGISTER payload (binary)
+    wire::ServerRegisterPayload payload;
+    payload.server_token = config_.controller.token;
+    payload.name = config_.name;
+    payload.region = config_.relay.region;
 
     // Construct relay URL (without path - client will append path internally)
     std::string relay_url = config_.relay.external_url;
@@ -49,17 +49,13 @@ void ControllerClient::do_authenticate() {
         relay_url = scheme + "://" + config_.relay.listen_address + ":" +
                     std::to_string(config_.relay.listen_port);
     }
-    payload["relay_url"] = relay_url;
+    payload.relay_url = relay_url;
 
     // STUN info
     if (config_.stun.enabled) {
-        payload["stun_port"] = config_.stun.external_port;
-        if (!config_.stun.ip.empty()) {
-            payload["stun_ip"] = config_.stun.ip;
-        }
-        if (!config_.stun.secondary_ip.empty()) {
-            payload["stun_ip2"] = config_.stun.secondary_ip;
-        }
+        payload.stun_port = static_cast<uint16_t>(config_.stun.external_port);
+        payload.stun_ip = config_.stun.ip;
+        payload.stun_ip2 = config_.stun.secondary_ip;
     }
 
     // Capabilities
@@ -70,10 +66,12 @@ void ControllerClient::do_authenticate() {
     if (config_.stun.enabled) {
         caps |= wire::ServerCapability::STUN;
     }
-    payload["capabilities"] = caps;
+    payload.capabilities = caps;
 
-    auto frame = wire::create_json_frame(wire::MessageType::SERVER_REGISTER, payload);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::SERVER_REGISTER, std::move(binary));
     send_frame(frame);
+    LOG_DEBUG("ControllerClient: SERVER_REGISTER sent ({} bytes)", frame.payload.size());
 
     // Base class will start reading after this
 }
@@ -112,14 +110,41 @@ void ControllerClient::process_frame(const wire::Frame& frame) {
 }
 
 void ControllerClient::handle_register_response(const wire::Frame& frame) {
+    // Try binary deserialization first
+    auto binary_result = wire::ServerRegisterRespPayload::deserialize_binary(frame.payload);
+    if (binary_result) {
+        const auto& resp = *binary_result;
+        LOG_DEBUG("ControllerClient: Parsed binary SERVER_REGISTER_RESP (success={}, server_id={})",
+                  resp.success, resp.server_id);
+
+        if (resp.success) {
+            server_id_ = resp.server_id;
+            server_.set_server_id(server_id_);
+            registered_ = true;
+
+            LOG_INFO("ControllerClient: Registered as server ID {}", server_id_);
+            auth_complete();
+        } else {
+            LOG_ERROR("ControllerClient: Registration failed: {}", resp.error_message);
+            if (connect_callback_) {
+                connect_callback_(false, resp.error_message);
+            }
+            auth_failed(resp.error_message);
+        }
+        return;
+    }
+
+    // Fall back to JSON
     auto json_result = wire::parse_json_payload(frame);
     if (!json_result) {
-        LOG_ERROR("ControllerClient: Failed to parse register response");
+        LOG_ERROR("ControllerClient: Failed to parse register response - not binary (error={}) and not JSON",
+                  static_cast<int>(binary_result.error()));
         auth_failed("Invalid register response");
         return;
     }
 
     auto& json = json_result->as_object();
+    LOG_DEBUG("ControllerClient: Parsed JSON SERVER_REGISTER_RESP");
 
     if (json.contains("success") && json.at("success").as_bool()) {
         server_id_ = static_cast<uint32_t>(json.at("server_id").as_int64());
@@ -238,6 +263,15 @@ void ControllerClient::handle_blacklist(const wire::Frame& frame) {
 }
 
 void ControllerClient::handle_error(const wire::Frame& frame) {
+    // Try binary deserialization first
+    auto binary_result = wire::ErrorPayload::deserialize_binary(frame.payload);
+    if (binary_result) {
+        LOG_ERROR("ControllerClient: Error from controller (binary): {} - {}",
+                  binary_result->code, binary_result->message);
+        return;
+    }
+
+    // Fall back to JSON
     auto json_result = wire::parse_json_payload(frame);
     if (json_result) {
         auto& json = json_result->as_object();
@@ -245,7 +279,9 @@ void ControllerClient::handle_error(const wire::Frame& frame) {
         std::string message = json.contains("message")
             ? json.at("message").as_string().c_str()
             : "Unknown error";
-        LOG_ERROR("ControllerClient: Error from controller: {} - {}", code, message);
+        LOG_ERROR("ControllerClient: Error from controller (JSON): {} - {}", code, message);
+    } else {
+        LOG_ERROR("ControllerClient: Received ERROR_MSG but failed to parse - not binary and not JSON");
     }
 }
 
@@ -254,16 +290,15 @@ void ControllerClient::send_heartbeat() {
         return;
     }
 
-    boost::json::object payload;
-    payload["server_id"] = server_id_;
-    payload["timestamp"] = static_cast<int64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-    payload["connected_clients"] = static_cast<uint64_t>(
-        server_.client_count());
+    // Use ServerStatsPayload for heartbeat (binary)
+    wire::ServerStatsPayload payload;
+    payload.active_connections = static_cast<uint32_t>(server_.client_count());
+    payload.bytes_relayed = 0;  // TODO: Track actual bytes relayed
 
-    auto frame = wire::create_json_frame(wire::MessageType::SERVER_HEARTBEAT, payload);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::SERVER_HEARTBEAT, std::move(binary));
     send_frame(frame);
+    LOG_DEBUG("ControllerClient: SERVER_HEARTBEAT sent ({} connections)", payload.active_connections);
 }
 
 void ControllerClient::send_latency_report(
@@ -273,21 +308,20 @@ void ControllerClient::send_latency_report(
         return;
     }
 
-    boost::json::object payload;
-    payload["server_id"] = server_id_;
-
-    boost::json::array arr;
+    // Use LatencyReportPayload for binary encoding
+    wire::LatencyReportPayload payload;
     for (const auto& [dst_type, dst_id, rtt_ms] : entries) {
-        boost::json::object entry;
-        entry["dst_type"] = dst_type;
-        entry["dst_id"] = dst_id;
-        entry["rtt_ms"] = rtt_ms;
-        arr.push_back(entry);
+        wire::LatencyReportPayload::LatencyEntry entry;
+        entry.dst_type = (dst_type == "relay") ? 0 : 1;
+        entry.dst_id = dst_id;
+        entry.rtt_ms = rtt_ms;
+        payload.entries.push_back(entry);
     }
-    payload["entries"] = arr;
 
-    auto frame = wire::create_json_frame(wire::MessageType::LATENCY_REPORT, payload);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::LATENCY_REPORT, std::move(binary));
     send_frame(frame);
+    LOG_DEBUG("ControllerClient: LATENCY_REPORT sent ({} entries)", payload.entries.size());
 }
 
 } // namespace edgelink

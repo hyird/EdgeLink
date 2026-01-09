@@ -508,58 +508,49 @@ void ControlChannelCoro::report_latency(uint32_t peer_node_id, uint32_t relay_id
                                          uint32_t latency_ms) {
     if (!is_connected()) return;
 
-    boost::json::object json;
-    boost::json::array entries;
-    boost::json::object entry;
-    entry["dst_type"] = "relay";
-    entry["dst_id"] = relay_id;
-    entry["rtt_ms"] = latency_ms;
-    entries.push_back(entry);
-    json["entries"] = entries;
+    wire::LatencyReportPayload payload;
+    payload.entries.push_back({
+        .dst_type = 0,  // 0=relay
+        .dst_id = relay_id,
+        .rtt_ms = latency_ms
+    });
 
-    auto frame = wire::create_json_frame(wire::MessageType::LATENCY_REPORT, json);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::LATENCY_REPORT, std::move(binary));
     send_frame(frame);
+    LOG_DEBUG("ControlChannelCoro: Reported latency to relay {} ({}ms)", relay_id, latency_ms);
 }
 
 void ControlChannelCoro::report_latency_batch(
     const std::vector<LatencyMeasurement>& measurements) {
     if (!is_connected() || measurements.empty()) return;
 
-    boost::json::object json;
-    boost::json::array entries;
-
+    wire::LatencyReportPayload payload;
     for (const auto& m : measurements) {
-        boost::json::object entry;
-        entry["dst_type"] = m.dst_type;
-        entry["dst_id"] = m.dst_id;
-        entry["rtt_ms"] = m.rtt_ms;
-        entries.push_back(entry);
+        payload.entries.push_back({
+            .dst_type = static_cast<uint8_t>(m.dst_type == "node" ? 1 : 0),
+            .dst_id = m.dst_id,
+            .rtt_ms = m.rtt_ms
+        });
     }
-    json["entries"] = entries;
 
-    auto frame = wire::create_json_frame(wire::MessageType::LATENCY_REPORT, json);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::LATENCY_REPORT, std::move(binary));
     send_frame(frame);
-    LOG_DEBUG("ControlChannelCoro: Reporting {} latency measurements", measurements.size());
+    LOG_DEBUG("ControlChannelCoro: Reported {} latency measurements", measurements.size());
 }
 
 void ControlChannelCoro::report_endpoints(const std::vector<wire::Endpoint>& endpoints) {
     if (!is_connected()) return;
 
-    boost::json::object json;
-    boost::json::array eps;
+    wire::P2PEndpointPayload payload;
+    payload.peer_node_id = node_id_;  // Report our own endpoints
+    payload.endpoints = endpoints;
 
-    for (const auto& ep : endpoints) {
-        boost::json::object ep_json;
-        ep_json["type"] = static_cast<int>(ep.type);
-        ep_json["ip"] = ep.ip;
-        ep_json["port"] = ep.port;
-        ep_json["priority"] = ep.priority;
-        eps.push_back(ep_json);
-    }
-    json["endpoints"] = eps;
-
-    auto frame = wire::create_json_frame(wire::MessageType::P2P_STATUS, json);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::P2P_STATUS, std::move(binary));
     send_frame(frame);
+    LOG_DEBUG("ControlChannelCoro: Reported {} endpoints", endpoints.size());
 }
 
 void ControlChannelCoro::request_peer_endpoints(uint32_t peer_node_id) {
@@ -567,10 +558,10 @@ void ControlChannelCoro::request_peer_endpoints(uint32_t peer_node_id) {
 
     LOG_DEBUG("ControlChannelCoro: Requesting P2P endpoints for peer {}", peer_node_id);
 
-    boost::json::object json;
-    json["peer_node_id"] = peer_node_id;
-
-    auto frame = wire::create_json_frame(wire::MessageType::P2P_INIT, json);
+    // P2P_INIT uses a simple binary format: peer_node_id(4)
+    wire::BinaryWriter w;
+    w.write_u32(peer_node_id);
+    auto frame = wire::Frame::create(wire::MessageType::P2P_INIT, w.data());
     send_frame(frame);
 }
 
@@ -579,15 +570,22 @@ void ControlChannelCoro::report_p2p_status(uint32_t peer_node_id, bool connected
                                             uint16_t endpoint_port, uint32_t rtt_ms) {
     if (!is_connected()) return;
 
-    boost::json::object json;
-    json["peer_node_id"] = peer_node_id;
-    json["connected"] = connected;
-    json["endpoint_ip"] = endpoint_ip;
-    json["endpoint_port"] = endpoint_port;
-    json["rtt_ms"] = rtt_ms;
+    wire::P2PStatusPayload payload;
+    payload.peer_node_id = peer_node_id;
+    payload.connected = connected;
+    // Convert IP string to uint32
+    struct in_addr addr;
+    if (inet_pton(AF_INET, endpoint_ip.c_str(), &addr) == 1) {
+        payload.endpoint_ip = addr.s_addr;
+    }
+    payload.endpoint_port = endpoint_port;
+    payload.rtt_ms = rtt_ms;
 
-    auto frame = wire::create_json_frame(wire::MessageType::P2P_STATUS, json);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::P2P_STATUS, std::move(binary));
     send_frame(frame);
+    LOG_DEBUG("ControlChannelCoro: Reported P2P status for peer {} (connected={})",
+              peer_node_id, connected);
 }
 
 void ControlChannelCoro::report_key_rotation(const std::array<uint8_t, 32>& new_pubkey,
@@ -600,36 +598,47 @@ void ControlChannelCoro::announce_route(const std::string& prefix, uint8_t prefi
                                          uint16_t priority, uint16_t weight, uint8_t flags) {
     if (!is_connected()) return;
 
-    boost::json::object json;
-    json["prefix"] = prefix;
-    json["prefix_len"] = prefix_len;
-    json["priority"] = priority;
-    json["weight"] = weight;
-    json["flags"] = flags;
+    wire::RouteAnnouncePayload payload;
+    payload.gateway_node_id = node_id_;
+    wire::RouteInfo route;
+    route.from_cidr(prefix + "/" + std::to_string(prefix_len));
+    route.priority = priority;
+    route.weight = weight;
+    route.flags = flags;
+    payload.routes.push_back(route);
 
-    auto frame = wire::create_json_frame(wire::MessageType::ROUTE_ANNOUNCE, json);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::ROUTE_ANNOUNCE, std::move(binary));
     send_frame(frame);
-    LOG_INFO("ControlChannelCoro: Announcing route {}/{}", prefix, prefix_len);
+    LOG_INFO("ControlChannelCoro: Announced route {}/{}", prefix, prefix_len);
 }
 
 void ControlChannelCoro::withdraw_route(const std::string& prefix, uint8_t prefix_len) {
     if (!is_connected()) return;
 
-    boost::json::object json;
-    json["prefix"] = prefix;
-    json["prefix_len"] = prefix_len;
+    // ROUTE_WITHDRAW uses RouteUpdatePayload with REMOVE action
+    wire::RouteUpdatePayload payload;
+    payload.version = config_version_;
+    wire::RouteInfo route;
+    route.from_cidr(prefix + "/" + std::to_string(prefix_len));
+    payload.changes.push_back({
+        .action = wire::RouteUpdatePayload::Action::REMOVE,
+        .route = route
+    });
 
-    auto frame = wire::create_json_frame(wire::MessageType::ROUTE_WITHDRAW, json);
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::ROUTE_WITHDRAW, std::move(binary));
     send_frame(frame);
-    LOG_INFO("ControlChannelCoro: Withdrawing route {}/{}", prefix, prefix_len);
+    LOG_INFO("ControlChannelCoro: Withdrew route {}/{}", prefix, prefix_len);
 }
 
 void ControlChannelCoro::send_config_ack(uint64_t version) {
-    boost::json::object json;
-    json["version"] = static_cast<int64_t>(version);
-
-    auto frame = wire::create_json_frame(wire::MessageType::CONFIG_ACK, json);
+    // CONFIG_ACK: simple binary format with version(8)
+    wire::BinaryWriter w;
+    w.write_u64(version);
+    auto frame = wire::Frame::create(wire::MessageType::CONFIG_ACK, w.data());
     send_frame(frame);
+    LOG_DEBUG("ControlChannelCoro: Sent CONFIG_ACK for version {}", version);
 }
 
 } // namespace edgelink::client

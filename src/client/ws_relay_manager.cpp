@@ -20,12 +20,14 @@ WsRelayConnection::WsRelayConnection(net::io_context& ioc, uint32_t server_id,
 {}
 
 void WsRelayConnection::do_authenticate() {
-    // Create RELAY_AUTH frame
+    // Create RELAY_AUTH frame (binary)
     wire::RelayAuthPayload auth_payload;
     auth_payload.relay_token = relay_token_;
 
-    auto frame = wire::create_json_frame(wire::MessageType::RELAY_AUTH, auth_payload.to_json());
+    auto binary = auth_payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::RELAY_AUTH, std::move(binary));
     send_frame(frame);
+    LOG_DEBUG("WsRelayConnection: RELAY_AUTH sent ({} bytes)", frame.payload.size());
 
     // Start reading for auth response (base class handles the read loop)
 }
@@ -33,8 +35,22 @@ void WsRelayConnection::do_authenticate() {
 void WsRelayConnection::process_frame(const wire::Frame& frame) {
     // Handle auth response specially
     if (state() == State::AUTHENTICATING && frame.header.type == wire::MessageType::AUTH_RESPONSE) {
+        // Try binary deserialization first
+        auto binary_result = wire::AuthResponsePayload::deserialize_binary(frame.payload);
+        if (binary_result) {
+            if (!binary_result->success) {
+                auth_failed(binary_result->error_message);
+                return;
+            }
+            LOG_INFO("WsRelayConnection: Authenticated with relay {} (binary)", server_id_);
+            auth_complete();
+            return;
+        }
+
+        // Fall back to JSON
         auto json_result = wire::parse_json_payload(frame);
         if (!json_result) {
+            LOG_WARN("WsRelayConnection: Invalid AUTH_RESPONSE - not binary and not JSON");
             auth_failed("Invalid auth response");
             return;
         }
@@ -45,7 +61,7 @@ void WsRelayConnection::process_frame(const wire::Frame& frame) {
             return;
         }
 
-        LOG_INFO("WsRelayConnection: Authenticated with relay {}", server_id_);
+        LOG_INFO("WsRelayConnection: Authenticated with relay {} (JSON)", server_id_);
         auth_complete();
         return;
     }

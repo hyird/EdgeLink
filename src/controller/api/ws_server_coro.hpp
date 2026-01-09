@@ -196,4 +196,41 @@ private:
     std::string server_name_;
 };
 
+/**
+ * WsBuiltinRelaySessionCoro - Handles client relay connections to built-in relay
+ *
+ * Used when the controller has a built-in relay enabled. Clients connect to
+ * /api/v1/relay to relay data through the controller.
+ */
+class WsBuiltinRelaySessionCoro : public WsSessionCoro {
+public:
+    WsBuiltinRelaySessionCoro(net::io_context& ioc, tcp::socket socket,
+                               WsControllerServerCoro* server);
+
+    ~WsBuiltinRelaySessionCoro() override;
+
+    const std::string& virtual_ip() const { return virtual_ip_; }
+
+protected:
+    // WsSessionCoro interface
+    net::awaitable<void> on_connected() override;
+    net::awaitable<void> process_frame(const wire::Frame& frame) override;
+    net::awaitable<void> on_disconnected(const std::string& reason) override;
+
+private:
+    // Binary frame handlers
+    net::awaitable<void> handle_relay_auth(const wire::Frame& frame);
+    net::awaitable<void> handle_data(const wire::Frame& frame);
+    net::awaitable<void> handle_ping(const wire::Frame& frame);
+
+    // Helper methods
+    void send_auth_response(bool success, uint32_t node_id, const std::string& error = "");
+    void send_pong(uint64_t timestamp);
+    void send_error(const std::string& code, const std::string& message);
+
+    WsControllerServerCoro* server_;
+    std::string virtual_ip_;
+    bool relay_authenticated_{false};
+};
+
 } // namespace edgelink::controller

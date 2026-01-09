@@ -1,4 +1,4 @@
-#include "common/frame.hpp"
+  #include "common/frame.hpp"
 #include <boost/endian/conversion.hpp>
 #include <cstring>
 #include <lz4.h>
@@ -513,8 +513,9 @@ std::expected<LatencyReportPayload, ErrorCode> LatencyReportPayload::from_json(c
         LatencyReportPayload p;
         for (const auto& e : obj.at("entries").as_array()) {
             const auto& entry = e.as_object();
+            std::string dst_type_str = entry.at("dst_type").as_string().c_str();
             p.entries.push_back({
-                .dst_type = entry.at("dst_type").as_string().c_str(),
+                .dst_type = static_cast<uint8_t>(dst_type_str == "node" ? 1 : 0),
                 .dst_id = static_cast<uint32_t>(entry.at("dst_id").as_int64()),
                 .rtt_ms = static_cast<uint32_t>(entry.at("rtt_ms").as_int64())
             });
@@ -523,6 +524,192 @@ std::expected<LatencyReportPayload, ErrorCode> LatencyReportPayload::from_json(c
     } catch (...) {
         return std::unexpected(ErrorCode::INVALID_MESSAGE);
     }
+}
+
+// Binary format: count(2) + entries[type(1) + dst_id(4) + rtt_ms(4)]
+std::vector<uint8_t> LatencyReportPayload::serialize_binary() const {
+    BinaryWriter w;
+    w.write_u16(static_cast<uint16_t>(entries.size()));
+    for (const auto& e : entries) {
+        w.write_u8(e.dst_type);
+        w.write_u32(e.dst_id);
+        w.write_u32(e.rtt_ms);
+    }
+    return w.data();
+}
+
+std::expected<LatencyReportPayload, ErrorCode> LatencyReportPayload::deserialize_binary(std::span<const uint8_t> data) {
+    BinaryReader r(data);
+    LatencyReportPayload p;
+    auto count = r.read_u16();
+    if (!count) return std::unexpected(ErrorCode::INVALID_MESSAGE);
+    for (uint16_t i = 0; i < *count; ++i) {
+        LatencyEntry e;
+        auto dst_type = r.read_u8();
+        auto dst_id = r.read_u32();
+        auto rtt_ms = r.read_u32();
+        if (!dst_type || !dst_id || !rtt_ms) return std::unexpected(ErrorCode::INVALID_MESSAGE);
+        e.dst_type = *dst_type;
+        e.dst_id = *dst_id;
+        e.rtt_ms = *rtt_ms;
+        p.entries.push_back(e);
+    }
+    return p;
+}
+
+// Binary format: peer_node_id(4) + nat_type(1) + ep_count(2) + endpoints[]
+std::vector<uint8_t> P2PEndpointPayload::serialize_binary() const {
+    BinaryWriter w;
+    w.write_u32(peer_node_id);
+    w.write_u8(static_cast<uint8_t>(nat_type));
+    w.write_u16(static_cast<uint16_t>(endpoints.size()));
+    for (const auto& ep : endpoints) {
+        // For each endpoint: ip(4) + port(2) + type(1)
+        struct in_addr addr;
+        if (inet_pton(AF_INET, ep.ip.c_str(), &addr) == 1) {
+            w.write_u32(addr.s_addr);
+        } else {
+            w.write_u32(0);
+        }
+        w.write_u16(ep.port);
+        w.write_u8(static_cast<uint8_t>(ep.type));
+    }
+    return w.data();
+}
+
+std::expected<P2PEndpointPayload, ErrorCode> P2PEndpointPayload::deserialize_binary(std::span<const uint8_t> data) {
+    BinaryReader r(data);
+    P2PEndpointPayload p;
+    auto peer_node_id = r.read_u32();
+    auto nat_type = r.read_u8();
+    auto ep_count = r.read_u16();
+    if (!peer_node_id || !nat_type || !ep_count) return std::unexpected(ErrorCode::INVALID_MESSAGE);
+    p.peer_node_id = *peer_node_id;
+    p.nat_type = static_cast<NATType>(*nat_type);
+    for (uint16_t i = 0; i < *ep_count; ++i) {
+        Endpoint ep;
+        auto ip_int = r.read_u32();
+        auto port = r.read_u16();
+        auto type = r.read_u8();
+        if (!ip_int || !port || !type) return std::unexpected(ErrorCode::INVALID_MESSAGE);
+        struct in_addr addr;
+        addr.s_addr = *ip_int;
+        char buf[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &addr, buf, sizeof(buf))) {
+            ep.ip = buf;
+        }
+        ep.port = *port;
+        ep.type = static_cast<EndpointType>(*type);
+        p.endpoints.push_back(ep);
+    }
+    return p;
+}
+
+// Binary format: peer_node_id(4) + connected(1) + endpoint_ip(4) + endpoint_port(2) + rtt_ms(4)
+std::vector<uint8_t> P2PStatusPayload::serialize_binary() const {
+    BinaryWriter w;
+    w.write_u32(peer_node_id);
+    w.write_u8(connected ? 1 : 0);
+    w.write_u32(endpoint_ip);
+    w.write_u16(endpoint_port);
+    w.write_u32(rtt_ms);
+    return w.data();
+}
+
+std::expected<P2PStatusPayload, ErrorCode> P2PStatusPayload::deserialize_binary(std::span<const uint8_t> data) {
+    BinaryReader r(data);
+    P2PStatusPayload p;
+    auto peer_node_id = r.read_u32();
+    auto connected = r.read_u8();
+    auto endpoint_ip = r.read_u32();
+    auto endpoint_port = r.read_u16();
+    auto rtt_ms = r.read_u32();
+    if (!peer_node_id || !connected || !endpoint_ip || !endpoint_port || !rtt_ms) {
+        return std::unexpected(ErrorCode::INVALID_MESSAGE);
+    }
+    p.peer_node_id = *peer_node_id;
+    p.connected = (*connected != 0);
+    p.endpoint_ip = *endpoint_ip;
+    p.endpoint_port = *endpoint_port;
+    p.rtt_ms = *rtt_ms;
+    return p;
+}
+
+// Binary format: token(len+str) + name(len+str) + caps(1) + region(len+str) + relay_url(len+str) + stun_ip(len+str) + stun_port(2) + stun_ip2(len+str)
+std::vector<uint8_t> ServerRegisterPayload::serialize_binary() const {
+    BinaryWriter w;
+    w.write_string(server_token);
+    w.write_string(name);
+    w.write_u8(capabilities);
+    w.write_string(region);
+    w.write_string(relay_url);
+    w.write_string(stun_ip);
+    w.write_u16(stun_port);
+    w.write_string(stun_ip2);
+    return w.data();
+}
+
+std::expected<ServerRegisterPayload, ErrorCode> ServerRegisterPayload::deserialize_binary(std::span<const uint8_t> data) {
+    BinaryReader r(data);
+    ServerRegisterPayload p;
+    auto server_token = r.read_string();
+    auto name = r.read_string();
+    auto capabilities = r.read_u8();
+    auto region = r.read_string();
+    auto relay_url = r.read_string();
+    auto stun_ip = r.read_string();
+    auto stun_port = r.read_u16();
+    auto stun_ip2 = r.read_string();
+    if (!server_token || !name || !capabilities || !region || !relay_url || !stun_ip || !stun_port || !stun_ip2) {
+        return std::unexpected(ErrorCode::INVALID_MESSAGE);
+    }
+    p.server_token = *server_token;
+    p.name = *name;
+    p.capabilities = *capabilities;
+    p.region = *region;
+    p.relay_url = *relay_url;
+    p.stun_ip = *stun_ip;
+    p.stun_port = *stun_port;
+    p.stun_ip2 = *stun_ip2;
+    return p;
+}
+
+// Binary format: token(len+str)
+std::vector<uint8_t> RelayAuthPayload::serialize_binary() const {
+    BinaryWriter w;
+    w.write_string(relay_token);
+    return w.data();
+}
+
+std::expected<RelayAuthPayload, ErrorCode> RelayAuthPayload::deserialize_binary(std::span<const uint8_t> data) {
+    BinaryReader r(data);
+    RelayAuthPayload p;
+    auto relay_token = r.read_string();
+    if (!relay_token) return std::unexpected(ErrorCode::INVALID_MESSAGE);
+    p.relay_token = *relay_token;
+    return p;
+}
+
+// Binary format: code(2) + message(len+str) + details(len+str)
+std::vector<uint8_t> ErrorPayload::serialize_binary() const {
+    BinaryWriter w;
+    w.write_u16(code);
+    w.write_string(message);
+    w.write_string(details);
+    return w.data();
+}
+
+std::expected<ErrorPayload, ErrorCode> ErrorPayload::deserialize_binary(std::span<const uint8_t> data) {
+    BinaryReader r(data);
+    ErrorPayload p;
+    auto code = r.read_u16();
+    auto message = r.read_string();
+    auto details = r.read_string();
+    if (!code || !message || !details) return std::unexpected(ErrorCode::INVALID_MESSAGE);
+    p.code = *code;
+    p.message = *message;
+    p.details = *details;
+    return p;
 }
 
 boost::json::object ErrorPayload::to_json() const {
@@ -1708,6 +1895,126 @@ std::expected<ServerBlacklistPayload, ErrorCode> ServerBlacklistPayload::from_js
     } catch (...) {
         return std::unexpected(ErrorCode::INVALID_MESSAGE);
     }
+}
+
+// ----------------------------------------------------------------------------
+// ServerRegisterRespPayload Implementation
+// ----------------------------------------------------------------------------
+std::vector<uint8_t> ServerRegisterRespPayload::serialize_binary() const {
+    BinaryWriter writer(64);
+    writer.write_bool(success);
+    writer.write_u32(server_id);
+    writer.write_string(error_message);
+    return writer.take();
+}
+
+std::expected<ServerRegisterRespPayload, ErrorCode> ServerRegisterRespPayload::deserialize_binary(
+    std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    ServerRegisterRespPayload payload;
+
+    auto success_r = reader.read_bool();
+    if (!success_r) return std::unexpected(success_r.error());
+    payload.success = *success_r;
+
+    auto id_r = reader.read_u32();
+    if (!id_r) return std::unexpected(id_r.error());
+    payload.server_id = *id_r;
+
+    auto err_r = reader.read_string();
+    if (!err_r) return std::unexpected(err_r.error());
+    payload.error_message = *err_r;
+
+    return payload;
+}
+
+// ----------------------------------------------------------------------------
+// PongPayload Implementation
+// ----------------------------------------------------------------------------
+std::vector<uint8_t> PongPayload::serialize_binary() const {
+    BinaryWriter writer(8);
+    writer.write_u64(timestamp);
+    return writer.take();
+}
+
+std::expected<PongPayload, ErrorCode> PongPayload::deserialize_binary(
+    std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    PongPayload payload;
+
+    auto ts_r = reader.read_u64();
+    if (!ts_r) return std::unexpected(ts_r.error());
+    payload.timestamp = *ts_r;
+
+    return payload;
+}
+
+// ----------------------------------------------------------------------------
+// ConfigAckPayload Implementation
+// ----------------------------------------------------------------------------
+std::vector<uint8_t> ConfigAckPayload::serialize_binary() const {
+    BinaryWriter writer(8);
+    writer.write_u64(version);
+    return writer.take();
+}
+
+std::expected<ConfigAckPayload, ErrorCode> ConfigAckPayload::deserialize_binary(
+    std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    ConfigAckPayload payload;
+
+    auto ver_r = reader.read_u64();
+    if (!ver_r) return std::unexpected(ver_r.error());
+    payload.version = *ver_r;
+
+    return payload;
+}
+
+// ----------------------------------------------------------------------------
+// P2PInitPayload Implementation
+// ----------------------------------------------------------------------------
+std::vector<uint8_t> P2PInitPayload::serialize_binary() const {
+    BinaryWriter writer(4);
+    writer.write_u32(peer_node_id);
+    return writer.take();
+}
+
+std::expected<P2PInitPayload, ErrorCode> P2PInitPayload::deserialize_binary(
+    std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    P2PInitPayload payload;
+
+    auto id_r = reader.read_u32();
+    if (!id_r) return std::unexpected(id_r.error());
+    payload.peer_node_id = *id_r;
+
+    return payload;
+}
+
+// ----------------------------------------------------------------------------
+// ServerStatsPayload Implementation
+// ----------------------------------------------------------------------------
+std::vector<uint8_t> ServerStatsPayload::serialize_binary() const {
+    BinaryWriter writer(16);
+    writer.write_u32(active_connections);
+    writer.write_u64(bytes_relayed);
+    return writer.take();
+}
+
+std::expected<ServerStatsPayload, ErrorCode> ServerStatsPayload::deserialize_binary(
+    std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    ServerStatsPayload payload;
+
+    auto conn_r = reader.read_u32();
+    if (!conn_r) return std::unexpected(conn_r.error());
+    payload.active_connections = *conn_r;
+
+    auto bytes_r = reader.read_u64();
+    if (!bytes_r) return std::unexpected(bytes_r.error());
+    payload.bytes_relayed = *bytes_r;
+
+    return payload;
 }
 
 // ============================================================================

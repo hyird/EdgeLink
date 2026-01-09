@@ -42,7 +42,7 @@ void print_usage(const char* program) {
               << "  -a, --auth-key <key>  Auth key for registration\n"
               << "  -k, --key <key>       Machine public key (base64)\n"
               << "  -K, --priv-key <key>  Machine private key (base64)\n"
-              << "  -i, --interface <n>   TUN interface name (default: wss0)\n"
+              << "  -i, --interface <n>   TUN interface name (default: edge)\n"
               << "  -l, --log-level <l>   Log level: trace/debug/info/warn/error\n"
               << "  -d, --daemon          Run as daemon\n"
               << "  -q, --quiet           Suppress log output\n"
@@ -146,7 +146,8 @@ int cmd_init(const std::vector<std::string>& args) {
     f << "  \"controller_url\": \"" << (url.empty() ? "wss://controller.example.com" : url) << "\",\n";
     f << "  \"machine_key_pub\": \"" << pub_b64 << "\",\n";
     f << "  \"machine_key_priv\": \"" << priv_b64 << "\",\n";
-    f << "  \"tun_name\": \"wss0\",\n";
+    f << "  \"auth_key\": \"\",\n";
+    f << "  \"tun_name\": \"edge\",\n";
     f << "  \"log_level\": \"info\"\n";
     f << "}\n";
     
