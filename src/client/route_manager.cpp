@@ -186,15 +186,18 @@ uint32_t RouteManager::lookup(const std::string& dst_ip) const {
 }
 
 uint32_t RouteManager::lookup(uint32_t dst_ip) const {
+    // dst_ip from IPv4Header is in network byte order, convert to host byte order
+    uint32_t dst_ip_host = ntohl(dst_ip);
+
     // Skip if it's our own IP
-    if (dst_ip == local_ip_int_) {
+    if (dst_ip_host == local_ip_int_) {
         return 0;
     }
-    
+
     // First, check direct peer routes (most specific for /32)
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
-        auto it = ip_to_node_.find(dst_ip);
+        auto it = ip_to_node_.find(dst_ip_host);
         if (it != ip_to_node_.end()) {
             // Check if peer is reachable
             auto peer_it = peer_routes_.find(it->second);
@@ -219,9 +222,9 @@ uint32_t RouteManager::lookup(uint32_t dst_ip) const {
         
         for (const auto& route : subnet_routes_) {
             if (!route.active) continue;
-            
+
             uint32_t network = parse_ip(route.network);
-            if (ip_matches(dst_ip, network, route.prefix_len)) {
+            if (ip_matches(dst_ip_host, network, route.prefix_len)) {
                 if (route.prefix_len > longest_prefix) {
                     longest_prefix = route.prefix_len;
                     matching.clear();

@@ -2,6 +2,7 @@
 #include "controller/builtin_relay.hpp"
 #include "common/log.hpp"
 #include "common/frame.hpp"
+#include "common/binary_codec.hpp"
 
 #include <regex>
 #include <chrono>
@@ -664,15 +665,11 @@ void WsControlSessionCoro::send_config_update() {
             config.network_name = net.name;
             config.subnet = net.subnet;
 
-            // Parse subnet CIDR
-            auto slash_pos = net.subnet.find('/');
-            if (slash_pos != std::string::npos) {
-                std::string subnet_ip = net.subnet.substr(0, slash_pos);
-                struct in_addr subnet_addr;
-                if (inet_pton(AF_INET, subnet_ip.c_str(), &subnet_addr) == 1) {
-                    config.subnet_ip = subnet_addr.s_addr;
-                }
-                config.subnet_mask = static_cast<uint8_t>(std::stoi(net.subnet.substr(slash_pos + 1)));
+            // Parse subnet CIDR using binary_codec helper
+            auto cidr_result = wire::parse_cidr_v4(net.subnet);
+            if (cidr_result) {
+                config.subnet_ip = cidr_result->prefix;
+                config.subnet_mask = cidr_result->prefix_len;
             }
         }
 
