@@ -14,7 +14,11 @@
 namespace edgelink::client {
 
 namespace net = boost::asio;
+using tcp = boost::asio::ip::tcp;
+
+#ifndef _WIN32
 using local_stream = boost::asio::local::stream_protocol;
+#endif
 
 // Forward declarations
 class Client;
@@ -57,6 +61,30 @@ struct IPCPingResponse {
 // IPC Session - Handles one client connection
 // ============================================================================
 
+#ifdef _WIN32
+// Windows: Use TCP socket
+class IPCSession : public std::enable_shared_from_this<IPCSession> {
+public:
+    IPCSession(tcp::socket socket, Client* client);
+
+    void start();
+
+private:
+    void do_read();
+    void do_write(const std::string& response);
+
+    std::string handle_request(const nlohmann::json& request);
+    std::string handle_status();
+    std::string handle_disconnect();
+    std::string handle_reconnect();
+    std::string handle_ping(uint32_t peer_node_id);
+
+    tcp::socket socket_;
+    Client* client_;
+    std::array<char, 8192> buffer_;
+};
+#else
+// POSIX: Use Unix domain socket
 class IPCSession : public std::enable_shared_from_this<IPCSession> {
 public:
     IPCSession(local_stream::socket socket, Client* client);
@@ -77,9 +105,10 @@ private:
     Client* client_;
     std::array<char, 8192> buffer_;
 };
+#endif
 
 // ============================================================================
-// IPC Server (Unix socket for POSIX, named pipe for Windows)
+// IPC Server (Unix socket for POSIX, TCP localhost for Windows)
 // ============================================================================
 
 class IPCServer {
@@ -95,15 +124,20 @@ public:
     bool start();
     void stop();
 
-    // Get socket path
+    // Get socket path (POSIX) or port info (Windows)
     static std::string get_socket_path();
+    static constexpr uint16_t WINDOWS_IPC_PORT = 47523;
 
 private:
     void do_accept();
 
     net::io_context& ioc_;
     Client* client_;
+#ifdef _WIN32
+    std::unique_ptr<tcp::acceptor> acceptor_;
+#else
     std::unique_ptr<local_stream::acceptor> acceptor_;
+#endif
     std::atomic<bool> running_{false};
 };
 
@@ -130,7 +164,11 @@ private:
     std::string send_request(const nlohmann::json& request);
 
     net::io_context ioc_;
+#ifdef _WIN32
+    std::unique_ptr<tcp::socket> socket_;
+#else
     std::unique_ptr<local_stream::socket> socket_;
+#endif
     bool connected_{false};
 };
 

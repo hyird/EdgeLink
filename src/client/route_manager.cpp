@@ -6,6 +6,12 @@
 #include <algorithm>
 #include <random>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <iphlpapi.h>
+#pragma comment(lib, "iphlpapi.lib")
+#endif
+
 namespace edgelink::client {
 
 // Thread-local random engine for weighted selection
@@ -329,50 +335,83 @@ uint32_t RouteManager::get_node_by_ip(uint32_t ip) const {
 std::expected<void, ErrorCode> RouteManager::apply_routes() {
     // First, remove existing routes
     (void)remove_routes();  // Ignore return value - best effort cleanup
-    
+
     // Add route for entire virtual network
     if (network_addr_ != 0) {
-        std::string route_spec = format_ip(network_addr_) + "/" + 
+        std::string network_str = format_ip(network_addr_);
+
+#ifdef _WIN32
+        // Windows: use 'route add' command
+        // Calculate netmask from prefix
+        uint32_t mask = network_prefix_ == 0 ? 0 : ~((1u << (32 - network_prefix_)) - 1);
+        std::string netmask_str = format_ip(mask);
+
+        // Route through TUN interface - use local IP as gateway
+        std::string gateway = local_ip_.empty() ? "0.0.0.0" : local_ip_;
+
+        // Delete existing route first (ignore errors)
+        std::string del_cmd = "route delete " + network_str + " >nul 2>&1";
+        std::system(del_cmd.c_str());
+
+        // Add route: route add <network> mask <netmask> <gateway> metric 10
+        std::string cmd = "route add " + network_str + " mask " + netmask_str +
+                         " " + gateway + " metric 10";
+
+        int ret = std::system(cmd.c_str());
+        if (ret != 0) {
+            LOG_WARN("RouteManager: Route command returned non-zero ({}), but may still be OK", ret);
+        }
+#else
+        // Linux: use 'ip route' command
+        std::string route_spec = network_str + "/" +
                                  std::to_string(network_prefix_) + " dev " + tun_name_;
-        
+
         // Try to add the route; if it exists, try to replace it
         std::string cmd = "ip route add " + route_spec + " 2>/dev/null || "
                          "ip route replace " + route_spec;
-        
+
         int ret = std::system(cmd.c_str());
         if (ret != 0) {
             LOG_WARN("RouteManager: Route command returned non-zero, but may still be OK");
         }
-        
-        applied_routes_.emplace_back(format_ip(network_addr_), network_prefix_);
-        LOG_INFO("RouteManager: Added network route {}/{} via {}", 
-                 format_ip(network_addr_), network_prefix_, tun_name_);
+#endif
+
+        applied_routes_.emplace_back(network_str, network_prefix_);
+        LOG_INFO("RouteManager: Added network route {}/{} via {}",
+                 network_str, network_prefix_, tun_name_);
     }
-    
+
     // Add subnet routes
     std::vector<RouteEntry> routes_copy;
     {
         std::lock_guard<std::mutex> lock(routes_mutex_);
         routes_copy = subnet_routes_;
     }
-    
+
     for (const auto& route : routes_copy) {
         if (!route.active) continue;
-        
+
         // Subnet routes are handled at the mesh level, not OS level
         // The lookup() function handles routing within the mesh
     }
-    
+
     return {};
 }
 
 std::expected<void, ErrorCode> RouteManager::remove_routes() {
     for (const auto& [network, prefix] : applied_routes_) {
-        std::string cmd = "ip route del " + network + "/" + 
+#ifdef _WIN32
+        // Windows: use 'route delete' command
+        std::string cmd = "route delete " + network + " >nul 2>&1";
+        std::system(cmd.c_str());
+#else
+        // Linux: use 'ip route del' command
+        std::string cmd = "ip route del " + network + "/" +
                          std::to_string(prefix) + " dev " + tun_name_ + " 2>/dev/null";
         std::system(cmd.c_str());
+#endif
     }
-    
+
     applied_routes_.clear();
     return {};
 }

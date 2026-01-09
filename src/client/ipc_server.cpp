@@ -17,16 +17,13 @@ namespace edgelink::client {
 using json = nlohmann::json;
 
 // ============================================================================
-// Socket Path
+// Socket Path (POSIX only)
 // ============================================================================
 
 std::string IPCServer::get_socket_path() {
 #ifdef _WIN32
-    // Windows: use named pipe path (Boost.Asio local sockets use file paths on Windows too)
-    const char* temp = std::getenv("TEMP");
-    if (!temp) temp = std::getenv("TMP");
-    if (!temp) temp = "C:\\Windows\\Temp";
-    return std::string(temp) + "\\edgelink-client.sock";
+    // Windows uses TCP, return port info as string
+    return "localhost:" + std::to_string(WINDOWS_IPC_PORT);
 #else
     // POSIX: use Unix domain socket in /run or /var/run
     const char* runtime_dir = std::getenv("XDG_RUNTIME_DIR");
@@ -52,10 +49,17 @@ std::string IPCServer::get_socket_path() {
 // IPCSession
 // ============================================================================
 
+#ifdef _WIN32
+IPCSession::IPCSession(tcp::socket socket, Client* client)
+    : socket_(std::move(socket))
+    , client_(client)
+{}
+#else
 IPCSession::IPCSession(local_stream::socket socket, Client* client)
     : socket_(std::move(socket))
     , client_(client)
 {}
+#endif
 
 void IPCSession::start() {
     do_read();
@@ -249,27 +253,41 @@ IPCServer::~IPCServer() {
 bool IPCServer::start() {
     if (running_) return true;
 
-    std::string socket_path = get_socket_path();
-
-    // Remove existing socket file
-    std::remove(socket_path.c_str());
-
     try {
+#ifdef _WIN32
+        // Windows: Use TCP on localhost
+        tcp::endpoint endpoint(net::ip::address_v4::loopback(), WINDOWS_IPC_PORT);
+        acceptor_ = std::make_unique<tcp::acceptor>(ioc_, endpoint);
+
+        running_ = true;
+        do_accept();
+
+        LOG_INFO("IPCServer: Listening on localhost:{}", WINDOWS_IPC_PORT);
+#else
+        // POSIX: Use Unix domain socket
+        std::string socket_path = get_socket_path();
+
+        // Remove existing socket file
+        std::remove(socket_path.c_str());
+
         local_stream::endpoint endpoint(socket_path);
         acceptor_ = std::make_unique<local_stream::acceptor>(ioc_, endpoint);
 
-#ifndef _WIN32
         // Set socket permissions to allow user access
         chmod(socket_path.c_str(), 0660);
-#endif
 
         running_ = true;
         do_accept();
 
         LOG_INFO("IPCServer: Listening on {}", socket_path);
+#endif
         return true;
     } catch (const std::exception& e) {
-        LOG_ERROR("IPCServer: Failed to start on {}: {}", socket_path, e.what());
+#ifdef _WIN32
+        LOG_ERROR("IPCServer: Failed to start on localhost:{}: {}", WINDOWS_IPC_PORT, e.what());
+#else
+        LOG_ERROR("IPCServer: Failed to start on {}: {}", get_socket_path(), e.what());
+#endif
         return false;
     }
 }
@@ -286,9 +304,11 @@ void IPCServer::stop() {
 
     acceptor_.reset();
 
-    // Clean up socket file
+#ifndef _WIN32
+    // Clean up socket file (POSIX only)
     std::string socket_path = get_socket_path();
     std::remove(socket_path.c_str());
+#endif
 
     LOG_INFO("IPCServer: Stopped");
 }
@@ -296,6 +316,26 @@ void IPCServer::stop() {
 void IPCServer::do_accept() {
     if (!running_ || !acceptor_) return;
 
+#ifdef _WIN32
+    acceptor_->async_accept(
+        [this](boost::system::error_code ec, tcp::socket socket) {
+            if (!ec) {
+                // Only accept connections from localhost for security
+                auto remote = socket.remote_endpoint().address();
+                if (remote.is_loopback()) {
+                    std::make_shared<IPCSession>(std::move(socket), client_)->start();
+                } else {
+                    LOG_WARN("IPCServer: Rejected non-localhost connection from {}", remote.to_string());
+                }
+            } else if (ec != net::error::operation_aborted) {
+                LOG_WARN("IPCServer: Accept error: {}", ec.message());
+            }
+
+            if (running_) {
+                do_accept();
+            }
+        });
+#else
     acceptor_->async_accept(
         [this](boost::system::error_code ec, local_stream::socket socket) {
             if (!ec) {
@@ -308,6 +348,7 @@ void IPCServer::do_accept() {
                 do_accept();
             }
         });
+#endif
 }
 
 // ============================================================================
@@ -324,9 +365,23 @@ IPCClient::~IPCClient() {
 }
 
 bool IPCClient::connect() {
-    std::string socket_path = IPCServer::get_socket_path();
-
     try {
+#ifdef _WIN32
+        // Windows: Connect via TCP
+        socket_ = std::make_unique<tcp::socket>(ioc_);
+        tcp::endpoint endpoint(net::ip::address_v4::loopback(), IPCServer::WINDOWS_IPC_PORT);
+
+        boost::system::error_code ec;
+        socket_->connect(endpoint, ec);
+
+        if (ec) {
+            socket_.reset();
+            return false;
+        }
+#else
+        // POSIX: Connect via Unix domain socket
+        std::string socket_path = IPCServer::get_socket_path();
+
         socket_ = std::make_unique<local_stream::socket>(ioc_);
         local_stream::endpoint endpoint(socket_path);
 
@@ -337,6 +392,7 @@ bool IPCClient::connect() {
             socket_.reset();
             return false;
         }
+#endif
 
         connected_ = true;
         return true;
