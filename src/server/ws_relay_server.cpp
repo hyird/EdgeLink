@@ -472,7 +472,7 @@ void WsRelayClientSession::close() {
 WsRelayServer::WsRelayServer(net::io_context& ioc, const ServerConfig& config)
     : ioc_(ioc)
     , config_(config)
-    , session_manager_(config.controller.jwt_secret.empty() ? "default-secret" : config.controller.jwt_secret)
+    , session_manager_("edgelink-relay-jwt-secret")
 {}
 
 WsRelayServer::~WsRelayServer() {
