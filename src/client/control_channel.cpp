@@ -216,6 +216,7 @@ void ControlChannel::handle_config(const wire::Frame& frame) {
         return;
     }
 
+    try {
         ConfigUpdate update;
 
         // Parse version

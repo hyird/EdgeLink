@@ -1,5 +1,7 @@
 #include "client.hpp"
 #include "common/log.hpp"
+#include "common/crypto/ed25519.hpp"
+#include "common/crypto/x25519.hpp"
 #include <spdlog/spdlog.h>
 #include <sodium.h>
 #include <fstream>
@@ -199,7 +201,7 @@ bool Client::start() {
     }
 
     // 启动 IPC 服务器 (用于 CLI 通信)
-    ipc_server_ = std::make_unique<IPCServer>(this);
+    ipc_server_ = std::make_unique<IPCServer>(ioc_, this);
     if (!ipc_server_->start()) {
         LOG_WARN("Failed to start IPC server (CLI commands will not work)");
         // Not fatal - continue without IPC
@@ -302,10 +304,50 @@ bool Client::init_control_channel() {
             LOG_WARN("init_control_channel: No auth_key in config");
         }
         
+        // Decode Ed25519 keys from Base64
+        auto machine_pub = edgelink::crypto::Ed25519::public_key_from_base64(config_.machine_key_pub);
+        auto machine_priv = edgelink::crypto::Ed25519::private_key_from_base64(config_.machine_key_priv);
+        
+        if (!machine_pub || !machine_priv) {
+            LOG_ERROR("init_control_channel: Failed to decode machine keys");
+            return false;
+        }
+        
+        // Generate or decode X25519 keys
+        wire::X25519PublicKey node_pub;
+        wire::X25519PrivateKey node_priv;
+        
+        if (!config_.node_key_pub.empty() && !config_.node_key_priv.empty()) {
+            // Decode existing X25519 keys
+            auto pub_result = edgelink::crypto::X25519::public_key_from_base64(config_.node_key_pub);
+            auto priv_result = edgelink::crypto::X25519::private_key_from_base64(config_.node_key_priv);
+            
+            if (!pub_result || !priv_result) {
+                LOG_ERROR("init_control_channel: Failed to decode node keys");
+                return false;
+            }
+            
+            node_pub = *pub_result;
+            node_priv = *priv_result;
+        } else {
+            // Generate new X25519 keypair
+            auto [pub, priv] = edgelink::crypto::X25519::generate_keypair();
+            node_pub = pub;
+            node_priv = priv;
+            
+            // Save to config
+            config_.node_key_pub = edgelink::crypto::X25519::public_key_to_base64(pub);
+            config_.node_key_priv = edgelink::crypto::X25519::private_key_to_base64(priv);
+            LOG_INFO("init_control_channel: Generated new X25519 keypair");
+        }
+        
         control_channel_ = std::make_shared<ControlChannel>(
+            ioc_,
             config_.controller_url,
-            config_.machine_key_pub,
-            config_.machine_key_priv,
+            *machine_pub,
+            *machine_priv,
+            node_pub,
+            node_priv,
             config_.auth_key
         );
         
@@ -356,7 +398,7 @@ bool Client::init_control_channel() {
             });
         };
 
-        control_channel_->set_callbacks(callbacks);
+        control_channel_->set_control_callbacks(callbacks);
         return true;
         
     } catch (const std::exception& e) {

@@ -68,6 +68,7 @@ public:
 
 private:
     std::string jwt_secret_;
+    std::unique_ptr<JWTManager> jwt_manager_;
 
     // Client sessions
     mutable std::shared_mutex client_mutex_;
@@ -122,6 +123,7 @@ public:
         std::atomic<uint64_t> auth_failures{0};
     };
     const Stats& stats() const { return stats_; }
+    Stats& stats() { return stats_; }
 
 private:
     void do_accept();

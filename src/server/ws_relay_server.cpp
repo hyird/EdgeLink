@@ -5,6 +5,7 @@
 #include <chrono>
 
 namespace edgelink {
+namespace http = beast::http;
 
 // ============================================================================
 // WsRelaySessionManager Implementation
@@ -12,6 +13,7 @@ namespace edgelink {
 
 WsRelaySessionManager::WsRelaySessionManager(const std::string& jwt_secret)
     : jwt_secret_(jwt_secret)
+    , jwt_manager_(std::make_unique<JWTManager>(jwt_secret))
 {}
 
 void WsRelaySessionManager::add_client_session(uint32_t node_id, void* session) {
@@ -52,7 +54,7 @@ void* WsRelaySessionManager::get_mesh_session(uint32_t server_id) {
 
 bool WsRelaySessionManager::validate_relay_token(const std::string& token, uint32_t& node_id,
                                                   std::string& virtual_ip) {
-    auto result = jwt::validate_token(token, jwt_secret_);
+    auto result = jwt_manager_->verify_relay_token(token);
     if (!result) {
         LOG_DEBUG("WsRelaySessionManager: Token validation failed");
         return false;
@@ -72,14 +74,8 @@ bool WsRelaySessionManager::validate_relay_token(const std::string& token, uint3
         }
     }
 
-    // Check token type
-    if (result->type != "relay") {
-        LOG_DEBUG("WsRelaySessionManager: Invalid token type: {}", result->type);
-        return false;
-    }
-
     node_id = result->node_id;
-    virtual_ip = result->virtual_ip;
+    virtual_ip = std::to_string(result->network_id);  // Use network_id as placeholder
     return true;
 }
 

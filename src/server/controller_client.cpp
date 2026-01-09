@@ -120,8 +120,8 @@ void ControllerClient::handle_register_response(const wire::Frame& frame) {
 
     auto& json = json_result->as_object();
 
-    if (json.contains("success") && json["success"].as_bool()) {
-        server_id_ = static_cast<uint32_t>(json["server_id"].as_int64());
+    if (json.contains("success") && json.at("success").as_bool()) {
+        server_id_ = static_cast<uint32_t>(json.at("server_id").as_int64());
         server_.set_server_id(server_id_);
         registered_ = true;
 
@@ -131,7 +131,7 @@ void ControllerClient::handle_register_response(const wire::Frame& frame) {
         auth_complete();
     } else {
         std::string error = json.contains("error_message")
-            ? json["error_message"].as_string().c_str()
+            ? json.at("error_message").as_string().c_str()
             : "Unknown error";
         LOG_ERROR("ControllerClient: Registration failed: {}", error);
 
@@ -153,13 +153,13 @@ void ControllerClient::handle_node_loc(const wire::Frame& frame) {
     std::vector<std::pair<uint32_t, std::vector<uint32_t>>> locations;
 
     if (json.contains("nodes")) {
-        for (const auto& node : json["nodes"].as_array()) {
+        for (const auto& node : json.at("nodes").as_array()) {
             const auto& n = node.as_object();
-            uint32_t node_id = static_cast<uint32_t>(n["node_id"].as_int64());
+            uint32_t node_id = static_cast<uint32_t>(n.at("node_id").as_int64());
             std::vector<uint32_t> relay_ids;
 
             if (n.contains("connected_relay_ids")) {
-                for (const auto& rid : n["connected_relay_ids"].as_array()) {
+                for (const auto& rid : n.at("connected_relay_ids").as_array()) {
                     relay_ids.push_back(static_cast<uint32_t>(rid.as_int64()));
                 }
             }
@@ -186,7 +186,7 @@ void ControllerClient::handle_relay_list(const wire::Frame& frame) {
     std::vector<wire::RelayInfo> relays;
 
     if (json.contains("relays")) {
-        for (const auto& relay : json["relays"].as_array()) {
+        for (const auto& relay : json.at("relays").as_array()) {
             auto result = wire::RelayInfo::from_json(relay);
             if (result) {
                 relays.push_back(std::move(*result));
@@ -209,14 +209,14 @@ void ControllerClient::handle_blacklist(const wire::Frame& frame) {
     }
 
     auto& json = json_result->as_object();
-    bool full_sync = json.contains("full_sync") && json["full_sync"].as_bool();
+    bool full_sync = json.contains("full_sync") && json.at("full_sync").as_bool();
     std::vector<std::pair<std::string, int64_t>> entries;
 
     if (json.contains("entries")) {
-        for (const auto& entry : json["entries"].as_array()) {
-            auto& e = entry.as_object();
-            std::string jti = e["jti"].as_string().c_str();
-            int64_t expires_at = e["expires_at"].as_int64();
+        for (const auto& entry : json.at("entries").as_array()) {
+            const auto& e = entry.as_object();
+            std::string jti = e.at("jti").as_string().c_str();
+            int64_t expires_at = e.at("expires_at").as_int64();
             entries.emplace_back(jti, expires_at);
         }
     }
@@ -233,9 +233,9 @@ void ControllerClient::handle_error(const wire::Frame& frame) {
     auto json_result = wire::parse_json_payload(frame);
     if (json_result) {
         auto& json = json_result->as_object();
-        int code = json.contains("code") ? static_cast<int>(json["code"].as_int64()) : 0;
+        int code = json.contains("code") ? static_cast<int>(json.at("code").as_int64()) : 0;
         std::string message = json.contains("message")
-            ? json["message"].as_string().c_str()
+            ? json.at("message").as_string().c_str()
             : "Unknown error";
         LOG_ERROR("ControllerClient: Error from controller: {} - {}", code, message);
     }

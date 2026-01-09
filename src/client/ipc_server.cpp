@@ -194,7 +194,7 @@ std::string IPCSession::handle_reconnect() {
 
     auto control = client_->get_control_channel();
     if (control) {
-        control->reconnect();
+        control->connect();
         response["success"] = true;
         response["message"] = "Reconnecting...";
     } else {
