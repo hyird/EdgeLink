@@ -26,34 +26,66 @@ jobs:
         apk add --no-cache \
           build-base cmake ninja git curl zip unzip tar \
           pkgconfig linux-headers musl-dev perl bash python3 \
-          autoconf automake libtool
+          autoconf automake libtool go
 
     - uses: actions/checkout@v4
 
-    - name: Cache FetchContent sources and build
-      uses: actions/cache@v4
+    # Step 1: Try to restore source cache (downloaded by FetchContent)
+    - name: Restore FetchContent sources cache
+      id: cache-sources
+      uses: actions/cache/restore@v4
+      with:
+        path: .deps
+        key: sources-linux-${{ hashFiles('third_party/*.cmake') }}
+        restore-keys: |
+          sources-linux-
+
+    # Step 2: Try to restore build cache (compiled dependencies)
+    - name: Restore build artifacts cache
+      id: cache-build
+      uses: actions/cache/restore@v4
       with:
         path: |
-          .deps
           build/_deps
-          build/libsodium-install
-          build/boringssl-install
-        key: deps-linux-${{ hashFiles('third_party/*.cmake') }}
+          build/CMakeCache.txt
+          build/CMakeFiles
+        key: build-linux-${{ hashFiles('third_party/*.cmake') }}-${{ github.sha }}
         restore-keys: |
-          deps-linux-
+          build-linux-${{ hashFiles('third_party/*.cmake') }}-
+          build-linux-
 
     - name: Configure CMake (FetchContent + musl static)
       run: |
         cmake -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DBUILD_SHARED_LIBS=OFF \
           -DEDGELINK_STATIC=ON \
           -DBUILD_CONTROLLER=ON \
           -DBUILD_SERVER=ON \
           -DBUILD_CLIENT=ON
 
+    # Step 3: Save source cache after configure (sources are downloaded during configure)
+    - name: Save FetchContent sources cache
+      if: steps.cache-sources.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .deps
+        key: sources-linux-${{ hashFiles('third_party/*.cmake') }}
+
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
+
+    # Step 4: Save build cache after successful build
+    - name: Save build artifacts cache
+      if: success()
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          build/_deps
+          build/CMakeCache.txt
+          build/CMakeFiles
+        key: build-linux-${{ hashFiles('third_party/*.cmake') }}-${{ github.sha }}
 
     - name: Strip Binaries
       run: |
@@ -104,6 +136,7 @@ jobs:
           mingw-w64-x86_64-toolchain
           mingw-w64-x86_64-cmake
           mingw-w64-x86_64-ninja
+          mingw-w64-x86_64-go
           make
           git
           perl
@@ -115,17 +148,29 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    - name: Cache FetchContent sources and build
-      uses: actions/cache@v4
+    # Step 1: Try to restore source cache
+    - name: Restore FetchContent sources cache
+      id: cache-sources
+      uses: actions/cache/restore@v4
+      with:
+        path: .deps
+        key: sources-windows-mingw-${{ hashFiles('third_party/*.cmake') }}
+        restore-keys: |
+          sources-windows-mingw-
+
+    # Step 2: Try to restore build cache
+    - name: Restore build artifacts cache
+      id: cache-build
+      uses: actions/cache/restore@v4
       with:
         path: |
-          .deps
           build/_deps
-          build/libsodium-install
-          build/boringssl-install
-        key: deps-windows-mingw-${{ hashFiles('third_party/*.cmake') }}
+          build/CMakeCache.txt
+          build/CMakeFiles
+        key: build-windows-mingw-${{ hashFiles('third_party/*.cmake') }}-${{ github.sha }}
         restore-keys: |
-          deps-windows-mingw-
+          build-windows-mingw-${{ hashFiles('third_party/*.cmake') }}-
+          build-windows-mingw-
 
     - name: Cache wintun
       uses: actions/cache@v4
@@ -145,13 +190,33 @@ jobs:
       run: |
         cmake -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DBUILD_SHARED_LIBS=OFF \
           -DBUILD_CONTROLLER=ON \
           -DBUILD_SERVER=ON \
           -DBUILD_CLIENT=ON
 
+    # Step 3: Save source cache after configure
+    - name: Save FetchContent sources cache
+      if: steps.cache-sources.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .deps
+        key: sources-windows-mingw-${{ hashFiles('third_party/*.cmake') }}
+
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
+
+    # Step 4: Save build cache after successful build
+    - name: Save build artifacts cache
+      if: success()
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          build/_deps
+          build/CMakeCache.txt
+          build/CMakeFiles
+        key: build-windows-mingw-${{ hashFiles('third_party/*.cmake') }}-${{ github.sha }}
 
     - name: Strip Binaries
       run: |

@@ -1,10 +1,13 @@
 # LZ4 - Fast compression library
 # Used for frame payload compression (COMPRESSED flag)
 
+# Set CMake policy for LZ4 compatibility (its CMakeLists.txt uses old cmake_minimum_required)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+
 FetchContent_Declare(
     lz4
     GIT_REPOSITORY https://github.com/lz4/lz4.git
-    GIT_TAG        v1.9.4
+    GIT_TAG        v1.10.0
     GIT_SHALLOW    TRUE
     SOURCE_SUBDIR  build/cmake
 )

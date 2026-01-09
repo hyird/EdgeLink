@@ -19,7 +19,29 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(boringssl)
 
+# Get BoringSSL source and binary directories
+FetchContent_GetProperties(boringssl SOURCE_DIR BORINGSSL_SOURCE_DIR BINARY_DIR BORINGSSL_BINARY_DIR)
+
 # Create OpenSSL-compatible aliases
 # BoringSSL provides 'ssl' and 'crypto' targets
-add_library(OpenSSL::SSL ALIAS ssl)
-add_library(OpenSSL::Crypto ALIAS crypto)
+if(NOT TARGET OpenSSL::SSL)
+    add_library(OpenSSL::SSL ALIAS ssl)
+endif()
+if(NOT TARGET OpenSSL::Crypto)
+    add_library(OpenSSL::Crypto ALIAS crypto)
+endif()
+
+# Set OpenSSL variables for find_package compatibility
+# This allows jwt-cpp and other packages to find our BoringSSL
+set(OPENSSL_FOUND TRUE CACHE BOOL "" FORCE)
+set(OPENSSL_VERSION "1.1.1" CACHE STRING "" FORCE)
+set(OPENSSL_INCLUDE_DIR "${BORINGSSL_SOURCE_DIR}/include" CACHE PATH "" FORCE)
+set(OPENSSL_SSL_LIBRARY ssl CACHE STRING "" FORCE)
+set(OPENSSL_CRYPTO_LIBRARY crypto CACHE STRING "" FORCE)
+set(OPENSSL_LIBRARIES ssl crypto CACHE STRING "" FORCE)
+
+# Also set OPENSSL_ROOT_DIR for packages that use it
+set(OPENSSL_ROOT_DIR "${BORINGSSL_SOURCE_DIR}" CACHE PATH "" FORCE)
+
+# Mark OpenSSL as found so find_package doesn't search again
+set(OpenSSL_FOUND TRUE CACHE BOOL "" FORCE)
