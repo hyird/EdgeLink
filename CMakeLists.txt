@@ -73,12 +73,6 @@ endif()
 include(third_party/CMakeLists.txt)
 
 # =============================================================================
-# Proto Library (generated from .proto files)
-# =============================================================================
-include(cmake/proto_gen.cmake)
-edgelink_generate_proto(edgelink-proto "${CMAKE_CURRENT_SOURCE_DIR}/proto/edgelink.proto")
-
-# =============================================================================
 # Common Library
 # =============================================================================
 add_library(edgelink-common STATIC
@@ -87,6 +81,8 @@ add_library(edgelink-common STATIC
     src/common/config.cpp
     src/common/log.cpp
     src/common/jwt.cpp
+    src/common/ws_client.cpp
+    src/common/ws_server.cpp
     src/common/crypto/x25519.cpp
     src/common/crypto/chacha20.cpp
     src/common/crypto/ed25519.cpp
@@ -98,8 +94,10 @@ target_include_directories(edgelink-common PUBLIC
 )
 
 target_link_libraries(edgelink-common PUBLIC
-    Boost::headers
+    Boost::asio
+    Boost::beast
     Boost::json
+    Boost::url
     OpenSSL::SSL
     OpenSSL::Crypto
     spdlog::spdlog
@@ -132,7 +130,7 @@ if(BUILD_CONTROLLER)
         src/controller/commands.cpp
         src/controller/db/database.cpp
         src/controller/db/migrations.cpp
-        src/controller/api/grpc_server.cpp
+        src/controller/api/ws_server.cpp
         src/controller/api/services.cpp
         src/controller/api/control_handler.cpp
         src/controller/services/path_service.cpp
@@ -142,7 +140,6 @@ if(BUILD_CONTROLLER)
 
     target_link_libraries(edgelink-controller PRIVATE
         edgelink-common
-        edgelink-proto
         SQLite::SQLite3
     )
     target_precompile_headers(edgelink-controller REUSE_FROM edgelink-common)
@@ -154,7 +151,7 @@ endif()
 if(BUILD_SERVER)
     add_executable(edgelink-server
         src/server/main.cpp
-        src/server/grpc_relay_server.cpp
+        src/server/ws_relay_server.cpp
         src/server/stun_server.cpp
         src/server/controller_client.cpp
         src/server/node_location_cache.cpp
@@ -162,7 +159,6 @@ if(BUILD_SERVER)
 
     target_link_libraries(edgelink-server PRIVATE
         edgelink-common
-        edgelink-proto
     )
     target_precompile_headers(edgelink-server REUSE_FROM edgelink-common)
 endif()
@@ -175,7 +171,7 @@ if(BUILD_CLIENT)
     set(CLIENT_SOURCE
         src/client/main.cpp
         src/client/control_channel.cpp
-        src/client/grpc_relay_manager.cpp
+        src/client/ws_relay_manager.cpp
         src/client/crypto_engine.cpp
         src/client/route_manager.cpp
         src/client/endpoint_manager.cpp
@@ -217,7 +213,6 @@ if(BUILD_CLIENT)
 
     target_link_libraries(edgelink-client PRIVATE
         edgelink-common
-        edgelink-proto
     )
     target_precompile_headers(edgelink-client REUSE_FROM edgelink-common)
 

@@ -319,7 +319,7 @@ std::expected<void, ErrorCode> TunDevice::add_route(const std::string& network, 
     route.DestinationPrefix.PrefixLength = prefix_len;
     route.NextHop.si_family = AF_INET;
     route.Metric = 0;
-    route.Protocol = MIB_IPPROTO_NETMGMT;
+    route.Protocol = static_cast<NL_ROUTE_PROTOCOL>(MIB_IPPROTO_NETMGMT);
 
     DWORD result = CreateIpForwardEntry2(&route);
     if (result != NO_ERROR && result != ERROR_OBJECT_ALREADY_EXISTS) {

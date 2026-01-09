@@ -14,114 +14,180 @@
 
 namespace edgelink::client {
 
+using json = nlohmann::json;
+
 // ============================================================================
 // Socket Path
 // ============================================================================
 
 std::string IPCServer::get_socket_path() {
 #ifdef _WIN32
-    // Windows: use named pipe
-    return "unix:///./pipe/edgelink-client";
+    // Windows: use named pipe path (Boost.Asio local sockets use file paths on Windows too)
+    const char* temp = std::getenv("TEMP");
+    if (!temp) temp = std::getenv("TMP");
+    if (!temp) temp = "C:\\Windows\\Temp";
+    return std::string(temp) + "\\edgelink-client.sock";
 #else
     // POSIX: use Unix domain socket in /run or /var/run
     const char* runtime_dir = std::getenv("XDG_RUNTIME_DIR");
     if (runtime_dir) {
-        return std::string("unix://") + runtime_dir + "/edgelink-client.sock";
+        return std::string(runtime_dir) + "/edgelink-client.sock";
     }
     // Fallback to /var/run (requires root)
     if (geteuid() == 0) {
-        return "unix:///var/run/edgelink-client.sock";
+        return "/var/run/edgelink-client.sock";
     }
     // User-level fallback
     const char* home = std::getenv("HOME");
     if (home) {
         std::string socket_dir = std::string(home) + "/.edgelink";
         std::filesystem::create_directories(socket_dir);
-        return "unix://" + socket_dir + "/client.sock";
+        return socket_dir + "/client.sock";
     }
-    return "unix:///tmp/edgelink-client.sock";
+    return "/tmp/edgelink-client.sock";
 #endif
 }
 
 // ============================================================================
-// IPCServiceImpl
+// IPCSession
 // ============================================================================
 
-IPCServiceImpl::IPCServiceImpl(Client* client)
-    : client_(client)
+IPCSession::IPCSession(local_stream::socket socket, Client* client)
+    : socket_(std::move(socket))
+    , client_(client)
 {}
 
-grpc::Status IPCServiceImpl::Status(
-    grpc::ServerContext* context,
-    const edgelink::IPCStatusRequest* request,
-    edgelink::IPCStatusResponse* response) {
+void IPCSession::start() {
+    do_read();
+}
+
+void IPCSession::do_read() {
+    auto self = shared_from_this();
+    socket_.async_read_some(
+        net::buffer(buffer_),
+        [this, self](boost::system::error_code ec, std::size_t length) {
+            if (ec) {
+                if (ec != net::error::eof && ec != net::error::connection_reset) {
+                    LOG_WARN("IPCSession: Read error: {}", ec.message());
+                }
+                return;
+            }
+
+            try {
+                std::string request_str(buffer_.data(), length);
+                auto request = json::parse(request_str);
+                std::string response = handle_request(request);
+                do_write(response);
+            } catch (const json::parse_error& e) {
+                LOG_ERROR("IPCSession: JSON parse error: {}", e.what());
+                json error_response;
+                error_response["error"] = "parse_error";
+                error_response["message"] = "Invalid JSON request";
+                do_write(error_response.dump());
+            }
+        });
+}
+
+void IPCSession::do_write(const std::string& response) {
+    auto self = shared_from_this();
+    net::async_write(
+        socket_,
+        net::buffer(response),
+        [this, self](boost::system::error_code ec, std::size_t /*length*/) {
+            if (ec) {
+                LOG_WARN("IPCSession: Write error: {}", ec.message());
+            }
+            // Close connection after response
+        });
+}
+
+std::string IPCSession::handle_request(const json& request) {
+    std::string command = request.value("command", "");
+
+    if (command == "status") {
+        return handle_status();
+    } else if (command == "disconnect") {
+        return handle_disconnect();
+    } else if (command == "reconnect") {
+        return handle_reconnect();
+    } else if (command == "ping") {
+        uint32_t peer_id = request.value("peer_node_id", 0);
+        return handle_ping(peer_id);
+    } else {
+        json error_response;
+        error_response["error"] = "unknown_command";
+        error_response["message"] = "Unknown command: " + command;
+        return error_response.dump();
+    }
+}
+
+std::string IPCSession::handle_status() {
+    json response;
 
     if (!client_) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, "Client not available");
+        response["error"] = "internal_error";
+        response["message"] = "Client not available";
+        return response.dump();
     }
 
-    // Basic info
-    response->set_connected(client_->is_running());
-    response->set_state(client_->get_state_string());
-    response->set_controller_url(client_->get_controller_url());
+    response["connected"] = client_->is_running();
+    response["state"] = client_->get_state_string();
+    response["controller_url"] = client_->get_controller_url();
 
     auto control = client_->get_control_channel();
     if (control) {
-        response->set_node_id(control->node_id());
-        response->set_virtual_ip(control->virtual_ip());
+        response["node_id"] = control->node_id();
+        response["virtual_ip"] = control->virtual_ip();
+    } else {
+        response["node_id"] = 0;
+        response["virtual_ip"] = "";
     }
 
     auto tun = client_->get_tun_device();
     if (tun) {
-        response->set_tun_interface(tun->name());
+        response["tun_interface"] = tun->name();
+    } else {
+        response["tun_interface"] = "";
     }
 
-    // Stats
     auto stats = client_->get_stats();
-    response->set_packets_sent(stats.packets_sent);
-    response->set_packets_received(stats.packets_received);
-    response->set_bytes_sent(stats.bytes_sent);
-    response->set_bytes_received(stats.bytes_received);
+    response["packets_sent"] = stats.packets_sent;
+    response["packets_received"] = stats.packets_received;
+    response["bytes_sent"] = stats.bytes_sent;
+    response["bytes_received"] = stats.bytes_received;
 
     auto now = std::chrono::steady_clock::now();
     auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
         now - stats.start_time).count();
-    response->set_uptime_seconds(uptime);
+    response["uptime_seconds"] = uptime;
 
-    // Note: Detailed peer/relay info would require additional accessor methods
-    // For now, we return basic status only
-
-    return grpc::Status::OK;
+    return response.dump();
 }
 
-grpc::Status IPCServiceImpl::Disconnect(
-    grpc::ServerContext* context,
-    const edgelink::IPCDisconnectRequest* request,
-    edgelink::IPCDisconnectResponse* response) {
+std::string IPCSession::handle_disconnect() {
+    json response;
 
     if (!client_) {
-        response->set_success(false);
-        response->set_message("Client not available");
-        return grpc::Status::OK;
+        response["success"] = false;
+        response["message"] = "Client not available";
+        return response.dump();
     }
 
     LOG_INFO("IPCService: Disconnect requested via IPC");
     client_->stop();
 
-    response->set_success(true);
-    response->set_message("Disconnected");
-    return grpc::Status::OK;
+    response["success"] = true;
+    response["message"] = "Disconnected";
+    return response.dump();
 }
 
-grpc::Status IPCServiceImpl::Reconnect(
-    grpc::ServerContext* context,
-    const edgelink::IPCReconnectRequest* request,
-    edgelink::IPCReconnectResponse* response) {
+std::string IPCSession::handle_reconnect() {
+    json response;
 
     if (!client_) {
-        response->set_success(false);
-        response->set_message("Client not available");
-        return grpc::Status::OK;
+        response["success"] = false;
+        response["message"] = "Client not available";
+        return response.dump();
     }
 
     LOG_INFO("IPCService: Reconnect requested via IPC");
@@ -129,55 +195,51 @@ grpc::Status IPCServiceImpl::Reconnect(
     auto control = client_->get_control_channel();
     if (control) {
         control->reconnect();
-        response->set_success(true);
-        response->set_message("Reconnecting...");
+        response["success"] = true;
+        response["message"] = "Reconnecting...";
     } else {
-        response->set_success(false);
-        response->set_message("Control channel not available");
+        response["success"] = false;
+        response["message"] = "Control channel not available";
     }
 
-    return grpc::Status::OK;
+    return response.dump();
 }
 
-grpc::Status IPCServiceImpl::Ping(
-    grpc::ServerContext* context,
-    const edgelink::IPCPingRequest* request,
-    edgelink::IPCPingResponse* response) {
+std::string IPCSession::handle_ping(uint32_t peer_node_id) {
+    json response;
 
     if (!client_) {
-        response->set_success(false);
-        response->set_error("Client not available");
-        return grpc::Status::OK;
+        response["success"] = false;
+        response["error"] = "Client not available";
+        return response.dump();
     }
 
-    uint32_t peer_id = request->peer_node_id();
-
-    if (peer_id == 0) {
+    if (peer_node_id == 0) {
         // Ping controller - check if connected
         auto control = client_->get_control_channel();
         if (control && control->is_connected()) {
-            response->set_success(true);
-            response->set_latency_ms(0);  // Control channel handles its own ping/pong
+            response["success"] = true;
+            response["latency_ms"] = 0;
         } else {
-            response->set_success(false);
-            response->set_error("Not connected to controller");
+            response["success"] = false;
+            response["error"] = "Not connected to controller";
         }
     } else {
         // Ping peer - for now just report if client is running
-        // TODO: Implement actual peer ping via P2P or Relay
-        response->set_success(false);
-        response->set_error("Peer ping not implemented yet");
+        response["success"] = false;
+        response["error"] = "Peer ping not implemented yet";
     }
 
-    return grpc::Status::OK;
+    return response.dump();
 }
 
 // ============================================================================
 // IPCServer
 // ============================================================================
 
-IPCServer::IPCServer(Client* client)
-    : client_(client)
+IPCServer::IPCServer(net::io_context& ioc, Client* client)
+    : ioc_(ioc)
+    , client_(client)
 {}
 
 IPCServer::~IPCServer() {
@@ -189,55 +251,63 @@ bool IPCServer::start() {
 
     std::string socket_path = get_socket_path();
 
-#ifndef _WIN32
     // Remove existing socket file
-    std::string file_path = socket_path.substr(7);  // Remove "unix://"
-    std::remove(file_path.c_str());
+    std::remove(socket_path.c_str());
+
+    try {
+        local_stream::endpoint endpoint(socket_path);
+        acceptor_ = std::make_unique<local_stream::acceptor>(ioc_, endpoint);
+
+#ifndef _WIN32
+        // Set socket permissions to allow user access
+        chmod(socket_path.c_str(), 0660);
 #endif
 
-    service_ = std::make_unique<IPCServiceImpl>(client_);
+        running_ = true;
+        do_accept();
 
-    grpc::ServerBuilder builder;
-    builder.AddListeningPort(socket_path, grpc::InsecureServerCredentials());
-    builder.RegisterService(service_.get());
-
-    server_ = builder.BuildAndStart();
-
-    if (!server_) {
-        LOG_ERROR("IPCServer: Failed to start on {}", socket_path);
+        LOG_INFO("IPCServer: Listening on {}", socket_path);
+        return true;
+    } catch (const std::exception& e) {
+        LOG_ERROR("IPCServer: Failed to start on {}: {}", socket_path, e.what());
         return false;
     }
-
-#ifndef _WIN32
-    // Set socket permissions to allow user access
-    std::string file_path2 = socket_path.substr(7);
-    chmod(file_path2.c_str(), 0660);
-#endif
-
-    running_ = true;
-    LOG_INFO("IPCServer: Listening on {}", socket_path);
-    return true;
 }
 
 void IPCServer::stop() {
     if (!running_) return;
 
-    if (server_) {
-        server_->Shutdown();
-        server_.reset();
-    }
-
-    service_.reset();
     running_ = false;
 
-#ifndef _WIN32
+    if (acceptor_ && acceptor_->is_open()) {
+        boost::system::error_code ec;
+        acceptor_->close(ec);
+    }
+
+    acceptor_.reset();
+
     // Clean up socket file
     std::string socket_path = get_socket_path();
-    std::string file_path = socket_path.substr(7);
-    std::remove(file_path.c_str());
-#endif
+    std::remove(socket_path.c_str());
 
     LOG_INFO("IPCServer: Stopped");
+}
+
+void IPCServer::do_accept() {
+    if (!running_ || !acceptor_) return;
+
+    acceptor_->async_accept(
+        [this](boost::system::error_code ec, local_stream::socket socket) {
+            if (!ec) {
+                std::make_shared<IPCSession>(std::move(socket), client_)->start();
+            } else if (ec != net::error::operation_aborted) {
+                LOG_WARN("IPCServer: Accept error: {}", ec.message());
+            }
+
+            if (running_) {
+                do_accept();
+            }
+        });
 }
 
 // ============================================================================
@@ -246,92 +316,171 @@ void IPCServer::stop() {
 
 IPCClient::IPCClient() {}
 
-IPCClient::~IPCClient() {}
+IPCClient::~IPCClient() {
+    if (socket_ && socket_->is_open()) {
+        boost::system::error_code ec;
+        socket_->close(ec);
+    }
+}
 
 bool IPCClient::connect() {
     std::string socket_path = IPCServer::get_socket_path();
 
-    channel_ = grpc::CreateChannel(socket_path, grpc::InsecureChannelCredentials());
+    try {
+        socket_ = std::make_unique<local_stream::socket>(ioc_);
+        local_stream::endpoint endpoint(socket_path);
 
-    // Try to connect with timeout
-    auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
-    if (!channel_->WaitForConnected(deadline)) {
+        boost::system::error_code ec;
+        socket_->connect(endpoint, ec);
+
+        if (ec) {
+            socket_.reset();
+            return false;
+        }
+
+        connected_ = true;
+        return true;
+    } catch (const std::exception& e) {
+        LOG_ERROR("IPCClient: Connection failed: {}", e.what());
+        socket_.reset();
         return false;
     }
-
-    stub_ = edgelink::IPCService::NewStub(channel_);
-    connected_ = true;
-    return true;
 }
 
-std::optional<edgelink::IPCStatusResponse> IPCClient::status() {
-    if (!connected_ || !stub_) return std::nullopt;
+std::string IPCClient::send_request(const json& request) {
+    if (!connected_ || !socket_) {
+        return "";
+    }
 
-    grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    try {
+        std::string request_str = request.dump();
 
-    edgelink::IPCStatusRequest request;
-    edgelink::IPCStatusResponse response;
+        // Send request
+        boost::system::error_code ec;
+        net::write(*socket_, net::buffer(request_str), ec);
+        if (ec) {
+            return "";
+        }
 
-    auto status = stub_->Status(&context, request, &response);
-    if (!status.ok()) {
+        // Read response
+        std::array<char, 8192> buffer;
+        size_t length = socket_->read_some(net::buffer(buffer), ec);
+        if (ec) {
+            return "";
+        }
+
+        return std::string(buffer.data(), length);
+    } catch (const std::exception& e) {
+        LOG_ERROR("IPCClient: Request failed: {}", e.what());
+        return "";
+    }
+}
+
+std::optional<IPCStatusResponse> IPCClient::status() {
+    json request;
+    request["command"] = "status";
+
+    std::string response_str = send_request(request);
+    if (response_str.empty()) {
         return std::nullopt;
     }
 
-    return response;
+    try {
+        auto response_json = json::parse(response_str);
+
+        if (response_json.contains("error")) {
+            return std::nullopt;
+        }
+
+        IPCStatusResponse response;
+        response.connected = response_json.value("connected", false);
+        response.state = response_json.value("state", "");
+        response.controller_url = response_json.value("controller_url", "");
+        response.node_id = response_json.value("node_id", 0);
+        response.virtual_ip = response_json.value("virtual_ip", "");
+        response.tun_interface = response_json.value("tun_interface", "");
+        response.packets_sent = response_json.value("packets_sent", 0);
+        response.packets_received = response_json.value("packets_received", 0);
+        response.bytes_sent = response_json.value("bytes_sent", 0);
+        response.bytes_received = response_json.value("bytes_received", 0);
+        response.uptime_seconds = response_json.value("uptime_seconds", 0);
+
+        return response;
+    } catch (const json::parse_error& e) {
+        LOG_ERROR("IPCClient: Failed to parse status response: {}", e.what());
+        return std::nullopt;
+    }
 }
 
-std::optional<edgelink::IPCDisconnectResponse> IPCClient::disconnect() {
-    if (!connected_ || !stub_) return std::nullopt;
+std::optional<IPCDisconnectResponse> IPCClient::disconnect() {
+    json request;
+    request["command"] = "disconnect";
 
-    grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
-
-    edgelink::IPCDisconnectRequest request;
-    edgelink::IPCDisconnectResponse response;
-
-    auto status = stub_->Disconnect(&context, request, &response);
-    if (!status.ok()) {
+    std::string response_str = send_request(request);
+    if (response_str.empty()) {
         return std::nullopt;
     }
 
-    return response;
+    try {
+        auto response_json = json::parse(response_str);
+
+        IPCDisconnectResponse response;
+        response.success = response_json.value("success", false);
+        response.message = response_json.value("message", "");
+
+        return response;
+    } catch (const json::parse_error& e) {
+        LOG_ERROR("IPCClient: Failed to parse disconnect response: {}", e.what());
+        return std::nullopt;
+    }
 }
 
-std::optional<edgelink::IPCReconnectResponse> IPCClient::reconnect() {
-    if (!connected_ || !stub_) return std::nullopt;
+std::optional<IPCReconnectResponse> IPCClient::reconnect() {
+    json request;
+    request["command"] = "reconnect";
 
-    grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
-
-    edgelink::IPCReconnectRequest request;
-    edgelink::IPCReconnectResponse response;
-
-    auto status = stub_->Reconnect(&context, request, &response);
-    if (!status.ok()) {
+    std::string response_str = send_request(request);
+    if (response_str.empty()) {
         return std::nullopt;
     }
 
-    return response;
+    try {
+        auto response_json = json::parse(response_str);
+
+        IPCReconnectResponse response;
+        response.success = response_json.value("success", false);
+        response.message = response_json.value("message", "");
+
+        return response;
+    } catch (const json::parse_error& e) {
+        LOG_ERROR("IPCClient: Failed to parse reconnect response: {}", e.what());
+        return std::nullopt;
+    }
 }
 
-std::optional<edgelink::IPCPingResponse> IPCClient::ping(uint32_t peer_node_id) {
-    if (!connected_ || !stub_) return std::nullopt;
+std::optional<IPCPingResponse> IPCClient::ping(uint32_t peer_node_id) {
+    json request;
+    request["command"] = "ping";
+    request["peer_node_id"] = peer_node_id;
 
-    grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
-
-    edgelink::IPCPingRequest request;
-    request.set_peer_node_id(peer_node_id);
-
-    edgelink::IPCPingResponse response;
-
-    auto status = stub_->Ping(&context, request, &response);
-    if (!status.ok()) {
+    std::string response_str = send_request(request);
+    if (response_str.empty()) {
         return std::nullopt;
     }
 
-    return response;
+    try {
+        auto response_json = json::parse(response_str);
+
+        IPCPingResponse response;
+        response.success = response_json.value("success", false);
+        response.latency_ms = response_json.value("latency_ms", 0);
+        response.error = response_json.value("error", "");
+
+        return response;
+    } catch (const json::parse_error& e) {
+        LOG_ERROR("IPCClient: Failed to parse ping response: {}", e.what());
+        return std::nullopt;
+    }
 }
 
 } // namespace edgelink::client

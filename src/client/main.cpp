@@ -3,7 +3,6 @@
 #include "common/log.hpp"
 #include "common/crypto/ed25519.hpp"
 #include "common/crypto/x25519.hpp"
-#include <absl/log/initialize.h>
 #include <iostream>
 #include <fstream>
 #include <csignal>
@@ -50,7 +49,7 @@ void print_usage(const char* program) {
               << "  -h, --help            Show help\n\n"
               << "Examples:\n"
               << "  " << program << " connect -c /etc/edgelink/client.json\n"
-              << "  " << program << " connect -u grpcs://controller:443 --auth-key <KEY>\n"
+              << "  " << program << " connect -u wss://controller:443 --auth-key <KEY>\n"
               << "  " << program << " status\n"
               << "  " << program << " ping 123       # Ping peer node 123\n"
               << "  " << program << " keygen\n"
@@ -196,48 +195,20 @@ int cmd_status(const std::string& config_file) {
     if (ipc.connect()) {
         auto status = ipc.status();
         if (status) {
-            std::cout << "State:      " << status->state() << "\n";
-            if (status->connected()) {
-                std::cout << "Node ID:    " << status->node_id() << "\n";
-                std::cout << "Virtual IP: " << status->virtual_ip() << "\n";
-                std::cout << "Interface:  " << status->tun_interface() << "\n";
-                std::cout << "Controller: " << status->controller_url() << "\n";
-                std::cout << "Uptime:     " << format_duration(status->uptime_seconds()) << "\n";
+            std::cout << "State:      " << status->state << "\n";
+            if (status->connected) {
+                std::cout << "Node ID:    " << status->node_id << "\n";
+                std::cout << "Virtual IP: " << status->virtual_ip << "\n";
+                std::cout << "Interface:  " << status->tun_interface << "\n";
+                std::cout << "Controller: " << status->controller_url << "\n";
+                std::cout << "Uptime:     " << format_duration(status->uptime_seconds) << "\n";
                 std::cout << "\n";
                 std::cout << "Traffic:\n";
-                std::cout << "  Sent:     " << status->packets_sent() << " packets ("
-                          << format_bytes(status->bytes_sent()) << ")\n";
-                std::cout << "  Received: " << status->packets_received() << " packets ("
-                          << format_bytes(status->bytes_received()) << ")\n";
+                std::cout << "  Sent:     " << status->packets_sent << " packets ("
+                          << format_bytes(status->bytes_sent) << ")\n";
+                std::cout << "  Received: " << status->packets_received << " packets ("
+                          << format_bytes(status->bytes_received) << ")\n";
 
-                if (status->peers_size() > 0) {
-                    std::cout << "\nPeers (" << status->peers_size() << "):\n";
-                    for (const auto& peer : status->peers()) {
-                        std::cout << "  " << peer.name() << " (" << peer.virtual_ip() << "): ";
-                        if (peer.online()) {
-                            std::cout << peer.connection_type();
-                            if (peer.latency_ms() > 0) {
-                                std::cout << " " << peer.latency_ms() << "ms";
-                            }
-                        } else {
-                            std::cout << "offline";
-                        }
-                        std::cout << "\n";
-                    }
-                }
-
-                if (status->relays_size() > 0) {
-                    std::cout << "\nRelays (" << status->relays_size() << "):\n";
-                    for (const auto& relay : status->relays()) {
-                        std::cout << "  " << relay.name() << " (" << relay.region() << "): ";
-                        if (relay.connected()) {
-                            std::cout << "connected " << relay.latency_ms() << "ms";
-                        } else {
-                            std::cout << "disconnected";
-                        }
-                        std::cout << "\n";
-                    }
-                }
             } else {
                 std::cout << "Not connected\n";
             }
@@ -276,8 +247,8 @@ int cmd_disconnect() {
     }
 
     auto resp = ipc.disconnect();
-    if (resp && resp->success()) {
-        std::cout << "Disconnected: " << resp->message() << "\n";
+    if (resp && resp->success) {
+        std::cout << "Disconnected: " << resp->message << "\n";
         return 0;
     }
 
@@ -294,8 +265,8 @@ int cmd_reconnect() {
     }
 
     auto resp = ipc.reconnect();
-    if (resp && resp->success()) {
-        std::cout << resp->message() << "\n";
+    if (resp && resp->success) {
+        std::cout << resp->message << "\n";
         return 0;
     }
 
@@ -313,15 +284,15 @@ int cmd_ping(uint32_t peer_id) {
 
     auto resp = ipc.ping(peer_id);
     if (resp) {
-        if (resp->success()) {
+        if (resp->success) {
             if (peer_id == 0) {
                 std::cout << "Controller: connected\n";
             } else {
-                std::cout << "Peer " << peer_id << ": " << resp->latency_ms() << "ms\n";
+                std::cout << "Peer " << peer_id << ": " << resp->latency_ms << "ms\n";
             }
             return 0;
         } else {
-            std::cerr << "Ping failed: " << resp->error() << "\n";
+            std::cerr << "Ping failed: " << resp->error << "\n";
             return 1;
         }
     }
@@ -438,7 +409,6 @@ int cmd_connect(const ClientConfig& config, bool daemon_mode) {
 }
 
 int main(int argc, char* argv[]) {
-    absl::InitializeLog();
 
     std::string config_file = "/etc/edgelink/client.json";
     std::string controller_url;

@@ -142,7 +142,7 @@ public:
     bool initialize();
 
     // ========================================================================
-    // Generic Query Interface (for grpc_server.cpp)
+    // Generic Query Interface (for ws_server.cpp)
     // ========================================================================
 
     // Execute a query and return rows

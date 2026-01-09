@@ -29,7 +29,7 @@ if(BUILD_CONTROLLER)
 endif()
 
 # =============================================================================
-# 2. OpenSSL (needed by jwt-cpp and gRPC)
+# 2. OpenSSL (needed by jwt-cpp and Boost.Beast)
 # =============================================================================
 message(STATUS "Fetching OpenSSL...")
 include(${CMAKE_CURRENT_LIST_DIR}/openssl.cmake)
@@ -47,16 +47,10 @@ message(STATUS "Fetching jwt-cpp...")
 include(${CMAKE_CURRENT_LIST_DIR}/jwt_cpp.cmake)
 
 # =============================================================================
-# 5. Boost
+# 5. Boost (includes Beast for WebSocket support)
 # =============================================================================
 message(STATUS "Fetching Boost...")
 include(${CMAKE_CURRENT_LIST_DIR}/boost.cmake)
-
-# =============================================================================
-# 6. gRPC + protobuf (most complex, has many dependencies)
-# =============================================================================
-message(STATUS "Fetching gRPC and dependencies...")
-include(${CMAKE_CURRENT_LIST_DIR}/grpc.cmake)
 
 # =============================================================================
 # Thread support (system)

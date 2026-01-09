@@ -367,11 +367,11 @@ bool Client::init_control_channel() {
 
 bool Client::init_relay_manager() {
     try {
-        relay_manager_ = std::make_shared<GrpcRelayManager>(
-            node_id_, relay_token_
+        relay_manager_ = std::make_shared<WsRelayManager>(
+            ioc_, node_id_, relay_token_
         );
 
-        GrpcRelayManagerCallbacks callbacks;
+        WsRelayManagerCallbacks callbacks;
 
         callbacks.on_data_received = [this](uint32_t from_node_id,
                                             const std::vector<uint8_t>& data) {
@@ -379,13 +379,13 @@ bool Client::init_relay_manager() {
         };
 
         callbacks.on_relay_state_changed = [this](uint32_t relay_id,
-                                                  GrpcRelayConnection::State state) {
+                                                  WsRelayConnection::State state) {
             on_relay_state_changed(relay_id, state);
         };
 
         callbacks.on_latency_measured = [this](uint32_t relay_id, uint32_t peer_id,
                                                uint32_t latency_ms) {
-            on_latency_measured(relay_id, peer_id, latency_ms);
+            on_latency_measured(relay_id, latency_ms, peer_id);
         };
 
         relay_manager_->set_callbacks(callbacks);
@@ -643,14 +643,14 @@ void Client::on_config_received(const ConfigUpdate& config) {
     if (is_initial) {
         set_state(ClientState::CONNECTING_RELAYS);
 
-        // 转换relay信息格式 (使用 gRPC URL)
+        // 转换relay信息格式 (使用 WebSocket URL)
         std::vector<RelayServerInfo> relay_infos;
         for (const auto& relay : config.relays) {
             RelayServerInfo info;
             info.id = relay.id;
             info.name = relay.name;
             info.region = relay.region;
-            info.url = relay.url;  // gRPC URL: grpc://host:port or grpcs://host:port
+            info.url = relay.url;  // WebSocket URL: ws://host:port or wss://host:port
             relay_infos.push_back(info);
         }
 
@@ -800,7 +800,7 @@ void Client::on_relay_data_received(uint32_t from_node_id, const std::vector<uin
     process_inbound_packet(from_node_id, data);
 }
 
-void Client::on_relay_state_changed(uint32_t relay_id, GrpcRelayConnection::State state) {
+void Client::on_relay_state_changed(uint32_t relay_id, WsRelayConnection::State state) {
     LOG_DEBUG("Relay {} state changed to {}", relay_id, static_cast<int>(state));
 }
 
@@ -811,8 +811,8 @@ void Client::on_latency_measured(uint32_t relay_id, uint32_t peer_id, uint32_t l
     {
         std::lock_guard<std::mutex> lock(latency_mutex_);
         ControlChannel::LatencyMeasurement m;
-        m.server_id = relay_id;
-        m.peer_id = peer_id;
+        m.dst_type = peer_id > 0 ? "node" : "relay";
+        m.dst_id = peer_id > 0 ? peer_id : relay_id;
         m.rtt_ms = latency_ms;
         pending_latency_reports_.push_back(m);
     }
@@ -844,14 +844,14 @@ void Client::on_latency_report_timer() {
         for (uint32_t relay_id : connected_relays) {
             // 获取到该 relay 的 RTT（最后一次心跳测量）
             auto state = relay_manager_->get_relay_state(relay_id);
-            if (state == GrpcRelayConnection::State::CONNECTED) {
+            if (state == WsRelayConnection::State::CONNECTED) {
                 // RelayManager 内部已经在 heartbeat 中测量了延迟
                 // 这里我们获取其缓存的延迟值
                 uint32_t latency = relay_manager_->get_latency(0, relay_id);  // peer_id=0 表示到 relay 本身
                 if (latency > 0 && latency < UINT32_MAX) {
                     ControlChannel::LatencyMeasurement m;
-                    m.server_id = relay_id;
-                    m.peer_id = 0;
+                    m.dst_type = "relay";
+                    m.dst_id = relay_id;
                     m.rtt_ms = latency;
                     measurements.push_back(m);
                 }
@@ -883,15 +883,20 @@ void Client::on_tun_packet(const std::vector<uint8_t>& packet) {
 
 void Client::on_endpoints_changed(const std::vector<Endpoint>& endpoints) {
     LOG_DEBUG("Endpoints changed, {} endpoints discovered", endpoints.size());
-    
-    // 转换为字符串格式上报
-    std::vector<std::string> ep_strings;
+
+    // 转换为 wire::Endpoint 格式上报
+    std::vector<wire::Endpoint> wire_endpoints;
     for (const auto& ep : endpoints) {
-        ep_strings.push_back(ep.address + ":" + std::to_string(ep.port));
+        wire::Endpoint wire_ep;
+        wire_ep.ip = ep.address;
+        wire_ep.port = ep.port;
+        wire_ep.type = static_cast<wire::EndpointType>(ep.type);
+        wire_ep.priority = ep.priority;
+        wire_endpoints.push_back(wire_ep);
     }
-    
+
     if (control_channel_) {
-        control_channel_->report_endpoints(ep_strings);
+        control_channel_->report_endpoints(wire_endpoints);
     }
 }
 

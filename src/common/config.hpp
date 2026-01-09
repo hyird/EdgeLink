@@ -80,20 +80,12 @@ struct BuiltinSTUNConfig {
 // Controller Configuration
 // ============================================================================
 
-// gRPC service names (for reference)
-namespace services {
-    constexpr const char* CONTROL_SERVICE = "edgelink.ControlService";   // Client -> Controller
-    constexpr const char* SERVER_SERVICE = "edgelink.ServerService";     // Server -> Controller
-    constexpr const char* RELAY_SERVICE = "edgelink.RelayService";       // Client -> Relay (data)
-    constexpr const char* MESH_SERVICE = "edgelink.MeshService";         // Relay <-> Relay (mesh)
-}
-
-// Legacy WebSocket paths (deprecated, kept for backwards compatibility during migration)
+// WebSocket endpoint paths
 namespace paths {
-    constexpr const char* WS_CONTROL = "/ws/control";  // Client -> Controller (deprecated)
-    constexpr const char* WS_SERVER = "/ws/server";    // Server -> Controller (deprecated)
-    constexpr const char* WS_DATA = "/ws/data";        // Client -> Relay (deprecated)
-    constexpr const char* WS_MESH = "/ws/mesh";        // Relay <-> Relay (deprecated)
+    constexpr const char* WS_CONTROL = "/control";     // Client -> Controller
+    constexpr const char* WS_SERVER = "/server";       // Server -> Controller
+    constexpr const char* WS_RELAY = "/relay";         // Client -> Relay (data)
+    constexpr const char* WS_MESH = "/mesh";           // Relay <-> Relay (mesh)
 }
 
 struct ControllerConfig {
@@ -186,7 +178,7 @@ struct ServerConfig {
 // ============================================================================
 struct ClientConfig {
     // Controller connection
-    std::string controller_url;     // e.g., "grpc://controller.example.com:8080"
+    std::string controller_url;     // e.g., "wss://controller.example.com/control"
     std::string auth_key;           // Pre-shared key for node registration
 
     // Identity

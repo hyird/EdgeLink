@@ -1,6 +1,5 @@
 #include "client/control_channel.hpp"
 #include "common/log.hpp"
-#include "common/config.hpp"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -8,551 +7,392 @@
 #include <unistd.h>
 #endif
 
-#include <regex>
-
 namespace edgelink::client {
-
-// ============================================================================
-// Base64 Decode Helper
-// ============================================================================
-
-static std::vector<uint8_t> decode_base64(const std::string& encoded) {
-    static const int T[256] = {
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
-        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
-        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
-        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
-        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
-        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
-    };
-
-    std::vector<uint8_t> result;
-    int val = 0, bits = -8;
-
-    for (unsigned char c : encoded) {
-        if (T[c] == -1) break;
-        val = (val << 6) + T[c];
-        bits += 6;
-        if (bits >= 0) {
-            result.push_back(static_cast<uint8_t>((val >> bits) & 0xFF));
-            bits -= 8;
-        }
-    }
-    return result;
-}
 
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
 
 ControlChannel::ControlChannel(
+    net::io_context& ioc,
     const std::string& controller_url,
-    const std::string& machine_key_pub_b64,
-    const std::string& machine_key_priv_b64,
+    const std::array<uint8_t, 32>& machine_key_pub,
+    const std::array<uint8_t, 64>& machine_key_priv,
+    const std::array<uint8_t, 32>& node_key_pub,
+    const std::array<uint8_t, 32>& node_key_priv,
     const std::string& auth_key
 )
-    : machine_key_pub_b64_(machine_key_pub_b64)
-    , machine_key_priv_b64_(machine_key_priv_b64)
+    : WsClient(ioc, controller_url, "ControlChannel")
+    , machine_key_pub_(machine_key_pub)
+    , machine_key_priv_(machine_key_priv)
+    , node_key_pub_(node_key_pub)
+    , node_key_priv_(node_key_priv)
     , auth_key_(auth_key)
 {
-    // Parse controller URL: grpc://host:port or grpcs://host:port
-    // Also support legacy ws://host:port format
-    std::regex url_regex(R"((grpcs?|wss?)://([^:/]+)(?::(\d+))?)", std::regex::icase);
-    std::smatch match;
-
-    bool use_tls = true;
-    if (std::regex_match(controller_url, match, url_regex)) {
-        std::string scheme = match[1].str();
-        use_tls = (scheme == "grpcs" || scheme == "wss" || scheme == "GRPCS" || scheme == "WSS");
-        controller_host_ = match[2].str();
-        controller_port_ = match[3].matched ? match[3].str() : (use_tls ? "443" : "80");
+    // Determine auth type
+    if (!auth_key_.empty()) {
+        auth_type_ = wire::AuthType::AUTHKEY;
     } else {
-        LOG_ERROR("ControlChannel: Invalid controller URL: {}", controller_url);
-        controller_host_ = controller_url;
-        controller_port_ = "443";
+        // Check if machine key is registered (non-zero)
+        bool has_machine_key = false;
+        for (auto b : machine_key_pub_) {
+            if (b != 0) {
+                has_machine_key = true;
+                break;
+            }
+        }
+        auth_type_ = has_machine_key ? wire::AuthType::MACHINE : wire::AuthType::USER;
     }
 
-    // Create gRPC channel
-    std::string target = controller_host_ + ":" + controller_port_;
-
-    grpc::ChannelArguments args;
-    // gRPC-level keepalive for connection health
-    // Server allows pings every 20s (GRPC_ARG_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS)
-    args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 60000);  // 60s interval
-    args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, 20000);  // 20s timeout
-    args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 0);  // Only when stream active
-
-    if (use_tls) {
-        auto creds = grpc::SslCredentials(grpc::SslCredentialsOptions());
-        channel_ = grpc::CreateCustomChannel(target, creds, args);
-    } else {
-        channel_ = grpc::CreateCustomChannel(target, grpc::InsecureChannelCredentials(), args);
-    }
-
-    stub_ = edgelink::ControlService::NewStub(channel_);
-
-    LOG_INFO("ControlChannel: Configured for {} (TLS: {})",
-             target, use_tls ? "yes" : "no");
+    LOG_INFO("ControlChannel: Configured for {} (auth_type: {})",
+             url(), static_cast<int>(auth_type_));
 }
 
 ControlChannel::~ControlChannel() {
-    disconnect();
+    // Base class destructor will handle disconnection
 }
 
-void ControlChannel::set_callbacks(ControlCallbacks callbacks) {
-    callbacks_ = std::move(callbacks);
-}
+void ControlChannel::set_control_callbacks(ControlCallbacks callbacks) {
+    control_callbacks_ = std::move(callbacks);
 
-// ============================================================================
-// Connection Management
-// ============================================================================
-
-void ControlChannel::connect() {
-    if (state_ != State::DISCONNECTED && state_ != State::RECONNECTING) {
-        LOG_WARN("ControlChannel: Already connecting or connected");
-        return;
-    }
-
-    state_ = State::CONNECTING;
-    shutdown_ = false;
-    reconnect_attempts_ = 0;
-    last_pong_ = std::chrono::steady_clock::now();
-
-    LOG_INFO("ControlChannel: Connecting to {}:{}",
-             controller_host_, controller_port_);
-
-    run_stream();
-}
-
-void ControlChannel::disconnect() {
-    shutdown_ = true;
-
-    // Cancel the stream
-    if (context_) {
-        context_->TryCancel();
-    }
-
-    // Wait for threads to finish
-    if (read_thread_ && read_thread_->joinable()) {
-        read_thread_->join();
-    }
-    if (write_thread_ && write_thread_->joinable()) {
-        write_cv_.notify_all();
-        write_thread_->join();
-    }
-
-    read_thread_.reset();
-    write_thread_.reset();
-    stream_.reset();
-    context_.reset();
-
-    // Clear write queue
-    {
-        std::lock_guard<std::mutex> lock(write_mutex_);
-        std::queue<edgelink::ControlMessage> empty;
-        write_queue_.swap(empty);
-    }
-
-    state_ = State::DISCONNECTED;
-    LOG_INFO("ControlChannel: Disconnected");
-}
-
-void ControlChannel::reconnect() {
-    if (state_ == State::RECONNECTING) {
-        return;
-    }
-
-    // Cancel current stream
-    if (context_) {
-        context_->TryCancel();
-    }
-
-    state_ = State::RECONNECTING;
-    schedule_reconnect();
-}
-
-// ============================================================================
-// gRPC Stream Management
-// ============================================================================
-
-void ControlChannel::run_stream() {
-    // Create new context for the stream (no deadline for long-running stream)
-    context_ = std::make_unique<grpc::ClientContext>();
-
-    // Create bidirectional stream
-    stream_ = stub_->Control(context_.get());
-
-    if (!stream_) {
-        LOG_ERROR("ControlChannel: Failed to create stream");
-        reconnect();
-        return;
-    }
-
-    state_ = State::AUTHENTICATING;
-    LOG_INFO("ControlChannel: Stream connected, authenticating");
-
-    // Send authentication request
-    do_authenticate();
-
-    // Start read and write threads (heartbeat merged into write thread)
-    read_thread_ = std::make_unique<std::thread>(&ControlChannel::read_loop, this);
-    write_thread_ = std::make_unique<std::thread>(&ControlChannel::write_loop, this);
-}
-
-void ControlChannel::read_loop() {
-    edgelink::ControlMessage msg;
-
-    while (!shutdown_ && stream_->Read(&msg)) {
-        process_message(msg);
-    }
-
-    if (!shutdown_) {
-        LOG_ERROR("ControlChannel: Stream read ended unexpectedly");
-        if (callbacks_.on_disconnected) {
-            callbacks_.on_disconnected(ErrorCode::DISCONNECTED);
+    // Also set WsClient callbacks to forward events
+    WsClientCallbacks ws_callbacks;
+    ws_callbacks.on_connected = [this]() {
+        if (control_callbacks_.on_connected) {
+            control_callbacks_.on_connected();
         }
-        state_ = State::RECONNECTING;
-        schedule_reconnect();
-    }
-}
-
-void ControlChannel::write_loop() {
-    constexpr auto heartbeat_interval = std::chrono::seconds(NetworkConstants::DEFAULT_HEARTBEAT_INTERVAL);
-    auto next_heartbeat = std::chrono::steady_clock::now() + heartbeat_interval;
-
-    while (!shutdown_) {
-        std::unique_lock<std::mutex> lock(write_mutex_);
-
-        // Wait with timeout for heartbeat
-        auto wait_result = write_cv_.wait_until(lock, next_heartbeat, [this] {
-            return !write_queue_.empty() || shutdown_;
-        });
-
-        if (shutdown_) break;
-
-        // Process queued messages
-        while (!write_queue_.empty()) {
-            auto msg = std::move(write_queue_.front());
-            write_queue_.pop();
-            lock.unlock();
-
-            if (!stream_->Write(msg)) {
-                LOG_ERROR("ControlChannel: Write failed");
-                if (!shutdown_) {
-                    reconnect();
-                }
-                return;
-            }
-
-            lock.lock();
+    };
+    ws_callbacks.on_disconnected = [this](const std::string& reason) {
+        if (control_callbacks_.on_disconnected) {
+            control_callbacks_.on_disconnected(ErrorCode::DISCONNECTED);
         }
-        lock.unlock();
-
-        // Check if it's time for heartbeat
-        auto now = std::chrono::steady_clock::now();
-        if (now >= next_heartbeat && state_ == State::CONNECTED) {
-            // Check for missed pongs
-            auto since_pong = std::chrono::duration_cast<std::chrono::seconds>(
-                now - last_pong_).count();
-
-            if (since_pong > NetworkConstants::DEFAULT_HEARTBEAT_INTERVAL * 3) {
-                LOG_WARN("ControlChannel: No pong received for {}s, reconnecting", since_pong);
-                reconnect();
-                return;
-            }
-
-            // Send ping
-            auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now.time_since_epoch()).count();
-
-            edgelink::ControlMessage msg;
-            auto* ping = msg.mutable_ping();
-            ping->set_timestamp(ts);
-            send_message(msg);
-
-            next_heartbeat = now + heartbeat_interval;
-        }
-    }
-}
-
-void ControlChannel::send_message(const edgelink::ControlMessage& msg) {
-    {
-        std::lock_guard<std::mutex> lock(write_mutex_);
-        write_queue_.push(msg);
-    }
-    write_cv_.notify_one();
+    };
+    set_callbacks(std::move(ws_callbacks));
 }
 
 // ============================================================================
-// Authentication
+// WsClient Override: Authentication
 // ============================================================================
 
 void ControlChannel::do_authenticate() {
     auto now = std::chrono::system_clock::now();
-    auto ts = std::chrono::duration_cast<std::chrono::seconds>(
+    auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
         now.time_since_epoch()).count();
 
-    edgelink::ControlMessage msg;
-    auto* auth_req = msg.mutable_auth_request();
-
-    auth_req->set_machine_key_pub(machine_key_pub_b64_);
-    auth_req->set_node_key_pub("");  // Will be set by crypto engine
-    auth_req->set_timestamp(ts);
-    auth_req->set_signature("");  // TODO: Sign with machine key
+    // Build AUTH_REQUEST payload using binary format
+    // For now, use JSON as a transition step (will be replaced with binary)
+    boost::json::object auth_json;
+    auth_json["auth_type"] = static_cast<int>(auth_type_);
+    auth_json["timestamp"] = ts;
 
     // System info
-    #ifdef _WIN32
-    auth_req->set_os("windows");
-    #elif __linux__
-    auth_req->set_os("linux");
-    #elif __APPLE__
-    auth_req->set_os("darwin");
-    #else
-    auth_req->set_os("unknown");
-    #endif
-
-    #ifdef __x86_64__
-    auth_req->set_arch("amd64");
-    #elif __aarch64__
-    auth_req->set_arch("arm64");
-    #elif _M_X64
-    auth_req->set_arch("amd64");
-    #elif _M_ARM64
-    auth_req->set_arch("arm64");
-    #else
-    auth_req->set_arch("unknown");
-    #endif
-
     char hostname[256] = {0};
     gethostname(hostname, sizeof(hostname));
-    auth_req->set_hostname(hostname);
-    auth_req->set_version("0.1.0");
+    auth_json["hostname"] = hostname;
+    auth_json["version"] = "0.1.0";
 
-    // Set auth_key for auto-registration
+    #ifdef _WIN32
+    auth_json["os"] = "windows";
+    #elif __linux__
+    auth_json["os"] = "linux";
+    #elif __APPLE__
+    auth_json["os"] = "darwin";
+    #else
+    auth_json["os"] = "unknown";
+    #endif
+
+    #if defined(__x86_64__) || defined(_M_X64)
+    auth_json["arch"] = "amd64";
+    #elif defined(__aarch64__) || defined(_M_ARM64)
+    auth_json["arch"] = "arm64";
+    #else
+    auth_json["arch"] = "unknown";
+    #endif
+
     if (!auth_key_.empty()) {
-        auth_req->set_auth_key(auth_key_);
+        auth_json["auth_key"] = auth_key_;
     }
 
-    send_message(msg);
+    // Create frame using helper function
+    wire::Frame frame = wire::create_json_frame(
+        wire::MessageType::AUTH_REQUEST,
+        boost::json::object(auth_json)
+    );
+
+    send_frame(frame);
     LOG_DEBUG("ControlChannel: Authentication request sent");
 }
 
-void ControlChannel::on_auth_response(const edgelink::AuthResponse& response) {
-    if (!response.success()) {
-        LOG_ERROR("ControlChannel: Authentication failed: {}",
-                  response.error_message());
-        if (callbacks_.on_disconnected) {
-            callbacks_.on_disconnected(ErrorCode::AUTH_FAILED);
-        }
-        // Don't call disconnect() here - it would deadlock since we're in read_loop
-        // Instead, set shutdown flag and let the stream end naturally
-        shutdown_ = true;
-        if (context_) {
-            context_->TryCancel();
-        }
-        state_ = State::DISCONNECTED;
-        return;
-    }
-
-    node_id_ = response.node_id();
-    virtual_ip_ = response.virtual_ip();
-    auth_token_ = response.auth_token();
-    relay_token_ = response.relay_token();
-
-    LOG_INFO("ControlChannel: Authenticated as node {} ({})",
-             node_id_, virtual_ip_);
-
-    state_ = State::CONNECTED;
-    reconnect_attempts_ = 0;
-    last_pong_ = std::chrono::steady_clock::now();
-
-    if (callbacks_.on_connected) {
-        callbacks_.on_connected();
-    }
-}
-
 // ============================================================================
-// Message Handling
+// WsClient Override: Frame Processing
 // ============================================================================
 
-void ControlChannel::process_message(const edgelink::ControlMessage& msg) {
-    switch (msg.message_case()) {
-        case edgelink::ControlMessage::kAuthResponse:
-            on_auth_response(msg.auth_response());
+void ControlChannel::process_frame(const wire::Frame& frame) {
+    switch (frame.header.type) {
+        case wire::MessageType::AUTH_RESPONSE:
+            handle_auth_response(frame);
             break;
 
-        case edgelink::ControlMessage::kConfig:
-            handle_config(msg.config());
+        case wire::MessageType::CONFIG:
+            handle_config(frame);
             break;
 
-        case edgelink::ControlMessage::kConfigUpdate:
-            handle_config_update(msg.config_update());
+        case wire::MessageType::CONFIG_UPDATE:
+            handle_config_update(frame);
             break;
 
-        case edgelink::ControlMessage::kP2PEndpoint:
-            handle_p2p_endpoint(msg.p2p_endpoint());
+        case wire::MessageType::P2P_ENDPOINT:
+            handle_p2p_endpoint(frame);
             break;
 
-        case edgelink::ControlMessage::kPong:
-            handle_pong(msg.pong());
+        case wire::MessageType::P2P_INIT:
+            handle_p2p_init(frame);
             break;
 
-        case edgelink::ControlMessage::kError:
-            handle_error(msg.error());
+        case wire::MessageType::ROUTE_UPDATE:
+            handle_route_update(frame);
+            break;
+
+        case wire::MessageType::ERROR_MSG:
+            handle_error(frame);
             break;
 
         default:
-            LOG_WARN("ControlChannel: Unknown message type: {}",
-                     static_cast<int>(msg.message_case()));
+            // Let base class handle PING/PONG and other messages
+            WsClient::process_frame(frame);
             break;
     }
 }
 
-void ControlChannel::handle_config(const edgelink::Config& config) {
-    auto update = convert_config(config);
-    update.auth_token = auth_token_;
-    update.relay_token = relay_token_;
-    update.timestamp = std::chrono::system_clock::now();
-
-    // Store network config
-    network_config_ = update.network;
-
-    if (callbacks_.on_config_update) {
-        callbacks_.on_config_update(update);
-    }
-}
-
-void ControlChannel::handle_config_update(const edgelink::ConfigUpdate& update) {
-    // Handle IP change from controller
-    if (update.has_ip_change()) {
-        const auto& ip_change = update.ip_change();
-        std::string old_ip = virtual_ip_;
-        std::string new_ip = ip_change.new_ip();
-
-        LOG_INFO("ControlChannel: IP change notification - {} -> {} (reason: {})",
-                 old_ip, new_ip, ip_change.reason());
-
-        // Update local state
-        virtual_ip_ = new_ip;
-
-        // Notify client to update TUN device
-        if (callbacks_.on_ip_change) {
-            callbacks_.on_ip_change(old_ip, new_ip, ip_change.reason());
-        }
-    }
-
-    // Handle incremental updates
-    for (const auto& peer_update : update.peer_updates()) {
-        if (peer_update.action() == edgelink::ACTION_ADD ||
-            peer_update.action() == edgelink::ACTION_UPDATE) {
-            auto peer = convert_peer(peer_update.peer());
-            if (peer.online && callbacks_.on_peer_online) {
-                callbacks_.on_peer_online(peer.node_id, peer);
-            }
-        } else if (peer_update.action() == edgelink::ACTION_REMOVE) {
-            if (callbacks_.on_peer_offline) {
-                callbacks_.on_peer_offline(peer_update.peer().node_id());
-            }
-        }
-    }
-
-    // Handle token refresh
-    if (update.has_new_relay_token()) {
-        relay_token_ = update.new_relay_token();
-        if (callbacks_.on_token_refresh) {
-            callbacks_.on_token_refresh(auth_token_, relay_token_);
-        }
-    }
-}
-
-void ControlChannel::handle_p2p_endpoint(const edgelink::P2PEndpoint& endpoint) {
-    std::vector<std::string> endpoints;
-    for (const auto& ep : endpoint.endpoints()) {
-        endpoints.push_back(ep.ip() + ":" + std::to_string(ep.port()));
-    }
-
-    std::string nat_type;
-    switch (endpoint.nat_type()) {
-        case edgelink::NAT_OPEN: nat_type = "open"; break;
-        case edgelink::NAT_FULL_CONE: nat_type = "full_cone"; break;
-        case edgelink::NAT_RESTRICTED_CONE: nat_type = "restricted_cone"; break;
-        case edgelink::NAT_PORT_RESTRICTED: nat_type = "port_restricted"; break;
-        case edgelink::NAT_SYMMETRIC: nat_type = "symmetric"; break;
-        default: nat_type = "unknown"; break;
-    }
-
-    if (callbacks_.on_p2p_endpoints) {
-        callbacks_.on_p2p_endpoints(endpoint.peer_node_id(), endpoints, nat_type);
-    }
-}
-
-void ControlChannel::handle_pong(const edgelink::Pong& pong) {
-    last_pong_ = std::chrono::steady_clock::now();
-    missed_pongs_ = 0;
-}
-
-void ControlChannel::handle_error(const edgelink::Error& error) {
-    LOG_ERROR("ControlChannel: Server error: {} - {}",
-              static_cast<int>(error.code()), error.message());
-}
-
-// ============================================================================
-// Reconnection
-// ============================================================================
-
-void ControlChannel::schedule_reconnect() {
-    if (reconnect_attempts_ >= MAX_RECONNECT_ATTEMPTS) {
-        LOG_ERROR("ControlChannel: Max reconnect attempts reached");
-        state_ = State::DISCONNECTED;
-        if (callbacks_.on_disconnected) {
-            callbacks_.on_disconnected(ErrorCode::MAX_RETRIES_EXCEEDED);
-        }
+void ControlChannel::handle_auth_response(const wire::Frame& frame) {
+    auto json = frame.payload_json();
+    if (json.is_null()) {
+        LOG_ERROR("ControlChannel: Invalid auth response payload");
+        auth_failed("Invalid auth response");
         return;
     }
 
-    // Exponential backoff
-    auto delay = INITIAL_RECONNECT_DELAY * (1 << std::min(reconnect_attempts_, 6u));
-    if (delay > MAX_RECONNECT_DELAY) {
-        delay = MAX_RECONNECT_DELAY;
+    try {
+        bool success = json.at("success").as_bool();
+
+        if (!success) {
+            std::string error_msg = "Unknown error";
+            if (json.as_object().contains("error_message")) {
+                error_msg = std::string(json.at("error_message").as_string());
+            }
+            LOG_ERROR("ControlChannel: Authentication failed: {}", error_msg);
+            auth_failed(error_msg);
+            return;
+        }
+
+        node_id_ = static_cast<uint32_t>(json.at("node_id").as_int64());
+        network_id_ = static_cast<uint32_t>(json.at("network_id").as_int64());
+
+        if (json.as_object().contains("virtual_ip")) {
+            virtual_ip_ = std::string(json.at("virtual_ip").as_string());
+        }
+        if (json.as_object().contains("auth_token")) {
+            auth_token_ = std::string(json.at("auth_token").as_string());
+        }
+        if (json.as_object().contains("relay_token")) {
+            relay_token_ = std::string(json.at("relay_token").as_string());
+        }
+
+        LOG_INFO("ControlChannel: Authenticated as node {} ({})", node_id_, virtual_ip_);
+
+        // Complete authentication via base class
+        auth_complete();
+
+    } catch (const std::exception& e) {
+        LOG_ERROR("ControlChannel: Failed to parse auth response: {}", e.what());
+        auth_failed(e.what());
+    }
+}
+
+void ControlChannel::handle_config(const wire::Frame& frame) {
+    auto json = frame.payload_json();
+    if (json.is_null()) {
+        LOG_ERROR("ControlChannel: Invalid config payload");
+        return;
     }
 
-    LOG_INFO("ControlChannel: Reconnecting in {} seconds (attempt {})",
-             std::chrono::duration_cast<std::chrono::seconds>(delay).count(),
-             reconnect_attempts_ + 1);
+        ConfigUpdate update;
 
-    std::this_thread::sleep_for(delay);
-    reconnect_attempts_++;
+        // Parse version
+        if (json.as_object().contains("version")) {
+            update.version = static_cast<uint64_t>(json.at("version").as_int64());
+        }
 
-    // Clean up old resources
-    if (read_thread_ && read_thread_->joinable()) {
-        read_thread_->join();
+        // Parse network config
+        if (json.as_object().contains("network_id")) {
+            update.network.network_id = static_cast<uint32_t>(json.at("network_id").as_int64());
+        }
+        if (json.as_object().contains("network_name")) {
+            update.network.network_name = std::string(json.at("network_name").as_string());
+        }
+        if (json.as_object().contains("subnet")) {
+            update.network.cidr = std::string(json.at("subnet").as_string());
+        }
+
+        // Parse peers
+        if (json.as_object().contains("peers") && json.at("peers").is_array()) {
+            for (const auto& peer_json : json.at("peers").as_array()) {
+                PeerInfo peer;
+                peer.node_id = static_cast<uint32_t>(peer_json.at("node_id").as_int64());
+                if (peer_json.as_object().contains("name")) {
+                    peer.hostname = std::string(peer_json.at("name").as_string());
+                }
+                if (peer_json.as_object().contains("virtual_ip")) {
+                    peer.virtual_ip = std::string(peer_json.at("virtual_ip").as_string());
+                }
+                if (peer_json.as_object().contains("online")) {
+                    peer.online = peer_json.at("online").as_bool();
+                }
+                update.peers.push_back(std::move(peer));
+            }
+        }
+
+        // Parse relays
+        if (json.as_object().contains("relays") && json.at("relays").is_array()) {
+            for (const auto& relay_json : json.at("relays").as_array()) {
+                RelayServerInfo relay;
+                relay.id = static_cast<uint32_t>(relay_json.at("server_id").as_int64());
+                if (relay_json.as_object().contains("name")) {
+                    relay.name = std::string(relay_json.at("name").as_string());
+                }
+                if (relay_json.as_object().contains("region")) {
+                    relay.region = std::string(relay_json.at("region").as_string());
+                }
+                if (relay_json.as_object().contains("url")) {
+                    relay.url = std::string(relay_json.at("url").as_string());
+                }
+                update.relays.push_back(std::move(relay));
+            }
+        }
+
+        // Parse routes
+        if (json.as_object().contains("routes") && json.at("routes").is_array()) {
+            for (const auto& route_json : json.at("routes").as_array()) {
+                SubnetRouteInfo route;
+                if (route_json.as_object().contains("cidr")) {
+                    route.cidr = std::string(route_json.at("cidr").as_string());
+                }
+                if (route_json.as_object().contains("gateway_node_id")) {
+                    route.via_node_id = static_cast<uint32_t>(route_json.at("gateway_node_id").as_int64());
+                }
+                if (route_json.as_object().contains("priority")) {
+                    route.priority = static_cast<uint16_t>(route_json.at("priority").as_int64());
+                }
+                update.subnet_routes.push_back(std::move(route));
+            }
+        }
+
+        // Tokens
+        update.auth_token = auth_token_;
+        if (json.as_object().contains("relay_token")) {
+            relay_token_ = std::string(json.at("relay_token").as_string());
+        }
+        update.relay_token = relay_token_;
+        update.timestamp = std::chrono::system_clock::now();
+
+        // Store config
+        network_config_ = update.network;
+        config_version_ = update.version;
+
+        if (control_callbacks_.on_config_update) {
+            control_callbacks_.on_config_update(update);
+        }
+
+        // Send CONFIG_ACK
+        send_config_ack(update.version);
+
+    } catch (const std::exception& e) {
+        LOG_ERROR("ControlChannel: Failed to parse config: {}", e.what());
     }
-    if (write_thread_ && write_thread_->joinable()) {
-        write_cv_.notify_all();
-        write_thread_->join();
+}
+
+void ControlChannel::handle_config_update(const wire::Frame& frame) {
+    // TODO: Handle incremental config updates
+    LOG_DEBUG("ControlChannel: Received config update");
+}
+
+void ControlChannel::handle_p2p_endpoint(const wire::Frame& frame) {
+    auto json = frame.payload_json();
+    if (json.is_null()) return;
+
+    try {
+        uint32_t peer_id = static_cast<uint32_t>(json.at("peer_node_id").as_int64());
+        std::vector<std::string> endpoints;
+
+        if (json.as_object().contains("endpoints") && json.at("endpoints").is_array()) {
+            for (const auto& ep : json.at("endpoints").as_array()) {
+                std::string ip = std::string(ep.at("ip").as_string());
+                uint16_t port = static_cast<uint16_t>(ep.at("port").as_int64());
+                endpoints.push_back(ip + ":" + std::to_string(port));
+            }
+        }
+
+        wire::NATType nat_type = wire::NATType::UNKNOWN;
+        if (json.as_object().contains("nat_type")) {
+            nat_type = static_cast<wire::NATType>(json.at("nat_type").as_int64());
+        }
+
+        if (control_callbacks_.on_p2p_endpoints) {
+            control_callbacks_.on_p2p_endpoints(peer_id, endpoints, nat_type);
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("ControlChannel: Failed to parse P2P endpoint: {}", e.what());
     }
+}
 
-    read_thread_.reset();
-    write_thread_.reset();
-    stream_.reset();
-    context_.reset();
+void ControlChannel::handle_p2p_init(const wire::Frame& frame) {
+    auto json = frame.payload_json();
+    if (json.is_null()) return;
 
-    last_pong_ = std::chrono::steady_clock::now();
-    state_ = State::CONNECTING;
+    try {
+        uint32_t peer_id = static_cast<uint32_t>(json.at("peer_node_id").as_int64());
+        std::vector<std::string> endpoints;
 
-    LOG_INFO("ControlChannel: Connecting to {}:{}",
-             controller_host_, controller_port_);
-    run_stream();
+        if (json.as_object().contains("endpoints") && json.at("endpoints").is_array()) {
+            for (const auto& ep : json.at("endpoints").as_array()) {
+                std::string ip = std::string(ep.at("ip").as_string());
+                uint16_t port = static_cast<uint16_t>(ep.at("port").as_int64());
+                endpoints.push_back(ip + ":" + std::to_string(port));
+            }
+        }
+
+        wire::NATType nat_type = wire::NATType::UNKNOWN;
+        if (json.as_object().contains("nat_type")) {
+            nat_type = static_cast<wire::NATType>(json.at("nat_type").as_int64());
+        }
+
+        if (control_callbacks_.on_p2p_init) {
+            control_callbacks_.on_p2p_init(peer_id, endpoints, nat_type);
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("ControlChannel: Failed to parse P2P init: {}", e.what());
+    }
+}
+
+void ControlChannel::handle_route_update(const wire::Frame& frame) {
+    // TODO: Handle route updates
+    LOG_DEBUG("ControlChannel: Received route update");
+}
+
+void ControlChannel::handle_error(const wire::Frame& frame) {
+    auto json = frame.payload_json();
+    if (json.is_null()) return;
+
+    try {
+        uint16_t code = static_cast<uint16_t>(json.at("code").as_int64());
+        std::string message = "Unknown error";
+        if (json.as_object().contains("message")) {
+            message = std::string(json.at("message").as_string());
+        }
+        LOG_ERROR("ControlChannel: Server error {}: {}", code, message);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ControlChannel: Failed to parse error: {}", e.what());
+    }
 }
 
 // ============================================================================
@@ -561,178 +401,156 @@ void ControlChannel::schedule_reconnect() {
 
 void ControlChannel::report_latency(uint32_t peer_node_id, uint32_t relay_id,
                                     uint32_t latency_ms) {
-    if (state_ != State::CONNECTED) {
-        return;
-    }
+    if (!is_connected()) return;
 
-    edgelink::ControlMessage msg;
-    auto* report = msg.mutable_latency_report();
-    auto* entry = report->add_entries();
-    entry->set_dst_type("relay");
-    entry->set_dst_id(relay_id);
-    entry->set_rtt_ms(latency_ms);
+    boost::json::object json;
+    boost::json::array entries;
+    boost::json::object entry;
+    entry["dst_type"] = "relay";
+    entry["dst_id"] = relay_id;
+    entry["rtt_ms"] = latency_ms;
+    entries.push_back(entry);
+    json["entries"] = entries;
 
-    send_message(msg);
+    wire::Frame frame = wire::create_json_frame(
+        wire::MessageType::LATENCY_REPORT,
+        boost::json::object(json)
+    );
+    send_frame(frame);
 }
 
 void ControlChannel::report_latency_batch(
     const std::vector<LatencyMeasurement>& measurements) {
-    if (state_ != State::CONNECTED || measurements.empty()) {
-        return;
-    }
+    if (!is_connected() || measurements.empty()) return;
 
-    edgelink::ControlMessage msg;
-    auto* report = msg.mutable_latency_report();
+    boost::json::object json;
+    boost::json::array entries;
 
     for (const auto& m : measurements) {
-        auto* entry = report->add_entries();
-        entry->set_dst_type(m.peer_id > 0 ? "node" : "relay");
-        entry->set_dst_id(m.peer_id > 0 ? m.peer_id : m.server_id);
-        entry->set_rtt_ms(m.rtt_ms);
+        boost::json::object entry;
+        entry["dst_type"] = m.dst_type;
+        entry["dst_id"] = m.dst_id;
+        entry["rtt_ms"] = m.rtt_ms;
+        entries.push_back(entry);
     }
+    json["entries"] = entries;
 
-    LOG_DEBUG("ControlChannel: Reporting {} latency measurements",
-              measurements.size());
-    send_message(msg);
+    wire::Frame frame = wire::create_json_frame(
+        wire::MessageType::LATENCY_REPORT,
+        boost::json::object(json)
+    );
+    send_frame(frame);
+    LOG_DEBUG("ControlChannel: Reporting {} latency measurements", measurements.size());
 }
 
-void ControlChannel::report_relay_connection(uint32_t server_id, bool connected) {
-    if (state_ != State::CONNECTED) {
-        return;
+void ControlChannel::report_endpoints(const std::vector<wire::Endpoint>& endpoints) {
+    if (!is_connected()) return;
+
+    boost::json::object json;
+    boost::json::array eps;
+
+    for (const auto& ep : endpoints) {
+        boost::json::object ep_json;
+        ep_json["type"] = static_cast<int>(ep.type);
+        ep_json["ip"] = ep.ip;
+        ep_json["port"] = ep.port;
+        ep_json["priority"] = ep.priority;
+        eps.push_back(ep_json);
     }
+    json["endpoints"] = eps;
 
-    // Use P2P status to report relay connection
-    edgelink::ControlMessage msg;
-    auto* status = msg.mutable_p2p_status();
-    status->set_peer_node_id(0);  // 0 indicates relay
-    status->set_connected(connected);
-
-    send_message(msg);
-}
-
-void ControlChannel::report_endpoints(const std::vector<std::string>& endpoints) {
-    if (state_ != State::CONNECTED) {
-        return;
-    }
-
-    // Use P2P status to report our endpoints
-    edgelink::ControlMessage msg;
-    auto* status = msg.mutable_p2p_status();
-    status->set_peer_node_id(node_id_);
-    status->set_connected(true);
-
-    if (!endpoints.empty()) {
-        // Parse first endpoint for reporting
-        auto pos = endpoints[0].find(':');
-        if (pos != std::string::npos) {
-            status->set_endpoint_ip(endpoints[0].substr(0, pos));
-            status->set_endpoint_port(
-                std::stoi(endpoints[0].substr(pos + 1)));
-        }
-    }
-
-    send_message(msg);
+    wire::Frame frame = wire::create_json_frame(
+        wire::MessageType::P2P_STATUS,
+        boost::json::object(json)
+    );
+    send_frame(frame);
 }
 
 void ControlChannel::request_peer_endpoints(uint32_t peer_node_id) {
-    if (state_ != State::CONNECTED) {
-        return;
-    }
+    if (!is_connected()) return;
 
-    LOG_DEBUG("ControlChannel: Requesting P2P endpoints for peer {}",
-              peer_node_id);
+    LOG_DEBUG("ControlChannel: Requesting P2P endpoints for peer {}", peer_node_id);
 
-    edgelink::ControlMessage msg;
-    auto* init = msg.mutable_p2p_init();
-    init->set_peer_node_id(peer_node_id);
+    boost::json::object json;
+    json["peer_node_id"] = peer_node_id;
 
-    send_message(msg);
+    wire::Frame frame = wire::create_json_frame(
+        wire::MessageType::P2P_INIT,
+        boost::json::object(json)
+    );
+    send_frame(frame);
 }
 
-void ControlChannel::report_key_rotation(
-    const std::array<uint8_t, 32>& new_pubkey,
-    const std::string& signature_b64) {
-    if (state_ != State::CONNECTED) {
-        return;
-    }
+void ControlChannel::report_p2p_status(uint32_t peer_node_id, bool connected,
+                                       const std::string& endpoint_ip,
+                                       uint16_t endpoint_port, uint32_t rtt_ms) {
+    if (!is_connected()) return;
 
-    // Key rotation is handled through auth request with new key
-    LOG_WARN("ControlChannel: Key rotation not yet implemented in gRPC");
+    boost::json::object json;
+    json["peer_node_id"] = peer_node_id;
+    json["connected"] = connected;
+    json["endpoint_ip"] = endpoint_ip;
+    json["endpoint_port"] = endpoint_port;
+    json["rtt_ms"] = rtt_ms;
+
+    wire::Frame frame = wire::create_json_frame(
+        wire::MessageType::P2P_STATUS,
+        boost::json::object(json)
+    );
+    send_frame(frame);
 }
 
-// ============================================================================
-// Conversion Helpers
-// ============================================================================
+void ControlChannel::report_key_rotation(const std::array<uint8_t, 32>& new_pubkey,
+                                         const std::array<uint8_t, 64>& signature) {
+    if (!is_connected()) return;
 
-ConfigUpdate ControlChannel::convert_config(const edgelink::Config& proto_config) {
-    ConfigUpdate config;
-
-    config.network.network_id = proto_config.network_id();
-    config.network.network_name = proto_config.network_name();
-    config.network.cidr = proto_config.subnet();
-
-    // Convert peers
-    for (const auto& proto_peer : proto_config.peers()) {
-        config.peers.push_back(convert_peer(proto_peer));
-    }
-
-    // Convert relays
-    for (const auto& proto_relay : proto_config.relays()) {
-        config.relays.push_back(convert_relay(proto_relay));
-    }
-
-    // Convert routes
-    for (const auto& proto_route : proto_config.routes()) {
-        SubnetRouteInfo route;
-        route.cidr = proto_route.cidr();
-        route.via_node_id = proto_route.gateway_node_id();
-        route.priority = proto_route.priority();
-        route.weight = proto_route.weight();
-        route.gateway_online = proto_route.enabled();
-        config.subnet_routes.push_back(route);
-    }
-
-    config.relay_token = proto_config.new_relay_token();
-
-    return config;
+    // TODO: Implement key rotation message
+    LOG_WARN("ControlChannel: Key rotation not yet implemented");
 }
 
-PeerInfo ControlChannel::convert_peer(const edgelink::PeerInfo& proto_peer) {
-    PeerInfo peer;
+void ControlChannel::announce_route(const std::string& prefix, uint8_t prefix_len,
+                                    uint16_t priority, uint16_t weight, uint8_t flags) {
+    if (!is_connected()) return;
 
-    peer.node_id = proto_peer.node_id();
-    peer.hostname = proto_peer.name();
-    peer.virtual_ip = proto_peer.virtual_ip();
-    peer.online = proto_peer.online();
+    boost::json::object json;
+    json["prefix"] = prefix;
+    json["prefix_len"] = prefix_len;
+    json["priority"] = priority;
+    json["weight"] = weight;
+    json["flags"] = flags;
 
-    // Decode node_key_pub from base64
-    std::string key_b64 = proto_peer.node_key_pub();
-    if (!key_b64.empty()) {
-        auto key_bytes = decode_base64(key_b64);
-        if (key_bytes.size() == 32) {
-            std::copy(key_bytes.begin(), key_bytes.end(),
-                      peer.node_key_pub.begin());
-        }
-    }
-
-    // Convert endpoints
-    for (const auto& ep : proto_peer.endpoints()) {
-        peer.endpoints.push_back(ep.ip() + ":" + std::to_string(ep.port()));
-    }
-
-    return peer;
+    wire::Frame frame = wire::create_json_frame(
+        wire::MessageType::ROUTE_ANNOUNCE,
+        boost::json::object(json)
+    );
+    send_frame(frame);
+    LOG_INFO("ControlChannel: Announcing route {}/{}", prefix, prefix_len);
 }
 
-RelayServerInfo ControlChannel::convert_relay(
-    const edgelink::RelayInfo& proto_relay) {
-    RelayServerInfo relay;
+void ControlChannel::withdraw_route(const std::string& prefix, uint8_t prefix_len) {
+    if (!is_connected()) return;
 
-    relay.id = proto_relay.server_id();
-    relay.name = proto_relay.name();
-    relay.region = proto_relay.region();
-    relay.url = proto_relay.url();  // gRPC URL: grpc://host:port or grpcs://host:port
+    boost::json::object json;
+    json["prefix"] = prefix;
+    json["prefix_len"] = prefix_len;
 
-    return relay;
+    wire::Frame frame = wire::create_json_frame(
+        wire::MessageType::ROUTE_WITHDRAW,
+        boost::json::object(json)
+    );
+    send_frame(frame);
+    LOG_INFO("ControlChannel: Withdrawing route {}/{}", prefix, prefix_len);
+}
+
+void ControlChannel::send_config_ack(uint64_t version) {
+    boost::json::object json;
+    json["version"] = static_cast<int64_t>(version);
+
+    wire::Frame frame = wire::create_json_frame(
+        wire::MessageType::CONFIG_ACK,
+        boost::json::object(json)
+    );
+    send_frame(frame);
 }
 
 } // namespace edgelink::client

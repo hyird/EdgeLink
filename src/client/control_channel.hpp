@@ -7,25 +7,28 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
-#include <queue>
 #include <chrono>
-#include <thread>
 #include <array>
-#include <condition_variable>
 
-#include <grpcpp/grpcpp.h>
-#include "edgelink.grpc.pb.h"
+#include <boost/asio.hpp>
+
 #include "common/protocol.hpp"
+#include "common/frame.hpp"
+#include "common/ws_client.hpp"
 
 namespace edgelink::client {
+
+namespace net = boost::asio;
 
 // Import wire protocol error codes to avoid conflicts with proto types
 using ErrorCode = wire::ErrorCode;
 
-// Network constants (local definitions to avoid conflicts with proto types)
+// Network constants
 namespace NetworkConstants {
     constexpr uint16_t DEFAULT_TUN_MTU = 1400;
     constexpr uint32_t DEFAULT_HEARTBEAT_INTERVAL = 30;  // seconds
+    constexpr uint32_t DEFAULT_RECONNECT_INTERVAL = 5;   // seconds
+    constexpr uint32_t MAX_RECONNECT_INTERVAL = 300;     // 5 minutes max
 }
 
 // ============================================================================
@@ -35,7 +38,6 @@ struct NetworkConfig {
     uint32_t network_id = 0;
     std::string network_name;
     std::string cidr;                     // e.g., "10.100.0.0/16"
-    bool derp_enabled = true;
     uint16_t mtu = NetworkConstants::DEFAULT_TUN_MTU;
 };
 
@@ -49,6 +51,7 @@ struct PeerInfo {
     std::array<uint8_t, 32> node_key_pub;  // X25519 public key
     bool online = false;
     std::vector<std::string> endpoints;    // Known endpoints
+    std::vector<std::string> allowed_subnets;  // Subnets this peer can route
     std::chrono::system_clock::time_point last_seen;
 };
 
@@ -59,9 +62,20 @@ struct RelayServerInfo {
     uint32_t id = 0;          // Server ID
     std::string name;
     std::string region;
-    std::string url;          // gRPC URL: grpc://host:port or grpcs://host:port
+    std::string url;          // WSS URL: wss://host:port/relay
     uint8_t capabilities = 0;
     bool available = true;
+};
+
+// ============================================================================
+// STUN Server Info
+// ============================================================================
+struct STUNServerInfo {
+    uint32_t id = 0;
+    std::string name;
+    std::string ip;
+    uint16_t port = 3478;
+    std::string secondary_ip;  // For full NAT detection
 };
 
 // ============================================================================
@@ -71,8 +85,10 @@ struct SubnetRouteInfo {
     std::string cidr;                  // e.g., "192.168.1.0/24"
     uint32_t via_node_id = 0;          // Gateway node ID
     std::string gateway_ip;            // Gateway's virtual IP
-    uint16_t priority = 100;           // Higher = more preferred
+    uint16_t priority = 100;           // Lower = more preferred
     uint16_t weight = 100;             // For load balancing
+    uint32_t metric = 0;
+    uint8_t flags = 0;
     bool gateway_online = false;       // Is gateway currently online?
 };
 
@@ -80,13 +96,15 @@ struct SubnetRouteInfo {
 // Full Configuration Update
 // ============================================================================
 struct ConfigUpdate {
+    uint64_t version = 0;
     NetworkConfig network;
     std::vector<PeerInfo> peers;
     std::vector<RelayServerInfo> relays;
-    std::vector<SubnetRouteInfo> subnet_routes;  // Subnet routes from gateways
+    std::vector<STUNServerInfo> stun_servers;
+    std::vector<SubnetRouteInfo> subnet_routes;
     std::string auth_token;
     std::string relay_token;
-    uint32_t recommended_relay_id = 0;           // Controller's recommended relay
+    int64_t relay_token_expires_at = 0;
     std::chrono::system_clock::time_point timestamp;
 };
 
@@ -94,94 +112,61 @@ struct ConfigUpdate {
 // Control Channel Callbacks
 // ============================================================================
 struct ControlCallbacks {
-    // Called when configuration is received/updated
     std::function<void(const ConfigUpdate&)> on_config_update;
-
-    // Called when connected to controller
     std::function<void()> on_connected;
-
-    // Called when disconnected from controller
     std::function<void(ErrorCode)> on_disconnected;
-
-    // Called when a peer comes online
     std::function<void(uint32_t node_id, const PeerInfo&)> on_peer_online;
-
-    // Called when a peer goes offline
     std::function<void(uint32_t node_id)> on_peer_offline;
-
-    // Called when token needs refresh
     std::function<void(const std::string& new_auth_token,
                        const std::string& new_relay_token)> on_token_refresh;
-
-    // Called for peer key update (rotation)
     std::function<void(uint32_t node_id,
                        const std::array<uint8_t, 32>& new_pubkey)> on_peer_key_update;
-
-    // Called for latency measurement request
-    std::function<void(uint32_t request_id)> on_latency_request;
-
-    // P2P callbacks
-    // Called when we receive peer's P2P endpoints (response to our request)
     std::function<void(uint32_t peer_id,
                        const std::vector<std::string>& endpoints,
-                       const std::string& nat_type)> on_p2p_endpoints;
-
-    // Called when a peer wants to initiate P2P with us
+                       wire::NATType nat_type)> on_p2p_endpoints;
     std::function<void(uint32_t peer_id,
                        const std::vector<std::string>& endpoints,
-                       const std::string& nat_type)> on_p2p_init;
-
-    // Called when virtual IP is changed by controller
+                       wire::NATType nat_type)> on_p2p_init;
     std::function<void(const std::string& old_ip,
                        const std::string& new_ip,
                        const std::string& reason)> on_ip_change;
 };
 
 // ============================================================================
-// Control Channel - gRPC connection to Controller
+// Control Channel State (alias to WsClientState)
 // ============================================================================
-class ControlChannel : public std::enable_shared_from_this<ControlChannel> {
+using ControlChannelState = WsClientState;
+
+constexpr std::string_view control_state_to_string(ControlChannelState state) {
+    return ws_client_state_to_string(state);
+}
+
+// ============================================================================
+// Control Channel - WebSocket connection to Controller
+// Uses WsClient base class for common WebSocket functionality
+// ============================================================================
+class ControlChannel : public WsClient {
 public:
-    enum class State {
-        DISCONNECTED,
-        CONNECTING,
-        AUTHENTICATING,
-        CONNECTED,
-        RECONNECTING
-    };
+    using State = ControlChannelState;
 
     ControlChannel(
+        net::io_context& ioc,
         const std::string& controller_url,
-        const std::string& machine_key_pub_b64,
-        const std::string& machine_key_priv_b64,
+        const std::array<uint8_t, 32>& machine_key_pub,
+        const std::array<uint8_t, 64>& machine_key_priv,
+        const std::array<uint8_t, 32>& node_key_pub,
+        const std::array<uint8_t, 32>& node_key_priv,
         const std::string& auth_key = ""
     );
 
-    ~ControlChannel();
+    ~ControlChannel() override;
 
     // Non-copyable
     ControlChannel(const ControlChannel&) = delete;
     ControlChannel& operator=(const ControlChannel&) = delete;
 
-    // ========================================================================
-    // Connection Management
-    // ========================================================================
-
-    // Start connection to controller
-    void connect();
-
-    // Disconnect from controller
-    void disconnect();
-
-    // Reconnect (with exponential backoff)
-    void reconnect();
-
-    // Check connection state
-    State state() const { return state_.load(); }
-    bool is_connected() const { return state_ == State::CONNECTED; }
-
     // Set callbacks
-    void set_callbacks(ControlCallbacks callbacks);
+    void set_control_callbacks(ControlCallbacks callbacks);
 
     // ========================================================================
     // Control Messages
@@ -192,24 +177,36 @@ public:
 
     // Batch report multiple latency measurements
     struct LatencyMeasurement {
-        uint32_t server_id = 0;
-        uint32_t peer_id = 0;    // 0 means to the relay itself
+        std::string dst_type;  // "relay" or "node"
+        uint32_t dst_id = 0;
         uint32_t rtt_ms = 0;
     };
     void report_latency_batch(const std::vector<LatencyMeasurement>& measurements);
 
-    // Report relay connection/disconnection
-    void report_relay_connection(uint32_t server_id, bool connected);
-
     // Report endpoints discovered via STUN/local
-    void report_endpoints(const std::vector<std::string>& endpoints);
+    void report_endpoints(const std::vector<wire::Endpoint>& endpoints);
 
     // Request peer endpoints for P2P connection
     void request_peer_endpoints(uint32_t peer_node_id);
 
+    // Report P2P connection status
+    void report_p2p_status(uint32_t peer_node_id, bool connected,
+                           const std::string& endpoint_ip, uint16_t endpoint_port,
+                           uint32_t rtt_ms);
+
     // Report our new node_key_pub after rotation
     void report_key_rotation(const std::array<uint8_t, 32>& new_pubkey,
-                             const std::string& signature_b64);
+                             const std::array<uint8_t, 64>& signature);
+
+    // Announce subnet route
+    void announce_route(const std::string& prefix, uint8_t prefix_len,
+                        uint16_t priority, uint16_t weight, uint8_t flags);
+
+    // Withdraw subnet route
+    void withdraw_route(const std::string& prefix, uint8_t prefix_len);
+
+    // Send config acknowledgment
+    void send_config_ack(uint64_t version);
 
     // ========================================================================
     // Getters
@@ -221,50 +218,32 @@ public:
     const std::string& relay_token() const { return relay_token_; }
     const NetworkConfig& network_config() const { return network_config_; }
 
+protected:
+    // Override WsClient methods
+    void do_authenticate() override;
+    void process_frame(const wire::Frame& frame) override;
+
 private:
-    // gRPC stream management
-    void run_stream();
-    void read_loop();
-    void write_loop();
-    void send_message(const edgelink::ControlMessage& msg);
-
-    // Authentication
-    void do_authenticate();
-    void on_auth_response(const edgelink::AuthResponse& response);
-
     // Message handling
-    void process_message(const edgelink::ControlMessage& msg);
-    void handle_config(const edgelink::Config& config);
-    void handle_config_update(const edgelink::ConfigUpdate& update);
-    void handle_p2p_endpoint(const edgelink::P2PEndpoint& endpoint);
-    void handle_pong(const edgelink::Pong& pong);
-    void handle_error(const edgelink::Error& error);
-
-    // Reconnection
-    void schedule_reconnect();
-
-    // Convert proto to local types
-    ConfigUpdate convert_config(const edgelink::Config& proto_config);
-    PeerInfo convert_peer(const edgelink::PeerInfo& proto_peer);
-    RelayServerInfo convert_relay(const edgelink::RelayInfo& proto_relay);
-
-    // gRPC components
-    std::shared_ptr<grpc::Channel> channel_;
-    std::unique_ptr<edgelink::ControlService::Stub> stub_;
-    std::unique_ptr<grpc::ClientContext> context_;
-    std::unique_ptr<grpc::ClientReaderWriter<edgelink::ControlMessage, edgelink::ControlMessage>> stream_;
-
-    // Connection state
-    std::atomic<State> state_{State::DISCONNECTED};
-    std::atomic<bool> shutdown_{false};
-    std::string controller_host_;
-    std::string controller_port_;
+    void handle_auth_response(const wire::Frame& frame);
+    void handle_config(const wire::Frame& frame);
+    void handle_config_update(const wire::Frame& frame);
+    void handle_p2p_endpoint(const wire::Frame& frame);
+    void handle_p2p_init(const wire::Frame& frame);
+    void handle_route_update(const wire::Frame& frame);
+    void handle_error(const wire::Frame& frame);
 
     // Authentication
-    std::string machine_key_pub_b64_;
-    std::string machine_key_priv_b64_;
+    std::array<uint8_t, 32> machine_key_pub_;
+    std::array<uint8_t, 64> machine_key_priv_;
+    std::array<uint8_t, 32> node_key_pub_;
+    std::array<uint8_t, 32> node_key_priv_;
+    wire::AuthType auth_type_ = wire::AuthType::MACHINE;
     std::string auth_key_;
+
+    // Node info (set after auth)
     uint32_t node_id_ = 0;
+    uint32_t network_id_ = 0;
     std::string virtual_ip_;
     std::string auth_token_;
     std::string relay_token_;
@@ -273,26 +252,10 @@ private:
     NetworkConfig network_config_;
 
     // Callbacks
-    ControlCallbacks callbacks_;
+    ControlCallbacks control_callbacks_;
 
-    // Write queue
-    std::mutex write_mutex_;
-    std::queue<edgelink::ControlMessage> write_queue_;
-    std::condition_variable write_cv_;
-
-    // Heartbeat
-    std::chrono::steady_clock::time_point last_pong_{std::chrono::steady_clock::now()};
-    uint32_t missed_pongs_ = 0;
-
-    // Threads (heartbeat merged into write thread)
-    std::unique_ptr<std::thread> read_thread_;
-    std::unique_ptr<std::thread> write_thread_;
-
-    // Reconnection
-    uint32_t reconnect_attempts_ = 0;
-    static constexpr uint32_t MAX_RECONNECT_ATTEMPTS = 10;
-    static constexpr auto INITIAL_RECONNECT_DELAY = std::chrono::seconds(1);
-    static constexpr auto MAX_RECONNECT_DELAY = std::chrono::minutes(5);
+    // Config version tracking
+    uint64_t config_version_ = 0;
 };
 
 } // namespace edgelink::client

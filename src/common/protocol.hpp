@@ -17,62 +17,76 @@ namespace wire {
 // ============================================================================
 // Protocol Version
 // ============================================================================
-constexpr uint8_t PROTOCOL_VERSION = 0x01;
+constexpr uint8_t PROTOCOL_VERSION = 0x02;
 
 // ============================================================================
-// Message Types (8.2 from design doc)
+// Message Types (architecture.md section 2.3)
 // ============================================================================
 enum class MessageType : uint8_t {
-    // Authentication
+    // Authentication (0x01-0x0F)
     AUTH_REQUEST     = 0x01,
     AUTH_RESPONSE    = 0x02,
-    
-    // Configuration
-    CONFIG           = 0x03,
-    CONFIG_UPDATE    = 0x04,
-    
-    // Control messages
-    CONTROL          = 0x05,
-    
-    // Data
-    DATA             = 0x10,
-    
-    // Heartbeat
-    PING             = 0x20,
-    PONG             = 0x21,
-    LATENCY_REPORT   = 0x22,
-    
-    // P2P
-    P2P_INIT         = 0x30,
-    P2P_ENDPOINT     = 0x31,
-    P2P_PING         = 0x32,
-    P2P_PONG         = 0x33,
-    P2P_KEEPALIVE    = 0x34,
-    P2P_STATUS       = 0x35,
-    
-    // Server (Relay/STUN)
-    SERVER_REGISTER      = 0x40,
-    SERVER_REGISTER_RESP = 0x41,
-    SERVER_NODE_LOC      = 0x42,
-    SERVER_BLACKLIST     = 0x43,
-    SERVER_HEARTBEAT     = 0x44,
-    SERVER_LATENCY       = 0x45,
-    SERVER_RELAY_LIST    = 0x46,  // Controller -> Relay: list of other relays for mesh
-    SERVER_LATENCY_REPORT = 0x47, // Relay -> Controller: mesh latency report
-    
-    // Relay specific
-    RELAY_AUTH           = 0x50,
-    RELAY_AUTH_RESP      = 0x51,
-    
-    // Mesh (Relay-to-Relay)
-    MESH_HELLO           = 0x60,
-    MESH_HELLO_ACK       = 0x61,
-    MESH_FORWARD         = 0x62,
-    MESH_PING            = 0x63,
-    MESH_PONG            = 0x64,
-    
-    // Error
+    AUTH_CHALLENGE   = 0x03,
+    AUTH_VERIFY      = 0x04,
+
+    // Configuration (0x10-0x1F)
+    CONFIG           = 0x10,
+    CONFIG_UPDATE    = 0x11,
+    CONFIG_ACK       = 0x12,
+
+    // Data (0x20-0x2F)
+    DATA             = 0x20,
+    DATA_ACK         = 0x21,
+
+    // Heartbeat (0x30-0x3F)
+    PING             = 0x30,
+    PONG             = 0x31,
+    LATENCY_REPORT   = 0x32,
+
+    // P2P (0x40-0x4F)
+    P2P_INIT         = 0x40,
+    P2P_ENDPOINT     = 0x41,
+    P2P_PING         = 0x42,
+    P2P_PONG         = 0x43,
+    P2P_KEEPALIVE    = 0x44,
+    P2P_STATUS       = 0x45,
+
+    // Server (Relay/STUN) (0x50-0x5F)
+    SERVER_REGISTER      = 0x50,
+    SERVER_REGISTER_RESP = 0x51,
+    SERVER_NODE_LOC      = 0x52,
+    SERVER_BLACKLIST     = 0x53,
+    SERVER_HEARTBEAT     = 0x54,
+    SERVER_RELAY_LIST    = 0x55,
+    SERVER_LATENCY_REPORT = 0x56,
+
+    // Relay specific (0x60-0x6F)
+    RELAY_AUTH           = 0x60,
+    RELAY_AUTH_RESP      = 0x61,
+
+    // Mesh (Relay-to-Relay) (0x70-0x7F)
+    MESH_HELLO           = 0x70,
+    MESH_HELLO_ACK       = 0x71,
+    MESH_FORWARD         = 0x72,
+    MESH_PING            = 0x73,
+    MESH_PONG            = 0x74,
+
+    // Routing (0x80-0x8F)
+    ROUTE_ANNOUNCE       = 0x80,
+    ROUTE_UPDATE         = 0x81,
+    ROUTE_WITHDRAW       = 0x82,
+
+    // Error (0xF0-0xFF)
     ERROR_MSG            = 0xFF
+};
+
+// ============================================================================
+// Authentication Types
+// ============================================================================
+enum class AuthType : uint8_t {
+    USER     = 0x01,  // Username/password login
+    AUTHKEY  = 0x02,  // Pre-shared AuthKey
+    MACHINE  = 0x03   // Registered node reconnection
 };
 
 // Alias for client code compatibility
@@ -80,48 +94,68 @@ using FrameType = MessageType;
 
 constexpr std::string_view message_type_to_string(MessageType type) {
     switch (type) {
-        case MessageType::AUTH_REQUEST:        return "AUTH_REQUEST";
-        case MessageType::AUTH_RESPONSE:       return "AUTH_RESPONSE";
-        case MessageType::CONFIG:              return "CONFIG";
-        case MessageType::CONFIG_UPDATE:       return "CONFIG_UPDATE";
-        case MessageType::CONTROL:             return "CONTROL";
-        case MessageType::DATA:                return "DATA";
-        case MessageType::PING:                return "PING";
-        case MessageType::PONG:                return "PONG";
-        case MessageType::LATENCY_REPORT:      return "LATENCY_REPORT";
-        case MessageType::P2P_INIT:            return "P2P_INIT";
-        case MessageType::P2P_ENDPOINT:        return "P2P_ENDPOINT";
-        case MessageType::P2P_PING:            return "P2P_PING";
-        case MessageType::P2P_PONG:            return "P2P_PONG";
-        case MessageType::P2P_KEEPALIVE:       return "P2P_KEEPALIVE";
-        case MessageType::P2P_STATUS:          return "P2P_STATUS";
-        case MessageType::SERVER_REGISTER:     return "SERVER_REGISTER";
-        case MessageType::SERVER_REGISTER_RESP:return "SERVER_REGISTER_RESP";
-        case MessageType::SERVER_NODE_LOC:     return "SERVER_NODE_LOC";
-        case MessageType::SERVER_BLACKLIST:    return "SERVER_BLACKLIST";
-        case MessageType::SERVER_HEARTBEAT:    return "SERVER_HEARTBEAT";
-        case MessageType::SERVER_LATENCY:      return "SERVER_LATENCY";
-        case MessageType::SERVER_RELAY_LIST:   return "SERVER_RELAY_LIST";
-        case MessageType::SERVER_LATENCY_REPORT: return "SERVER_LATENCY_REPORT";
-        case MessageType::RELAY_AUTH:          return "RELAY_AUTH";
-        case MessageType::RELAY_AUTH_RESP:     return "RELAY_AUTH_RESP";
-        case MessageType::MESH_HELLO:          return "MESH_HELLO";
-        case MessageType::MESH_HELLO_ACK:      return "MESH_HELLO_ACK";
-        case MessageType::MESH_FORWARD:        return "MESH_FORWARD";
-        case MessageType::MESH_PING:           return "MESH_PING";
-        case MessageType::MESH_PONG:           return "MESH_PONG";
-        case MessageType::ERROR_MSG:           return "ERROR_MSG";
-        default:                               return "UNKNOWN";
+        case MessageType::AUTH_REQUEST:         return "AUTH_REQUEST";
+        case MessageType::AUTH_RESPONSE:        return "AUTH_RESPONSE";
+        case MessageType::AUTH_CHALLENGE:       return "AUTH_CHALLENGE";
+        case MessageType::AUTH_VERIFY:          return "AUTH_VERIFY";
+        case MessageType::CONFIG:               return "CONFIG";
+        case MessageType::CONFIG_UPDATE:        return "CONFIG_UPDATE";
+        case MessageType::CONFIG_ACK:           return "CONFIG_ACK";
+        case MessageType::DATA:                 return "DATA";
+        case MessageType::DATA_ACK:             return "DATA_ACK";
+        case MessageType::PING:                 return "PING";
+        case MessageType::PONG:                 return "PONG";
+        case MessageType::LATENCY_REPORT:       return "LATENCY_REPORT";
+        case MessageType::P2P_INIT:             return "P2P_INIT";
+        case MessageType::P2P_ENDPOINT:         return "P2P_ENDPOINT";
+        case MessageType::P2P_PING:             return "P2P_PING";
+        case MessageType::P2P_PONG:             return "P2P_PONG";
+        case MessageType::P2P_KEEPALIVE:        return "P2P_KEEPALIVE";
+        case MessageType::P2P_STATUS:           return "P2P_STATUS";
+        case MessageType::SERVER_REGISTER:      return "SERVER_REGISTER";
+        case MessageType::SERVER_REGISTER_RESP: return "SERVER_REGISTER_RESP";
+        case MessageType::SERVER_NODE_LOC:      return "SERVER_NODE_LOC";
+        case MessageType::SERVER_BLACKLIST:     return "SERVER_BLACKLIST";
+        case MessageType::SERVER_HEARTBEAT:     return "SERVER_HEARTBEAT";
+        case MessageType::SERVER_RELAY_LIST:    return "SERVER_RELAY_LIST";
+        case MessageType::SERVER_LATENCY_REPORT:return "SERVER_LATENCY_REPORT";
+        case MessageType::RELAY_AUTH:           return "RELAY_AUTH";
+        case MessageType::RELAY_AUTH_RESP:      return "RELAY_AUTH_RESP";
+        case MessageType::MESH_HELLO:           return "MESH_HELLO";
+        case MessageType::MESH_HELLO_ACK:       return "MESH_HELLO_ACK";
+        case MessageType::MESH_FORWARD:         return "MESH_FORWARD";
+        case MessageType::MESH_PING:            return "MESH_PING";
+        case MessageType::MESH_PONG:            return "MESH_PONG";
+        case MessageType::ROUTE_ANNOUNCE:       return "ROUTE_ANNOUNCE";
+        case MessageType::ROUTE_UPDATE:         return "ROUTE_UPDATE";
+        case MessageType::ROUTE_WITHDRAW:       return "ROUTE_WITHDRAW";
+        case MessageType::ERROR_MSG:            return "ERROR_MSG";
+        default:                                return "UNKNOWN";
     }
 }
 
 // ============================================================================
-// Frame Flags
+// Frame Flags (architecture.md section 2.2.2)
 // ============================================================================
 namespace FrameFlags {
     constexpr uint8_t NONE       = 0x00;
     constexpr uint8_t NEED_ACK   = 0x01;  // Bit 0: requires acknowledgment
-    constexpr uint8_t COMPRESSED = 0x02;  // Bit 1: payload is compressed
+    constexpr uint8_t COMPRESSED = 0x02;  // Bit 1: payload is compressed (LZ4)
+    constexpr uint8_t ENCRYPTED  = 0x04;  // Bit 2: payload is encrypted (control plane E2E)
+    constexpr uint8_t FRAGMENTED = 0x08;  // Bit 3: fragmented message
+}
+
+// ============================================================================
+// Route Flags (architecture.md section 6.3.2)
+// ============================================================================
+namespace RouteFlags {
+    constexpr uint8_t ENABLED   = 0x01;   // Route is enabled
+    constexpr uint8_t AUTO      = 0x02;   // Auto-discovered route
+    constexpr uint8_t STATIC    = 0x04;   // Statically configured route
+    constexpr uint8_t EXIT_NODE = 0x08;   // Exit node route (0.0.0.0/0)
+    constexpr uint8_t EXCLUDE   = 0x10;   // Exclude route (don't go through VPN)
+    constexpr uint8_t PRIMARY   = 0x20;   // Primary route
+    constexpr uint8_t FAILOVER  = 0x40;   // Failover route
 }
 
 // ============================================================================
@@ -341,6 +375,7 @@ namespace CryptoConstants = wire::CryptoConstants;
 namespace NetworkConstants = wire::NetworkConstants;
 namespace ServerCapability = wire::ServerCapability;
 namespace FrameFlags = wire::FrameFlags;
+namespace RouteFlags = wire::RouteFlags;
 
 // Type aliases
 using wire::X25519PublicKey;
@@ -351,6 +386,7 @@ using wire::SessionKey;
 using wire::Nonce;
 using wire::AuthTag;
 using wire::TokenType;
+using wire::AuthType;
 using wire::error_code_to_string;
 using wire::nat_type_to_string;
 // NOTE: ErrorCode, Endpoint, EndpointType, NATType are NOT re-exported

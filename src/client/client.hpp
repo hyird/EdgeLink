@@ -1,7 +1,7 @@
 #pragma once
 
 #include "control_channel.hpp"
-#include "grpc_relay_manager.hpp"
+#include "ws_relay_manager.hpp"
 #include "crypto_engine.hpp"
 #include "tun_device.hpp"
 #include "route_manager.hpp"
@@ -102,7 +102,7 @@ public:
     
     // 获取组件
     std::shared_ptr<ControlChannel> get_control_channel() { return control_channel_; }
-    std::shared_ptr<GrpcRelayManager> get_relay_manager() { return relay_manager_; }
+    std::shared_ptr<WsRelayManager> get_relay_manager() { return relay_manager_; }
     std::shared_ptr<CryptoEngine> get_crypto_engine() { return crypto_engine_; }
     std::shared_ptr<TunDevice> get_tun_device() { return tun_device_; }
     std::shared_ptr<RouteManager> get_route_manager() { return route_manager_; }
@@ -149,7 +149,7 @@ private:
     
     // RelayManager回调
     void on_relay_data_received(uint32_t from_node_id, const std::vector<uint8_t>& data);
-    void on_relay_state_changed(uint32_t relay_id, GrpcRelayConnection::State state);
+    void on_relay_state_changed(uint32_t relay_id, WsRelayConnection::State state);
     void on_latency_measured(uint32_t relay_id, uint32_t peer_id, uint32_t latency_ms);
     
     // P2PManager回调
@@ -189,7 +189,7 @@ private:
     
     // 组件
     std::shared_ptr<ControlChannel> control_channel_;
-    std::shared_ptr<GrpcRelayManager> relay_manager_;
+    std::shared_ptr<WsRelayManager> relay_manager_;
     std::shared_ptr<CryptoEngine> crypto_engine_;
     std::shared_ptr<TunDevice> tun_device_;
     std::shared_ptr<RouteManager> route_manager_;

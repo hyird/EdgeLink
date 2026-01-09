@@ -43,7 +43,12 @@
       "Bash(D:/msys64/usr/bin/tail.exe:*)",
       "Bash(D:/msys64/mingw64.exe -c \"cd /d/WorkSpace/EdgeLink && rm -rf build && mkdir build && cd build && cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release\")",
       "Bash(D:/msys64/msys2_shell.cmd -mingw64 -defterm -no-start -c \"cd /d/WorkSpace/EdgeLink/build && cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release 2>&1\")",
-      "Bash(D:/msys64/msys2_shell.cmd -mingw64 -defterm -no-start -c \"cd /d/WorkSpace/EdgeLink && rm -rf build && mkdir build && cd build && cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja\")"
+      "Bash(D:/msys64/msys2_shell.cmd -mingw64 -defterm -no-start -c \"cd /d/WorkSpace/EdgeLink && rm -rf build && mkdir build && cd build && cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja\")",
+      "Bash(D:/msys64/msys2_shell.cmd -mingw64 -defterm -no-start -c \"cd /d/WorkSpace/EdgeLink/build && cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja\")",
+      "Bash(D:/msys64/msys2_shell.cmd -mingw64 -defterm -no-start -c \"ls -la /d/WorkSpace/EdgeLink/build/_deps/libsodium_src-src/ | head -20\")",
+      "Bash(D:/msys64/msys2_shell.cmd -mingw64 -defterm -no-start -c \"ls /d/WorkSpace/EdgeLink/build/_deps/libsodium_src-src/src/libsodium/*.c 2>/dev/null | head -10\")",
+      "Bash(D:/msys64/msys2_shell.cmd -mingw64 -defterm -no-start -c \"find /d/WorkSpace/EdgeLink/build/_deps/libsodium_src-src/src -name ''*.c'' | head -30\")",
+      "Bash(D:/msys64/mingw64/bin/cmake.exe --version)"
     ]
   }
 }

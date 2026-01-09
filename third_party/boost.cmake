@@ -11,8 +11,22 @@ FetchContent_Declare(
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 
-# Only build what we need (asio is header-only, json needs compilation)
-set(BOOST_INCLUDE_LIBRARIES asio json system endian CACHE STRING "" FORCE)
+# Build what we need - asio and beast have many dependencies
+set(BOOST_INCLUDE_LIBRARIES
+    asio
+    beast
+    json
+    system
+    endian
+    url
+    # asio/beast dependencies
+    bind
+    date_time
+    regex
+    coroutine
+    context
+    CACHE STRING "" FORCE
+)
 set(BOOST_ENABLE_CMAKE ON CACHE BOOL "" FORCE)
 
 # Disable building tests and examples

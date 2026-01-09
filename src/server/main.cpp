@@ -1,9 +1,8 @@
-#include "grpc_relay_server.hpp"
+#include "ws_relay_server.hpp"
 #include "stun_server.hpp"
 #include "controller_client.hpp"
 #include "common/config.hpp"
 #include "common/log.hpp"
-#include <absl/log/initialize.h>
 
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>
@@ -147,8 +146,6 @@ std::optional<ServerConfig> load_config(const std::string& path) {
 } // anonymous namespace
 
 int main(int argc, char* argv[]) {
-    absl::InitializeLog();
-
     // Parse command line arguments
     std::string config_path = "config/server.json";
 
@@ -180,7 +177,7 @@ int main(int argc, char* argv[]) {
     }
 
     LOG_INFO("EdgeLink Relay Server starting...");
-    LOG_INFO("Version: 1.0.0, Protocol: {}", static_cast<int>(PROTOCOL_VERSION));
+    LOG_INFO("Version: 1.0.0, Protocol: {}", static_cast<int>(wire::PROTOCOL_VERSION));
     LOG_INFO("Configuration loaded from: {}", config_path);
 
     ServerConfig config = std::move(*config_opt);
@@ -199,11 +196,11 @@ int main(int argc, char* argv[]) {
         // Shutdown flag
         std::atomic<bool> shutdown_requested{false};
 
-        // Create gRPC relay server
-        GrpcRelayServer relay_server(config);
-
-        // Create IO context for STUN (still uses boost::asio)
+        // Create IO context for all services
         boost::asio::io_context ioc;
+
+        // Create WebSocket relay server
+        WsRelayServer relay_server(ioc, config);
 
         // Create STUN server (if enabled)
         std::unique_ptr<STUNServer> stun_server;
@@ -211,8 +208,8 @@ int main(int argc, char* argv[]) {
             stun_server = std::make_unique<STUNServer>(ioc, config);
         }
 
-        // Create controller client
-        auto controller_client = std::make_shared<ControllerClient>(relay_server, config);
+        // Create controller client (WebSocket)
+        auto controller_client = std::make_shared<ControllerClient>(ioc, relay_server, config);
 
         // Set controller client for control plane
         relay_server.set_controller_client(controller_client);
@@ -228,6 +225,24 @@ int main(int argc, char* argv[]) {
 
         controller_client->set_disconnect_callback([](const std::string& reason) {
             LOG_WARN("Disconnected from controller: {}", reason);
+        });
+
+        // Node location updates
+        controller_client->set_node_loc_callback([&relay_server](
+            const std::vector<std::pair<uint32_t, std::vector<uint32_t>>>& locations) {
+            relay_server.session_manager()->update_node_locations(locations);
+        });
+
+        // Token blacklist updates
+        controller_client->set_blacklist_callback([&relay_server](
+            bool full_sync, const std::vector<std::pair<std::string, int64_t>>& entries) {
+            if (full_sync) {
+                // Clear existing blacklist for full sync
+                // Note: This should be implemented in session manager if needed
+            }
+            for (const auto& [jti, expires_at] : entries) {
+                relay_server.session_manager()->add_to_blacklist(jti, expires_at);
+            }
         });
 
         // Setup signal handling
@@ -249,22 +264,40 @@ int main(int argc, char* argv[]) {
         });
 
         // Start services
-        LOG_INFO("Starting relay server...");
+        LOG_INFO("Starting relay server on {}:{}...",
+                 config.relay.listen_address, config.relay.listen_port);
         relay_server.start();
 
         if (stun_server) {
-            LOG_INFO("Starting STUN server...");
+            LOG_INFO("Starting STUN server on {}:{}...",
+                     config.stun.listen_address, config.stun.listen_port);
             stun_server->start();
         }
 
-        LOG_INFO("Connecting to controller...");
+        LOG_INFO("Connecting to controller at {}...", config.controller.url);
         controller_client->connect();
 
-        // Run IO context for STUN and signal handling
+        // Run IO context
         LOG_INFO("Server running");
 
-        // Run IO context (blocks for signals and STUN)
+        // Use multiple threads for IO
+        std::vector<std::thread> io_threads;
+        unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+        for (unsigned int i = 0; i < num_threads - 1; ++i) {
+            io_threads.emplace_back([&ioc]() {
+                ioc.run();
+            });
+        }
+
+        // Main thread also runs IO
         ioc.run();
+
+        // Wait for all threads
+        for (auto& t : io_threads) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
 
         LOG_INFO("Server stopped");
         return 0;

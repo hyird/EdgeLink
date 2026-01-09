@@ -55,6 +55,7 @@
 // nlohmann/json
 #include <nlohmann/json.hpp>
 
-// gRPC / Protobuf
-#include <grpcpp/grpcpp.h>
-#include <google/protobuf/message.h>
+// Boost Beast (WebSocket)
+#include <boost/beast/core.hpp>
+#include <boost/beast/websocket.hpp>
+#include <boost/beast/websocket/ssl.hpp>

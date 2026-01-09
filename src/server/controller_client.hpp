@@ -1,96 +1,94 @@
 #pragma once
 
 #include "common/protocol.hpp"
+#include "common/frame.hpp"
+#include "common/ws_client.hpp"
 #include "common/config.hpp"
 
-#include <grpcpp/grpcpp.h>
-#include "edgelink.grpc.pb.h"
+#include <boost/asio.hpp>
 
 #include <memory>
 #include <functional>
 #include <atomic>
-#include <thread>
-#include <chrono>
+#include <string>
+#include <vector>
 
 namespace edgelink {
 
+namespace net = boost::asio;
+
 // Forward declarations
-class GrpcRelayServer;
+class WsRelayServer;
 
 // ============================================================================
-// ControllerClient - gRPC client to connect relay to controller
+// ControllerClient - WebSocket client to connect relay to controller
+// Inherits from WsClient for common WebSocket functionality
 // ============================================================================
-class ControllerClient : public std::enable_shared_from_this<ControllerClient> {
+class ControllerClient : public WsClient {
 public:
     using ConnectCallback = std::function<void(bool success, const std::string& error)>;
-    using MessageCallback = std::function<void(const edgelink::ServerMessage& msg)>;
     using DisconnectCallback = std::function<void(const std::string& reason)>;
 
-    ControllerClient(GrpcRelayServer& server, const ServerConfig& config);
-    ~ControllerClient();
+    // Callback for node location updates
+    using NodeLocCallback = std::function<void(const std::vector<std::pair<uint32_t, std::vector<uint32_t>>>&)>;
 
-    // Connect to controller
-    void connect();
+    // Callback for relay list updates
+    using RelayListCallback = std::function<void(const std::vector<wire::RelayInfo>&)>;
 
-    // Disconnect
-    void disconnect();
+    // Callback for token blacklist updates
+    using BlacklistCallback = std::function<void(bool full_sync, const std::vector<std::pair<std::string, int64_t>>&)>;
 
-    // Send message to controller
-    void send(const edgelink::ServerMessage& msg);
+    ControllerClient(net::io_context& ioc, WsRelayServer& server, const ServerConfig& config);
+    ~ControllerClient() override = default;
 
-    // Check connection state
-    bool is_connected() const { return connected_; }
+    // Non-copyable
+    ControllerClient(const ControllerClient&) = delete;
+    ControllerClient& operator=(const ControllerClient&) = delete;
 
     // Set callbacks
     void set_connect_callback(ConnectCallback cb) { connect_callback_ = std::move(cb); }
-    void set_message_callback(MessageCallback cb) { message_callback_ = std::move(cb); }
     void set_disconnect_callback(DisconnectCallback cb) { disconnect_callback_ = std::move(cb); }
+    void set_node_loc_callback(NodeLocCallback cb) { node_loc_callback_ = std::move(cb); }
+    void set_relay_list_callback(RelayListCallback cb) { relay_list_callback_ = std::move(cb); }
+    void set_blacklist_callback(BlacklistCallback cb) { blacklist_callback_ = std::move(cb); }
 
     // Send latency report to controller
     void send_latency_report(const std::vector<std::tuple<std::string, uint32_t, uint32_t>>& entries);
 
+    // Send heartbeat with stats
+    void send_heartbeat();
+
     // Get server ID (assigned by controller)
     uint32_t server_id() const { return server_id_; }
+    bool is_registered() const { return registered_.load(); }
+
+protected:
+    // Override WsClient methods
+    void do_authenticate() override;
+    void process_frame(const wire::Frame& frame) override;
 
 private:
-    void run_connection();
-    void do_register();
-    void process_message(const edgelink::ServerMessage& msg);
-    void handle_server_node_loc(const edgelink::ServerNodeLoc& locs);
-    void handle_server_relay_list(const edgelink::ServerRelayList& list);
-    void handle_ping(const edgelink::Ping& ping);
-    void schedule_reconnect();
-    void start_heartbeat();
+    // Message handlers
+    void handle_register_response(const wire::Frame& frame);
+    void handle_node_loc(const wire::Frame& frame);
+    void handle_relay_list(const wire::Frame& frame);
+    void handle_blacklist(const wire::Frame& frame);
+    void handle_error(const wire::Frame& frame);
 
-    GrpcRelayServer& server_;
+    // References
+    WsRelayServer& server_;
     const ServerConfig& config_;
 
-    // gRPC channel and stream
-    std::shared_ptr<grpc::Channel> channel_;
-    std::unique_ptr<edgelink::ServerService::Stub> stub_;
-    std::unique_ptr<grpc::ClientContext> context_;
-    std::unique_ptr<grpc::ClientReaderWriter<edgelink::ServerMessage, edgelink::ServerMessage>> stream_;
-
-    // Connection thread
-    std::unique_ptr<std::thread> connection_thread_;
-    std::unique_ptr<std::thread> heartbeat_thread_;
-
-    // State
-    std::atomic<bool> connected_{false};
-    std::atomic<bool> running_{false};
-    std::atomic<bool> registered_{false};
+    // Server info
     uint32_t server_id_{0};
-
-    // Reconnection
-    int reconnect_attempts_{0};
-    static constexpr int MAX_RECONNECT_ATTEMPTS = 10;
-    static constexpr int BASE_RECONNECT_DELAY_MS = 1000;
-    static constexpr int MAX_RECONNECT_DELAY_MS = 60000;
+    std::atomic<bool> registered_{false};
 
     // Callbacks
     ConnectCallback connect_callback_;
-    MessageCallback message_callback_;
     DisconnectCallback disconnect_callback_;
+    NodeLocCallback node_loc_callback_;
+    RelayListCallback relay_list_callback_;
+    BlacklistCallback blacklist_callback_;
 };
 
 } // namespace edgelink

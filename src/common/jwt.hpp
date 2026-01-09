@@ -165,7 +165,7 @@ std::unordered_map<std::string, std::string> verify_jwt(
     const std::string& token);
 
 // Generate a generic JWT with custom claims
-// Used by grpc_server for simple token generation
+// Used by ws_server for simple token generation
 std::string generate_jwt(
     const std::string& secret,
     const std::unordered_map<std::string, std::string>& claims,

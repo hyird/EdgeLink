@@ -10,20 +10,13 @@ namespace edgelink {
 // ============================================================================
 // Wire Protocol Types (wire:: namespace)
 // ============================================================================
-// These types are used for the custom binary wire protocol, which is used for:
-// - P2P direct communication between nodes
-// - Relay data forwarding (encapsulated in gRPC streams)
+// These types are used for the binary wire protocol, which is used for:
+// - WebSocket communication (Client <-> Controller, Client <-> Relay)
+// - P2P direct communication between nodes (UDP)
 // - Binary frame serialization for network transmission
 //
-// The proto-generated types (edgelink::*) are used for gRPC communication with:
-// - Controller <-> Client (ControlService)
-// - Controller <-> Server (ServerService)
-// - Client <-> Relay (RelayService)
-//
-// Both type systems coexist because:
-// 1. Wire protocol needs compact binary format for P2P UDP communication
-// 2. gRPC uses Protobuf for structured RPC communication
-// 3. Some messages need both representations for different transport layers
+// All communication uses the compact binary format for efficiency.
+// See docs/architecture.md for detailed protocol specification.
 // ============================================================================
 namespace wire {
 
