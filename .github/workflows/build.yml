@@ -10,17 +10,16 @@ on:
 
 env:
   BUILD_TYPE: Release
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
 jobs:
   # =============================================================================
-  # Linux Build - vcpkg + Alpine musl (Full Static)
+  # Linux Build - Alpine musl (Full Static) with FetchContent
   # =============================================================================
   build-linux:
     runs-on: ubuntu-latest
     container:
       image: alpine:3.20
-    
+
     steps:
     - name: Install Dependencies
       run: |
@@ -28,61 +27,30 @@ jobs:
           build-base cmake ninja git curl zip unzip tar \
           pkgconfig linux-headers musl-dev perl bash python3 \
           autoconf automake libtool
-        # Verify Linux headers are installed (required by vcpkg openssl)
-        test -f /usr/include/linux/version.h || exit 1
 
     - uses: actions/checkout@v4
 
-    - name: Export GitHub Actions cache variables
-      uses: actions/github-script@v7
+    - name: Cache FetchContent sources and build
+      uses: actions/cache@v4
       with:
-        script: |
-          core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-    - name: Setup vcpkg (latest release)
-      run: |
-        git clone https://github.com/microsoft/vcpkg.git /opt/vcpkg
-        cd /opt/vcpkg
-        LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
-        echo "Using vcpkg release: $LATEST_TAG"
-        git checkout $LATEST_TAG
-        ./bootstrap-vcpkg.sh -disableMetrics
-
-    - name: Set vcpkg environment
-      run: |
-        echo "VCPKG_ROOT=/opt/vcpkg" >> $GITHUB_ENV
-        echo "VCPKG_FORCE_SYSTEM_BINARIES=1" >> $GITHUB_ENV
-
-    - name: Restore vcpkg installed packages cache
-      uses: actions/cache/restore@v4
-      id: cache-vcpkg-installed
-      with:
-        path: build/vcpkg_installed
-        key: vcpkg-installed-linux-x64-release-${{ hashFiles('vcpkg.json') }}
+        path: |
+          .deps
+          build/_deps
+          build/libsodium-install
+          build/openssl-install
+        key: deps-linux-${{ hashFiles('third_party/*.cmake') }}
         restore-keys: |
-          vcpkg-installed-linux-x64-release-
+          deps-linux-
 
-    - name: Configure CMake (vcpkg x64-linux-release + musl static)
+    - name: Configure CMake (FetchContent + musl static)
       run: |
         cmake -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
-          -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
-          -DVCPKG_TARGET_TRIPLET=x64-linux-release \
-          -DVCPKG_HOST_TRIPLET=x64-linux-release \
           -DBUILD_SHARED_LIBS=OFF \
           -DEDGELINK_STATIC=ON \
           -DBUILD_CONTROLLER=ON \
           -DBUILD_SERVER=ON \
-          -DBUILD_CLIENT=ON \
-          -DBUILD_TESTS=OFF
-
-    - name: Save vcpkg installed packages cache
-      if: steps.cache-vcpkg-installed.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
-      with:
-        path: build/vcpkg_installed
-        key: vcpkg-installed-linux-x64-release-${{ hashFiles('vcpkg.json') }}
+          -DBUILD_CLIENT=ON
 
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
@@ -117,79 +85,47 @@ jobs:
         retention-days: 30
 
   # =============================================================================
-  # Windows Build - All Components (vcpkg x64-windows-static + MSVC /MT)
+  # Windows Build - MinGW-w64 via MSYS2
   # =============================================================================
   build-windows:
     runs-on: windows-latest
 
-    env:
-      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+    defaults:
+      run:
+        shell: msys2 {0}
 
     steps:
-    - name: Free up disk space
-      shell: powershell
-      run: |
-        Write-Host "Disk space before cleanup:"
-        Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
-
-        # Remove unnecessary tools to free space
-        Remove-Item -Recurse -Force "C:\Program Files\dotnet\sdk\*" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\Program Files\dotnet\shared\Microsoft.AspNetCore.App\*" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\Program Files\Microsoft SQL Server" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\Program Files (x86)\Microsoft SQL Server" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\Program Files\PostgreSQL" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\Program Files\MySQL" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\Program Files\MongoDB" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\Strawberry" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\ghcup" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\Rust" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\Program Files\Android" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:USERPROFILE\.gradle" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:USERPROFILE\.nuget" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Java*" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Ruby*" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Python\3.7*" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Python\3.8*" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\go" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\node\14*" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\node\16*" -ErrorAction SilentlyContinue
-
-        Write-Host "Disk space after cleanup:"
-        Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          mingw-w64-x86_64-toolchain
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-ninja
+          make
+          git
+          perl
+          autoconf
+          automake
+          libtool
+          zip
+          unzip
 
     - uses: actions/checkout@v4
 
-    - name: Export GitHub Actions cache environment variables
-      uses: actions/github-script@v7
+    - name: Cache FetchContent sources and build
+      uses: actions/cache@v4
       with:
-        script: |
-          core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-    - name: Setup vcpkg (latest release)
-      shell: bash
-      run: |
-        rm -rf /c/vcpkg
-        git clone https://github.com/microsoft/vcpkg.git /c/vcpkg
-        cd /c/vcpkg
-        LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
-        echo "Using vcpkg release: $LATEST_TAG"
-        git checkout $LATEST_TAG
-        /c/vcpkg/bootstrap-vcpkg.bat
-
-    - name: Set vcpkg environment
-      run: |
-        echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
-
-    - name: Restore vcpkg installed packages cache
-      uses: actions/cache/restore@v4
-      id: cache-vcpkg-installed
-      with:
-        path: build/vcpkg_installed
-        key: vcpkg-installed-windows-x64-static-${{ hashFiles('vcpkg.json') }}
+        path: |
+          .deps
+          build/_deps
+          build/libsodium-install
+          build/openssl-install
+        key: deps-windows-mingw-${{ hashFiles('third_party/*.cmake') }}
         restore-keys: |
-          vcpkg-installed-windows-x64-static-
+          deps-windows-mingw-
 
     - name: Cache wintun
       uses: actions/cache@v4
@@ -200,51 +136,46 @@ jobs:
 
     - name: Download wintun
       if: steps.cache-wintun.outputs.cache-hit != 'true'
+      shell: powershell
       run: |
         Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile "wintun.zip"
         Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-extract"
 
-    - name: Configure CMake (vcpkg x64-windows-static + MSVC /MT)
+    - name: Configure CMake (MinGW-w64)
       run: |
-        cmake -B build -G "Visual Studio 17 2022" -A x64 `
-          -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} `
-          -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
-          -DVCPKG_TARGET_TRIPLET=x64-windows-static `
-          -DVCPKG_HOST_TRIPLET=x64-windows-static `
-          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
-          -DBUILD_SHARED_LIBS=OFF `
-          -DBUILD_CONTROLLER=ON `
-          -DBUILD_SERVER=ON `
-          -DBUILD_CLIENT=ON `
-          -DBUILD_TESTS=OFF `
-          -DWINTUN_DLL_PATH="${{ github.workspace }}\wintun-extract\wintun\bin\amd64\wintun.dll"
-
-    - name: Save vcpkg installed packages cache
-      if: steps.cache-vcpkg-installed.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
-      with:
-        path: build/vcpkg_installed
-        key: vcpkg-installed-windows-x64-static-${{ hashFiles('vcpkg.json') }}
+        cmake -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DBUILD_CONTROLLER=ON \
+          -DBUILD_SERVER=ON \
+          -DBUILD_CLIENT=ON
 
     - name: Build
-      run: cmake --build build --config ${{env.BUILD_TYPE}} --parallel
+      run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
+
+    - name: Strip Binaries
+      run: |
+        strip build/edgelink-controller.exe || true
+        strip build/edgelink-server.exe || true
+        strip build/edgelink-client.exe || true
 
     - name: Package Windows Artifacts
+      shell: powershell
       run: |
-        mkdir -p artifacts/windows
-        Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-server.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "build/${{env.BUILD_TYPE}}/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
-        # Include wintun.dll (if not embedded, client will load from same directory)
+        New-Item -ItemType Directory -Force -Path artifacts/windows
+        Copy-Item -Path "build/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "build/edgelink-server.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "build/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
+        # Include wintun.dll (client loads from same directory at runtime)
         Copy-Item -Path "wintun-extract/wintun/bin/amd64/wintun.dll" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse
-        Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-static.zip"
+        Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-mingw.zip"
 
     - name: Upload Windows Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: edgelink-windows-x64-static
-        path: edgelink-windows-x64-static.zip
+        name: edgelink-windows-x64-mingw
+        path: edgelink-windows-x64-mingw.zip
         retention-days: 30
 
   # =============================================================================
@@ -254,10 +185,10 @@ jobs:
     needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
-    
+
     permissions:
       contents: write
-    
+
     steps:
     - name: Download all artifacts
       uses: actions/download-artifact@v4
@@ -269,7 +200,7 @@ jobs:
       with:
         files: |
           artifacts/edgelink-linux-x64-static/edgelink-linux-x64-static.tar.gz
-          artifacts/edgelink-windows-x64-static/edgelink-windows-x64-static.zip
+          artifacts/edgelink-windows-x64-mingw/edgelink-windows-x64-mingw.zip
         draft: false
         prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
         generate_release_notes: true
