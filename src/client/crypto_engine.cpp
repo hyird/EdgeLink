@@ -122,14 +122,14 @@ std::expected<void, ErrorCode> CryptoEngine::add_peer(
     if (!crypto::X25519::validate_public_key(peer_node_pub)) {
         LOG_ERROR("CryptoEngine: Invalid public key from peer {} (weak or low-order point)", 
                   peer_node_id);
-        return std::unexpected(ErrorCode::INVALID_KEY);
+        return std::unexpected(ErrorCode::INVALID_ARGUMENT);
     }
     
     // Compute shared secret via X25519 ECDH
     std::array<uint8_t, 32> shared_secret;
     if (crypto_scalarmult(shared_secret.data(), node_priv_.data(), peer_node_pub.data()) != 0) {
         LOG_ERROR("CryptoEngine: X25519 key exchange failed for peer {}", peer_node_id);
-        return std::unexpected(ErrorCode::CRYPTO_ERROR);
+        return std::unexpected(ErrorCode::DECRYPTION_FAILED);
     }
     
     // Additional check: verify shared secret is not all zeros (would indicate weak key attack)
@@ -144,7 +144,7 @@ std::expected<void, ErrorCode> CryptoEngine::add_peer(
         LOG_ERROR("CryptoEngine: X25519 produced zero shared secret for peer {} (possible attack)", 
                   peer_node_id);
         sodium_memzero(shared_secret.data(), shared_secret.size());
-        return std::unexpected(ErrorCode::CRYPTO_ERROR);
+        return std::unexpected(ErrorCode::DECRYPTION_FAILED);
     }
     
     // Derive session key using HKDF
@@ -229,7 +229,7 @@ std::expected<std::array<uint8_t, 32>, ErrorCode> CryptoEngine::get_peer_pubkey(
     
     auto it = peer_pubkeys_.find(peer_node_id);
     if (it == peer_pubkeys_.end()) {
-        return std::unexpected(ErrorCode::PEER_NOT_FOUND);
+        return std::unexpected(ErrorCode::NODE_NOT_FOUND);
     }
     return it->second;
 }
@@ -243,7 +243,7 @@ std::expected<std::vector<uint8_t>, ErrorCode> CryptoEngine::encrypt(
     auto it = sessions_.find(peer_node_id);
     if (it == sessions_.end()) {
         LOG_ERROR("CryptoEngine: No session for peer {}", peer_node_id);
-        return std::unexpected(ErrorCode::PEER_NOT_FOUND);
+        return std::unexpected(ErrorCode::NODE_NOT_FOUND);
     }
     
     auto& session = it->second;
@@ -253,7 +253,7 @@ std::expected<std::vector<uint8_t>, ErrorCode> CryptoEngine::encrypt(
     if (session.send_counter == 0) {
         // Counter overflow - should never happen in practice
         LOG_ERROR("CryptoEngine: Counter overflow for peer {}", peer_node_id);
-        return std::unexpected(ErrorCode::CRYPTO_ERROR);
+        return std::unexpected(ErrorCode::DECRYPTION_FAILED);
     }
     
     // Generate nonce
@@ -281,7 +281,7 @@ std::expected<std::vector<uint8_t>, ErrorCode> CryptoEngine::encrypt(
         LOG_ERROR("CryptoEngine: Encryption failed for peer {}", peer_node_id);
         std::lock_guard<std::mutex> stats_lock(stats_mutex_);
         stats_.encryption_failures++;
-        return std::unexpected(ErrorCode::CRYPTO_ERROR);
+        return std::unexpected(ErrorCode::DECRYPTION_FAILED);
     }
     
     session.last_used = std::chrono::steady_clock::now();
@@ -309,7 +309,7 @@ std::expected<std::vector<uint8_t>, ErrorCode> CryptoEngine::decrypt(
     auto it = sessions_.find(peer_node_id);
     if (it == sessions_.end()) {
         LOG_ERROR("CryptoEngine: No session for peer {}", peer_node_id);
-        return std::unexpected(ErrorCode::PEER_NOT_FOUND);
+        return std::unexpected(ErrorCode::NODE_NOT_FOUND);
     }
     
     auto& session = it->second;
@@ -365,7 +365,7 @@ std::expected<std::vector<uint8_t>, ErrorCode> CryptoEngine::decrypt(
         LOG_ERROR("CryptoEngine: Decryption failed from peer {}", peer_node_id);
         std::lock_guard<std::mutex> stats_lock(stats_mutex_);
         stats_.decryption_failures++;
-        return std::unexpected(ErrorCode::CRYPTO_ERROR);
+        return std::unexpected(ErrorCode::DECRYPTION_FAILED);
     }
     
     plaintext.resize(plaintext_len);
@@ -481,7 +481,7 @@ std::expected<std::array<uint8_t, 32>, ErrorCode> CryptoEngine::rotate_local_key
     // Generate new X25519 keypair
     if (crypto_box_keypair(new_pub.data(), new_priv.data()) != 0) {
         LOG_ERROR("CryptoEngine: Failed to generate new keypair");
-        return std::unexpected(ErrorCode::CRYPTO_ERROR);
+        return std::unexpected(ErrorCode::DECRYPTION_FAILED);
     }
     
     {
@@ -630,7 +630,7 @@ std::expected<std::vector<uint8_t>, ErrorCode> CryptoEngine::try_decrypt_with_ol
     
     auto it = old_keys_.find(peer_node_id);
     if (it == old_keys_.end() || it->second.empty()) {
-        return std::unexpected(ErrorCode::CRYPTO_ERROR);
+        return std::unexpected(ErrorCode::DECRYPTION_FAILED);
     }
     
     // Extract nonce
@@ -665,7 +665,7 @@ std::expected<std::vector<uint8_t>, ErrorCode> CryptoEngine::try_decrypt_with_ol
         }
     }
     
-    return std::unexpected(ErrorCode::CRYPTO_ERROR);
+    return std::unexpected(ErrorCode::DECRYPTION_FAILED);
 }
 
 } // namespace edgelink::client

@@ -41,7 +41,7 @@ std::expected<void, ErrorCode> TunDevice::open() {
     fd_ = ::open("/dev/net/tun", O_RDWR);
     if (fd_ < 0) {
         LOG_ERROR("TunDevice: Failed to open /dev/net/tun: {}", strerror(errno));
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     
     // Configure TUN interface
@@ -57,7 +57,7 @@ std::expected<void, ErrorCode> TunDevice::open() {
         LOG_ERROR("TunDevice: Failed to configure TUN device: {}", strerror(errno));
         ::close(fd_);
         fd_ = -1;
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     
     // Get actual device name (might differ if we used a template)
@@ -69,7 +69,7 @@ std::expected<void, ErrorCode> TunDevice::open() {
         LOG_ERROR("TunDevice: Failed to set non-blocking mode: {}", strerror(errno));
         ::close(fd_);
         fd_ = -1;
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     
     // Create ASIO stream
@@ -105,7 +105,7 @@ std::expected<void, ErrorCode> TunDevice::set_address(const std::string& ip, uin
     int ret = execute_ip_command(args);
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to set address {} on {}", ip, name_);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     
     LOG_INFO("TunDevice: Set address {}/{} on {}", ip, prefix_len, name_);
@@ -122,7 +122,7 @@ std::expected<void, ErrorCode> TunDevice::set_mtu(uint16_t mtu) {
     int ret = execute_ip_command(args);
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to set MTU {} on {}", mtu, name_);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     
     LOG_INFO("TunDevice: Set MTU {} on {}", mtu, name_);
@@ -137,7 +137,7 @@ std::expected<void, ErrorCode> TunDevice::bring_up() {
     int ret = execute_ip_command(args);
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to bring up {}", name_);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     
     LOG_INFO("TunDevice: Interface {} is up", name_);
@@ -152,7 +152,7 @@ std::expected<void, ErrorCode> TunDevice::bring_down() {
     int ret = execute_ip_command(args);
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to bring down {}", name_);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     
     LOG_INFO("TunDevice: Interface {} is down", name_);
@@ -167,7 +167,7 @@ std::expected<void, ErrorCode> TunDevice::add_route(const std::string& network, 
     int ret = execute_ip_command(args);
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to add route {}/{} via {}", network, prefix_len, name_);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     
     LOG_INFO("TunDevice: Added route {}/{} via {}", network, prefix_len, name_);
@@ -182,7 +182,7 @@ std::expected<void, ErrorCode> TunDevice::del_route(const std::string& network, 
     int ret = execute_ip_command(args);
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to delete route {}/{}", network, prefix_len);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     
     LOG_INFO("TunDevice: Deleted route {}/{}", network, prefix_len);
@@ -252,7 +252,7 @@ std::expected<void, ErrorCode> TunDevice::write_packet(const std::vector<uint8_t
     
     if (ec) {
         LOG_ERROR("TunDevice: Write error: {}", ec.message());
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     
     return {};

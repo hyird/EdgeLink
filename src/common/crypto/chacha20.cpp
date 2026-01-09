@@ -83,7 +83,7 @@ std::expected<std::vector<uint8_t>, ErrorCode> ChaCha20Poly1305::decrypt_with_no
             associated_data.data(), associated_data.size(),
             nonce.data(),
             key.data()) != 0) {
-        return std::unexpected(ErrorCode::SIGNATURE_FAILED);  // Authentication failed
+        return std::unexpected(ErrorCode::DECRYPTION_FAILED);  // Authentication failed
     }
     
     plaintext.resize(plaintext_len);

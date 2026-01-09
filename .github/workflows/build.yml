@@ -69,6 +69,7 @@ jobs:
     - name: Save FetchContent sources cache
       if: steps.cache-sources.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
+      continue-on-error: true
       with:
         path: .deps
         key: sources-linux-${{ hashFiles('third_party/*.cmake') }}
@@ -80,6 +81,7 @@ jobs:
     - name: Save build artifacts cache
       if: success()
       uses: actions/cache/save@v4
+      continue-on-error: true
       with:
         path: |
           build/_deps
@@ -200,6 +202,7 @@ jobs:
     - name: Save FetchContent sources cache
       if: steps.cache-sources.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
+      continue-on-error: true
       with:
         path: .deps
         key: sources-windows-mingw-${{ hashFiles('third_party/*.cmake') }}
@@ -211,6 +214,7 @@ jobs:
     - name: Save build artifacts cache
       if: success()
       uses: actions/cache/save@v4
+      continue-on-error: true
       with:
         path: |
           build/_deps

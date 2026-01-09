@@ -36,7 +36,7 @@ std::expected<SessionKey, ErrorCode> X25519::compute_shared_secret(
     
     // Validate peer's public key before computing shared secret
     if (!validate_public_key(peer_public)) {
-        return std::unexpected(ErrorCode::INVALID_KEY);
+        return std::unexpected(ErrorCode::INVALID_ARGUMENT);
     }
     
     SessionKey shared;
@@ -54,7 +54,7 @@ std::expected<SessionKey, ErrorCode> X25519::compute_shared_secret(
         }
     }
     if (all_zero) {
-        return std::unexpected(ErrorCode::CRYPTO_ERROR);
+        return std::unexpected(ErrorCode::DECRYPTION_FAILED);
     }
     
     return shared;
@@ -94,7 +94,7 @@ std::expected<X25519PublicKey, ErrorCode> X25519::public_key_from_base64(const s
 
     // Validate the decoded public key
     if (!validate_public_key(key)) {
-        return std::unexpected(ErrorCode::INVALID_KEY);
+        return std::unexpected(ErrorCode::INVALID_ARGUMENT);
     }
 
     return key;

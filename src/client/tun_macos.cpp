@@ -43,7 +43,7 @@ std::expected<void, ErrorCode> TunDevice::open() {
     fd_ = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
     if (fd_ < 0) {
         LOG_ERROR("TunDevice: Failed to create socket: {}", strerror(errno));
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     // Get control ID for utun
@@ -54,7 +54,7 @@ std::expected<void, ErrorCode> TunDevice::open() {
         LOG_ERROR("TunDevice: Failed to get control info: {}", strerror(errno));
         ::close(fd_);
         fd_ = -1;
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     // Try to find an available utun unit
@@ -84,7 +84,7 @@ std::expected<void, ErrorCode> TunDevice::open() {
             LOG_ERROR("TunDevice: No available utun units");
             ::close(fd_);
             fd_ = -1;
-            return std::unexpected(ErrorCode::SYSTEM_ERROR);
+            return std::unexpected(ErrorCode::UNKNOWN);
         }
     }
 
@@ -94,7 +94,7 @@ std::expected<void, ErrorCode> TunDevice::open() {
         LOG_ERROR("TunDevice: Failed to set non-blocking mode: {}", strerror(errno));
         ::close(fd_);
         fd_ = -1;
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     // Create ASIO stream
@@ -129,7 +129,7 @@ std::expected<void, ErrorCode> TunDevice::set_address(const std::string& ip, uin
     
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to set address {} on {}", ip, name_);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     LOG_INFO("TunDevice: Set address {}/{} on {}", ip, prefix_len, name_);
@@ -146,7 +146,7 @@ std::expected<void, ErrorCode> TunDevice::set_mtu(uint16_t mtu) {
 
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to set MTU {} on {}", mtu, name_);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     LOG_INFO("TunDevice: Set MTU {} on {}", mtu, name_);
@@ -161,7 +161,7 @@ std::expected<void, ErrorCode> TunDevice::bring_up() {
 
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to bring up {}", name_);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     LOG_INFO("TunDevice: Interface {} is up", name_);
@@ -176,7 +176,7 @@ std::expected<void, ErrorCode> TunDevice::bring_down() {
 
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to bring down {}", name_);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     LOG_INFO("TunDevice: Interface {} is down", name_);
@@ -191,7 +191,7 @@ std::expected<void, ErrorCode> TunDevice::add_route(const std::string& network, 
 
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to add route {}/{} via {}", network, prefix_len, name_);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     LOG_INFO("TunDevice: Added route {}/{} via {}", network, prefix_len, name_);
@@ -206,7 +206,7 @@ std::expected<void, ErrorCode> TunDevice::del_route(const std::string& network, 
 
     if (ret != 0) {
         LOG_ERROR("TunDevice: Failed to delete route {}/{}", network, prefix_len);
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     LOG_INFO("TunDevice: Deleted route {}/{}", network, prefix_len);
@@ -293,7 +293,7 @@ std::expected<void, ErrorCode> TunDevice::write_packet(const std::vector<uint8_t
 
     if (ec) {
         LOG_ERROR("TunDevice: Write error: {}", ec.message());
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     return {};

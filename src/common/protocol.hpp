@@ -159,86 +159,94 @@ namespace RouteFlags {
 }
 
 // ============================================================================
-// Error Codes (8.4 from design doc)
+// Error Codes (architecture.md section 10)
 // ============================================================================
 enum class ErrorCode : uint16_t {
-    // General errors (0xxx)
+    // General errors (0-99)
     SUCCESS               = 0,
-    INVALID_ARGUMENT      = 1,
-    SYSTEM_ERROR          = 2,
+    UNKNOWN               = 1,
+    INVALID_ARGUMENT      = 2,
     NOT_CONNECTED         = 3,
-    DISCONNECTED          = 4,
+    ALREADY_EXISTS        = 4,
     TIMEOUT               = 5,
-    
-    // Authentication errors (1xxx)
+    CANCELLED             = 6,
+
+    // Authentication errors (1000-1999)
     INVALID_TOKEN         = 1001,
     TOKEN_EXPIRED         = 1002,
-    TOKEN_REVOKED         = 1003,
-    INVALID_MACHINE_KEY   = 1004,
-    SIGNATURE_FAILED      = 1005,
-    NODE_UNAUTHORIZED     = 1006,
+    TOKEN_BLACKLISTED     = 1003,
+    INVALID_SIGNATURE     = 1004,
+    INVALID_CREDENTIALS   = 1005,
+    NODE_NOT_AUTHORIZED   = 1006,
     AUTH_FAILED           = 1007,
-    NOT_AUTHORIZED        = 1008,
-    MAX_RETRIES_EXCEEDED  = 1009,
-    
-    // Protocol errors (2xxx)
-    UNSUPPORTED_VERSION   = 2001,
+    AUTHKEY_EXPIRED       = 1008,
+    AUTHKEY_LIMIT         = 1009,
+
+    // Protocol errors (2000-2999)
+    INVALID_FRAME         = 2001,
     INVALID_MESSAGE       = 2002,
-    MESSAGE_TOO_LARGE     = 2003,
-    INVALID_FRAME         = 2004,
-    
-    // Routing errors (3xxx)
+    UNSUPPORTED_VERSION   = 2003,
+    MESSAGE_TOO_LARGE     = 2004,
+
+    // Routing errors (3000-3999)
     NODE_NOT_FOUND        = 3001,
     NODE_OFFLINE          = 3002,
-    NO_ROUTE              = 3003,
-    PEER_NOT_FOUND        = 3004,
+    ROUTE_NOT_FOUND       = 3003,
+    ROUTE_CONFLICT        = 3004,
     NO_RELAY_AVAILABLE    = 3005,
-    
-    // Server errors (4xxx)
+    PATH_NOT_FOUND        = 3006,
+
+    // Server errors (4000-4999)
     INTERNAL_ERROR        = 4001,
     SERVICE_UNAVAILABLE   = 4002,
-    OVERLOADED            = 4003,
-    
-    // Crypto errors (5xxx)
-    CRYPTO_ERROR          = 5001,
+    RATE_LIMITED          = 4003,
+
+    // Crypto errors (5000-5999)
+    DECRYPTION_FAILED     = 5001,
     REPLAY_DETECTED       = 5002,
-    KEY_EXCHANGE_FAILED   = 5003,
-    INVALID_KEY           = 5004   // Invalid or weak cryptographic key
+    KEY_NOT_FOUND         = 5003
 };
 
 constexpr std::string_view error_code_to_string(ErrorCode code) {
     switch (code) {
+        // General errors (0-99)
         case ErrorCode::SUCCESS:             return "Success";
+        case ErrorCode::UNKNOWN:             return "Unknown error";
         case ErrorCode::INVALID_ARGUMENT:    return "Invalid argument";
-        case ErrorCode::SYSTEM_ERROR:        return "System error";
         case ErrorCode::NOT_CONNECTED:       return "Not connected";
-        case ErrorCode::DISCONNECTED:        return "Disconnected";
+        case ErrorCode::ALREADY_EXISTS:      return "Already exists";
         case ErrorCode::TIMEOUT:             return "Timeout";
+        case ErrorCode::CANCELLED:           return "Cancelled";
+        // Authentication errors (1000-1999)
         case ErrorCode::INVALID_TOKEN:       return "Invalid token";
         case ErrorCode::TOKEN_EXPIRED:       return "Token expired";
-        case ErrorCode::TOKEN_REVOKED:       return "Token revoked";
-        case ErrorCode::INVALID_MACHINE_KEY: return "Invalid machine key";
-        case ErrorCode::SIGNATURE_FAILED:    return "Signature verification failed";
-        case ErrorCode::NODE_UNAUTHORIZED:   return "Node not authorized";
+        case ErrorCode::TOKEN_BLACKLISTED:   return "Token blacklisted";
+        case ErrorCode::INVALID_SIGNATURE:   return "Invalid signature";
+        case ErrorCode::INVALID_CREDENTIALS: return "Invalid credentials";
+        case ErrorCode::NODE_NOT_AUTHORIZED: return "Node not authorized";
         case ErrorCode::AUTH_FAILED:         return "Authentication failed";
-        case ErrorCode::NOT_AUTHORIZED:      return "Not authorized";
-        case ErrorCode::MAX_RETRIES_EXCEEDED:return "Max retries exceeded";
-        case ErrorCode::UNSUPPORTED_VERSION: return "Unsupported protocol version";
-        case ErrorCode::INVALID_MESSAGE:     return "Invalid message format";
-        case ErrorCode::MESSAGE_TOO_LARGE:   return "Message too large";
+        case ErrorCode::AUTHKEY_EXPIRED:     return "AuthKey expired";
+        case ErrorCode::AUTHKEY_LIMIT:       return "AuthKey usage limit reached";
+        // Protocol errors (2000-2999)
         case ErrorCode::INVALID_FRAME:       return "Invalid frame";
-        case ErrorCode::NODE_NOT_FOUND:      return "Target node not found";
-        case ErrorCode::NODE_OFFLINE:        return "Target node offline";
-        case ErrorCode::NO_ROUTE:            return "No route available";
-        case ErrorCode::PEER_NOT_FOUND:      return "Peer not found";
+        case ErrorCode::INVALID_MESSAGE:     return "Invalid message";
+        case ErrorCode::UNSUPPORTED_VERSION: return "Unsupported protocol version";
+        case ErrorCode::MESSAGE_TOO_LARGE:   return "Message too large";
+        // Routing errors (3000-3999)
+        case ErrorCode::NODE_NOT_FOUND:      return "Node not found";
+        case ErrorCode::NODE_OFFLINE:        return "Node offline";
+        case ErrorCode::ROUTE_NOT_FOUND:     return "Route not found";
+        case ErrorCode::ROUTE_CONFLICT:      return "Route conflict";
         case ErrorCode::NO_RELAY_AVAILABLE:  return "No relay available";
-        case ErrorCode::INTERNAL_ERROR:      return "Internal server error";
+        case ErrorCode::PATH_NOT_FOUND:      return "Path not found";
+        // Server errors (4000-4999)
+        case ErrorCode::INTERNAL_ERROR:      return "Internal error";
         case ErrorCode::SERVICE_UNAVAILABLE: return "Service unavailable";
-        case ErrorCode::OVERLOADED:          return "Server overloaded";
-        case ErrorCode::CRYPTO_ERROR:        return "Cryptographic error";
-        case ErrorCode::REPLAY_DETECTED:     return "Replay attack detected";
-        case ErrorCode::KEY_EXCHANGE_FAILED: return "Key exchange failed";
-        case ErrorCode::INVALID_KEY:         return "Invalid or weak cryptographic key";
+        case ErrorCode::RATE_LIMITED:        return "Rate limited";
+        // Crypto errors (5000-5999)
+        case ErrorCode::DECRYPTION_FAILED:   return "Decryption failed";
+        case ErrorCode::REPLAY_DETECTED:     return "Replay detected";
+        case ErrorCode::KEY_NOT_FOUND:       return "Key not found";
         default:                             return "Unknown error";
     }
 }

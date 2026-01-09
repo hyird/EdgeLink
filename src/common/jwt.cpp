@@ -145,7 +145,7 @@ std::expected<AuthTokenClaims, wire::ErrorCode> JWTManager::verify_auth_token(co
 
         std::string jti = decoded.get_id();
         if (is_blacklisted(jti)) {
-            return std::unexpected(wire::ErrorCode::TOKEN_REVOKED);
+            return std::unexpected(wire::ErrorCode::TOKEN_BLACKLISTED);
         }
 
         AuthTokenClaims claims;
@@ -176,7 +176,7 @@ std::expected<RelayTokenClaims, wire::ErrorCode> JWTManager::verify_relay_token(
 
         std::string jti = decoded.get_id();
         if (is_blacklisted(jti)) {
-            return std::unexpected(wire::ErrorCode::TOKEN_REVOKED);
+            return std::unexpected(wire::ErrorCode::TOKEN_BLACKLISTED);
         }
 
         RelayTokenClaims claims;
@@ -216,7 +216,7 @@ std::expected<ServerTokenClaims, wire::ErrorCode> JWTManager::verify_server_toke
 
         std::string jti = decoded.get_id();
         if (is_blacklisted(jti)) {
-            return std::unexpected(wire::ErrorCode::TOKEN_REVOKED);
+            return std::unexpected(wire::ErrorCode::TOKEN_BLACKLISTED);
         }
 
         ServerTokenClaims claims;

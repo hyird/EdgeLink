@@ -218,7 +218,7 @@ TunDevice::~TunDevice() { close(); }
 std::expected<void, ErrorCode> TunDevice::open() {
     auto& wt = WintunInterface::instance();
     if (!wt.is_loaded()) {
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     if (platform_->adapter) return {};
 
@@ -226,21 +226,21 @@ std::expected<void, ErrorCode> TunDevice::open() {
     platform_->adapter = wt.CreateAdapter(platform_->adapter_name.c_str(), L"EdgeLink", &guid);
     if (!platform_->adapter) {
         LOG_ERROR("TunDevice: Failed to create adapter - error {}", GetLastError());
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     wt.GetAdapterLUID(platform_->adapter, &platform_->adapter_luid);
     if (ConvertInterfaceLuidToIndex(&platform_->adapter_luid, &platform_->if_index) != NO_ERROR) {
         wt.CloseAdapter(platform_->adapter);
         platform_->adapter = nullptr;
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     platform_->session = wt.StartSession(platform_->adapter, 0x800000);
     if (!platform_->session) {
         wt.CloseAdapter(platform_->adapter);
         platform_->adapter = nullptr;
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
 
     platform_->read_event = wt.GetReadWaitEvent(platform_->session);
@@ -279,7 +279,7 @@ std::expected<void, ErrorCode> TunDevice::set_address(const std::string& ip, uin
 
     DWORD result = CreateUnicastIpAddressEntry(&row);
     if (result != NO_ERROR && result != ERROR_OBJECT_ALREADY_EXISTS) {
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     LOG_INFO("TunDevice: Set address {}/{} on {}", ip, prefix_len, name_);
     return {};
@@ -323,7 +323,7 @@ std::expected<void, ErrorCode> TunDevice::add_route(const std::string& network, 
 
     DWORD result = CreateIpForwardEntry2(&route);
     if (result != NO_ERROR && result != ERROR_OBJECT_ALREADY_EXISTS) {
-        return std::unexpected(ErrorCode::SYSTEM_ERROR);
+        return std::unexpected(ErrorCode::UNKNOWN);
     }
     return {};
 }
@@ -384,7 +384,7 @@ std::expected<void, ErrorCode> TunDevice::write_packet(const std::vector<uint8_t
 
     auto& wt = WintunInterface::instance();
     BYTE* send_packet = wt.AllocateSendPacket(platform_->session, static_cast<DWORD>(packet.size()));
-    if (!send_packet) return std::unexpected(ErrorCode::SYSTEM_ERROR);
+    if (!send_packet) return std::unexpected(ErrorCode::UNKNOWN);
 
     memcpy(send_packet, packet.data(), packet.size());
     wt.SendPacket(platform_->session, send_packet);

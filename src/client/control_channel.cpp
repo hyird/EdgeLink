@@ -64,7 +64,7 @@ void ControlChannel::set_control_callbacks(ControlCallbacks callbacks) {
     };
     ws_callbacks.on_disconnected = [this](const std::string& reason) {
         if (control_callbacks_.on_disconnected) {
-            control_callbacks_.on_disconnected(ErrorCode::DISCONNECTED);
+            control_callbacks_.on_disconnected(ErrorCode::NOT_CONNECTED);
         }
     };
     set_callbacks(std::move(ws_callbacks));
