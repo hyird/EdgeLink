@@ -30,22 +30,13 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    # Step 1: Try to restore source cache (downloaded by FetchContent)
-    - name: Restore FetchContent sources cache
-      id: cache-sources
-      uses: actions/cache/restore@v4
-      with:
-        path: .deps
-        key: sources-linux-${{ hashFiles('third_party/*.cmake') }}
-        restore-keys: |
-          sources-linux-
-
-    # Step 2: Try to restore build cache (compiled dependencies)
-    - name: Restore build artifacts cache
+    # Restore build cache (FetchContent sources + compiled deps)
+    - name: Restore build cache
       id: cache-build
       uses: actions/cache/restore@v4
       with:
         path: |
+          .deps
           build/_deps
           build/CMakeCache.txt
           build/CMakeFiles
@@ -65,23 +56,17 @@ jobs:
           -DBUILD_SERVER=ON \
           -DBUILD_CLIENT=ON
 
-    # Step 3: Save source cache after configure (sources are downloaded during configure)
-    - name: Save FetchContent sources cache
-      if: steps.cache-sources.outputs.cache-hit != 'true' && hashFiles('.deps/**') != ''
-      uses: actions/cache/save@v4
-      with:
-        path: .deps
-        key: sources-linux-${{ hashFiles('third_party/*.cmake') }}
-
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
 
-    # Step 4: Save build cache after successful build
-    - name: Save build artifacts cache
-      if: success() && hashFiles('build/_deps/**') != ''
+    # Save build cache after successful build
+    - name: Save build cache
+      if: success()
       uses: actions/cache/save@v4
+      continue-on-error: true
       with:
         path: |
+          .deps
           build/_deps
           build/CMakeCache.txt
           build/CMakeFiles
@@ -148,22 +133,13 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    # Step 1: Try to restore source cache
-    - name: Restore FetchContent sources cache
-      id: cache-sources
-      uses: actions/cache/restore@v4
-      with:
-        path: .deps
-        key: sources-windows-mingw-${{ hashFiles('third_party/*.cmake') }}
-        restore-keys: |
-          sources-windows-mingw-
-
-    # Step 2: Try to restore build cache
-    - name: Restore build artifacts cache
+    # Restore build cache (FetchContent sources + compiled deps)
+    - name: Restore build cache
       id: cache-build
       uses: actions/cache/restore@v4
       with:
         path: |
+          .deps
           build/_deps
           build/CMakeCache.txt
           build/CMakeFiles
@@ -196,23 +172,17 @@ jobs:
           -DBUILD_SERVER=ON \
           -DBUILD_CLIENT=ON
 
-    # Step 3: Save source cache after configure
-    - name: Save FetchContent sources cache
-      if: steps.cache-sources.outputs.cache-hit != 'true' && hashFiles('.deps/**') != ''
-      uses: actions/cache/save@v4
-      with:
-        path: .deps
-        key: sources-windows-mingw-${{ hashFiles('third_party/*.cmake') }}
-
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
 
-    # Step 4: Save build cache after successful build
-    - name: Save build artifacts cache
-      if: success() && hashFiles('build/_deps/**') != ''
+    # Save build cache after successful build
+    - name: Save build cache
+      if: success()
       uses: actions/cache/save@v4
+      continue-on-error: true
       with:
         path: |
+          .deps
           build/_deps
           build/CMakeCache.txt
           build/CMakeFiles
