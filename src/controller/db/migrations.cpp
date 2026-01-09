@@ -289,6 +289,57 @@ CREATE INDEX IF NOT EXISTS idx_auth_keys_network ON auth_keys(network_id);
 -- Track which auth key was used to register a node
 ALTER TABLE nodes ADD COLUMN auth_key_id INTEGER DEFAULT NULL REFERENCES auth_keys(id);
         )SQL"
+    },
+    {
+        5, "add_network_routes",
+        R"SQL(
+-- Network-level routes table (subnet routing for the entire network)
+CREATE TABLE IF NOT EXISTS routes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    network_id INTEGER NOT NULL,
+    cidr TEXT NOT NULL,
+    via_node_id INTEGER NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 100,
+    weight INTEGER NOT NULL DEFAULT 100,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    description TEXT DEFAULT '',
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE,
+    FOREIGN KEY (via_node_id) REFERENCES nodes(id) ON DELETE CASCADE,
+    UNIQUE(network_id, cidr)
+);
+CREATE INDEX IF NOT EXISTS idx_routes_network ON routes(network_id);
+CREATE INDEX IF NOT EXISTS idx_routes_via_node ON routes(via_node_id);
+
+-- Triggers for config version update on routes changes
+CREATE TRIGGER IF NOT EXISTS trg_network_routes_insert_config
+AFTER INSERT ON routes
+BEGIN
+    UPDATE networks SET
+        config_version = config_version + 1,
+        updated_at = strftime('%s', 'now')
+    WHERE id = NEW.network_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_network_routes_update_config
+AFTER UPDATE ON routes
+BEGIN
+    UPDATE networks SET
+        config_version = config_version + 1,
+        updated_at = strftime('%s', 'now')
+    WHERE id = NEW.network_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_network_routes_delete_config
+AFTER DELETE ON routes
+BEGIN
+    UPDATE networks SET
+        config_version = config_version + 1,
+        updated_at = strftime('%s', 'now')
+    WHERE id = OLD.network_id;
+END;
+        )SQL"
     }
 };
 

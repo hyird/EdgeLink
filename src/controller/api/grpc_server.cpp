@@ -223,7 +223,7 @@ void ControlStreamHandler::handle_p2p_init(const edgelink::P2PInit& init) {
         peer_id, network_id_);
 
     if (result.empty()) {
-        send_error(edgelink::ERROR_PEER_NOT_FOUND, "Peer not found");
+        send_error(edgelink::ERRCODE_PEER_NOT_FOUND, "Peer not found");
         return;
     }
 
@@ -302,7 +302,7 @@ void ControlStreamHandler::send_config() {
         "SELECT id, name, subnet FROM networks WHERE id = ?", network_id_);
 
     if (network_result.empty()) {
-        send_error(edgelink::ERROR_INTERNAL, "Network not found");
+        send_error(edgelink::ERRCODE_INTERNAL, "Network not found");
         return;
     }
 

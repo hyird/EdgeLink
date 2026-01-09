@@ -127,6 +127,7 @@ Client::Client(const ClientConfig& config)
     , callback_strand_(net::make_strand(ioc_))
     , ssl_ctx_(ssl::context::tlsv12_client)
     , latency_report_timer_(ioc_)
+    , monitor_timer_(ioc_)
 {
     stats_.start_time = std::chrono::steady_clock::now();
 }
@@ -218,12 +219,13 @@ void Client::stop() {
     
     set_state(ClientState::STOPPING);
     LOG_INFO("Client stopping...");
-    
+
     // 重置初始化标志
     initialized_ = false;
-    
-    // 停止延迟测量和上报
+
+    // 停止定时器
     latency_report_timer_.cancel();
+    monitor_timer_.cancel();
     if (relay_manager_) {
         relay_manager_->stop_latency_measurements();
     }
@@ -701,7 +703,10 @@ void Client::on_config_received(const ConfigUpdate& config) {
         
         // 启动延迟上报定时器
         start_latency_report_timer();
-        
+
+        // 启动线程池监控定时器
+        start_monitor_timer();
+
         // 标记已初始化
         initialized_ = true;
     }
@@ -1027,6 +1032,64 @@ void Client::process_inbound_packet(uint32_t from_node_id, const std::vector<uin
 void Client::handle_fatal_error(const std::string& error) {
     LOG_ERROR("Fatal error: {}", error);
     stop();
+}
+
+// ============================================================================
+// Thread Pool Monitoring
+// ============================================================================
+
+void Client::start_monitor_timer() {
+    monitor_timer_.expires_after(MONITOR_INTERVAL);
+    monitor_timer_.async_wait([self = shared_from_this()](boost::system::error_code ec) {
+        if (!ec && self->state_ == ClientState::RUNNING) {
+            self->on_monitor_timer();
+        }
+    });
+}
+
+void Client::on_monitor_timer() {
+    log_thread_stats();
+
+    // Reschedule
+    start_monitor_timer();
+}
+
+void Client::log_thread_stats() {
+    // Log IO thread pool stats
+    LOG_INFO("Thread Pool Stats: {} IO threads active", io_threads_.size());
+
+    // Log client stats
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - stats_.start_time).count();
+
+        LOG_INFO("Client Stats: uptime={}s, packets_sent={}, packets_recv={}, "
+                 "bytes_sent={}, bytes_recv={}, encrypt_errs={}, decrypt_errs={}, route_misses={}",
+                 uptime,
+                 stats_.packets_sent,
+                 stats_.packets_received,
+                 stats_.bytes_sent,
+                 stats_.bytes_received,
+                 stats_.encrypt_errors,
+                 stats_.decrypt_errors,
+                 stats_.route_misses);
+    }
+
+    // Log P2P manager stats
+    if (p2p_manager_) {
+        auto p2p_stats = p2p_manager_->get_stats();
+        LOG_INFO("P2P Stats: connections={}, packets_sent={}, packets_recv={}",
+                 p2p_stats.active_connections,
+                 p2p_stats.packets_sent,
+                 p2p_stats.packets_received);
+    }
+
+    // Log Relay manager stats
+    if (relay_manager_) {
+        auto connected = relay_manager_->get_connected_relays();
+        LOG_INFO("Relay Stats: {} relays connected", connected.size());
+    }
 }
 
 } // namespace edgelink::client

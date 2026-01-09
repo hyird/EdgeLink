@@ -223,9 +223,17 @@ private:
     std::mutex latency_mutex_;
     std::vector<ControlChannel::LatencyMeasurement> pending_latency_reports_;
     static constexpr auto LATENCY_REPORT_INTERVAL = std::chrono::seconds(30);
-    
+
     void start_latency_report_timer();
     void on_latency_report_timer();
+
+    // Thread pool monitoring timer
+    net::steady_timer monitor_timer_;
+    static constexpr auto MONITOR_INTERVAL = std::chrono::seconds(60);
+
+    void start_monitor_timer();
+    void on_monitor_timer();
+    void log_thread_stats();
 };
 
 // 从配置文件加载

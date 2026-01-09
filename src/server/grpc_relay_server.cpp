@@ -75,13 +75,13 @@ void RelayStreamHandler::handle_relay_auth(const edgelink::RelayAuth& auth) {
 
 void RelayStreamHandler::handle_data(const edgelink::DataPacket& packet) {
     if (!authenticated_) {
-        send_error(edgelink::ERROR_NOT_AUTHORIZED, "Not authenticated");
+        send_error(edgelink::ERRCODE_NOT_AUTHORIZED, "Not authenticated");
         return;
     }
 
     // Verify source node ID
     if (packet.src_node_id() != node_id_) {
-        send_error(edgelink::ERROR_INVALID_ARGUMENT, "Invalid source node ID");
+        send_error(edgelink::ERRCODE_INVALID_ARGUMENT, "Invalid source node ID");
         return;
     }
 
