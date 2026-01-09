@@ -1821,6 +1821,99 @@ std::expected<MeshPingPayload, ErrorCode> MeshPingPayload::from_json(const boost
 }
 
 // ----------------------------------------------------------------------------
+// ServerNodeLocPayload Implementation
+// ----------------------------------------------------------------------------
+std::vector<uint8_t> ServerNodeLocPayload::serialize_binary() const {
+    BinaryWriter writer(128);
+    writer.write_array_header(static_cast<uint16_t>(nodes.size()));
+    for (const auto& node : nodes) {
+        writer.write_u32(node.node_id);
+        writer.write_array_header(static_cast<uint16_t>(node.connected_relay_ids.size()));
+        for (uint32_t relay_id : node.connected_relay_ids) {
+            writer.write_u32(relay_id);
+        }
+    }
+    return writer.take();
+}
+
+std::expected<ServerNodeLocPayload, ErrorCode> ServerNodeLocPayload::deserialize_binary(
+    std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    ServerNodeLocPayload payload;
+
+    auto count_r = reader.read_array_header();
+    if (!count_r) return std::unexpected(count_r.error());
+
+    for (uint16_t i = 0; i < *count_r; ++i) {
+        NodeLocation loc;
+        auto node_id_r = reader.read_u32();
+        if (!node_id_r) return std::unexpected(node_id_r.error());
+        loc.node_id = *node_id_r;
+
+        auto relay_count_r = reader.read_array_header();
+        if (!relay_count_r) return std::unexpected(relay_count_r.error());
+
+        for (uint16_t j = 0; j < *relay_count_r; ++j) {
+            auto relay_id_r = reader.read_u32();
+            if (!relay_id_r) return std::unexpected(relay_id_r.error());
+            loc.connected_relay_ids.push_back(*relay_id_r);
+        }
+
+        payload.nodes.push_back(std::move(loc));
+    }
+
+    return payload;
+}
+
+// ----------------------------------------------------------------------------
+// ServerRelayListPayload Implementation
+// ----------------------------------------------------------------------------
+std::vector<uint8_t> ServerRelayListPayload::serialize_binary() const {
+    BinaryWriter writer(128);
+    writer.write_array_header(static_cast<uint16_t>(relays.size()));
+    for (const auto& relay : relays) {
+        writer.write_u32(relay.server_id);
+        writer.write_string(relay.name);
+        writer.write_string(relay.url);
+        writer.write_string(relay.region);
+    }
+    return writer.take();
+}
+
+std::expected<ServerRelayListPayload, ErrorCode> ServerRelayListPayload::deserialize_binary(
+    std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    ServerRelayListPayload payload;
+
+    auto count_r = reader.read_array_header();
+    if (!count_r) return std::unexpected(count_r.error());
+
+    for (uint16_t i = 0; i < *count_r; ++i) {
+        RelayInfo relay;
+
+        auto id_r = reader.read_u32();
+        if (!id_r) return std::unexpected(id_r.error());
+        relay.server_id = *id_r;
+
+        auto name_r = reader.read_string();
+        if (!name_r) return std::unexpected(name_r.error());
+        relay.name = *name_r;
+
+        auto url_r = reader.read_string();
+        if (!url_r) return std::unexpected(url_r.error());
+        relay.url = *url_r;
+
+        auto region_r = reader.read_string();
+        if (!region_r) return std::unexpected(region_r.error());
+        relay.region = *region_r;
+
+        payload.relays.push_back(relay);
+    }
+
+    return payload;
+}
+
+// ----------------------------------------------------------------------------
 // ServerBlacklistPayload Implementation
 // ----------------------------------------------------------------------------
 std::vector<uint8_t> ServerBlacklistPayload::serialize_binary() const {

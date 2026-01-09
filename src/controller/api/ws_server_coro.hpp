@@ -47,8 +47,8 @@ public:
     void remove_server_session(uint32_t server_id);
     std::shared_ptr<WsSessionCoro> get_server_session(uint32_t server_id);
 
-    // Broadcast to all nodes in a network
-    void broadcast_to_network(uint32_t network_id, const std::string& text);
+    // Broadcast to all nodes in a network (binary)
+    void broadcast_to_network(uint32_t network_id, const std::vector<uint8_t>& data);
 
     // Get counts
     size_t node_count() const;

@@ -523,9 +523,22 @@ struct ServerNodeLocPayload {
         std::vector<uint32_t> connected_relay_ids;
     };
     std::vector<NodeLocation> nodes;
-    
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<ServerNodeLocPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
+
     boost::json::object to_json() const;
     static std::expected<ServerNodeLocPayload, ErrorCode> from_json(const boost::json::value& v);
+};
+
+// ============================================================================
+// SERVER_RELAY_LIST Payload (relay list sync from controller to relay)
+// ============================================================================
+struct ServerRelayListPayload {
+    std::vector<RelayInfo> relays;
+
+    std::vector<uint8_t> serialize_binary() const;
+    static std::expected<ServerRelayListPayload, ErrorCode> deserialize_binary(std::span<const uint8_t> data);
 };
 
 // ============================================================================

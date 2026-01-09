@@ -71,12 +71,12 @@ std::shared_ptr<WsSessionCoro> WsSessionManagerCoro::get_server_session(uint32_t
     return nullptr;
 }
 
-void WsSessionManagerCoro::broadcast_to_network(uint32_t network_id, const std::string& text) {
+void WsSessionManagerCoro::broadcast_to_network(uint32_t network_id, const std::vector<uint8_t>& data) {
     std::shared_lock lock(control_mutex_);
     for (const auto& [node_id, info] : control_sessions_) {
         if (info.network_id == network_id) {
             if (auto session = info.session.lock()) {
-                session->send_text(text);
+                session->send_binary(data);
             }
         }
     }
@@ -250,60 +250,24 @@ void WsControlSessionCoro::handle_auth_request(const wire::Frame& frame) {
     auto db = server_->get_database();
     auto& config = server_->get_config();
 
-    std::string key;
-    std::string auth_key;
-    std::string hostname;
-    std::string os;
-    std::string arch;
-    std::string version;
-
-    // Try binary deserialization first
-    auto binary_result = wire::AuthRequestPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        const auto& payload = *binary_result;
-        // Convert raw bytes to base64 for database lookup
-        key = base64_encode(payload.machine_key.data(), payload.machine_key.size());
-        auth_key = payload.auth_key;
-        hostname = payload.hostname;
-        os = payload.os;
-        arch = payload.arch;
-        version = payload.version;
-        LOG_DEBUG("WsControlSessionCoro: Parsed binary AUTH_REQUEST (auth_type={}, hostname={})",
-                  static_cast<int>(payload.auth_type), hostname);
-    } else {
-        // Fall back to JSON
-        auto json = frame.payload_json();
-        if (json.is_null()) {
-            LOG_WARN("WsControlSessionCoro: Invalid AUTH_REQUEST - not binary (error={}) and not JSON",
-                     static_cast<int>(binary_result.error()));
-            send_error(wire::ErrorCode::INVALID_MESSAGE, "Invalid auth request payload");
-            return;
-        }
-
-        // Get machine key from JSON or query string
-        key = machine_key_;
-        if (json.as_object().contains("machine_key")) {
-            key = std::string(json.at("machine_key").as_string());
-        } else if (json.as_object().contains("machine_key_pub")) {
-            key = std::string(json.at("machine_key_pub").as_string());
-        }
-        if (json.as_object().contains("auth_key")) {
-            auth_key = std::string(json.at("auth_key").as_string());
-        }
-        if (json.as_object().contains("hostname")) {
-            hostname = std::string(json.at("hostname").as_string());
-        }
-        if (json.as_object().contains("os")) {
-            os = std::string(json.at("os").as_string());
-        }
-        if (json.as_object().contains("arch")) {
-            arch = std::string(json.at("arch").as_string());
-        }
-        if (json.as_object().contains("version")) {
-            version = std::string(json.at("version").as_string());
-        }
-        LOG_DEBUG("WsControlSessionCoro: Parsed JSON AUTH_REQUEST (hostname={})", hostname);
+    auto result = wire::AuthRequestPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsControlSessionCoro: Invalid AUTH_REQUEST: error={}",
+                 static_cast<int>(result.error()));
+        send_error(wire::ErrorCode::INVALID_MESSAGE, "Invalid auth request payload");
+        return;
     }
+
+    const auto& payload = *result;
+    // Convert raw bytes to base64 for database lookup
+    std::string key = base64_encode(payload.machine_key.data(), payload.machine_key.size());
+    std::string auth_key = payload.auth_key;
+    std::string hostname = payload.hostname;
+    std::string os = payload.os;
+    std::string arch = payload.arch;
+    std::string version = payload.version;
+    LOG_DEBUG("WsControlSessionCoro: Parsed AUTH_REQUEST (auth_type={}, hostname={})",
+              static_cast<int>(payload.auth_type), hostname);
 
     if (key.empty()) {
         LOG_WARN("WsControlSessionCoro: AUTH_REQUEST missing machine_key from {}", remote_address());
@@ -455,48 +419,23 @@ void WsControlSessionCoro::handle_latency_report(const wire::Frame& frame) {
     auto db = server_->get_database();
     auto path_service = server_->get_path_service();
 
-    // Try binary deserialization first
-    auto binary_result = wire::LatencyReportPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        const auto& payload = *binary_result;
-        LOG_DEBUG("WsControlSessionCoro: Node {} reported {} latency measurements (binary)",
-                  node_id(), payload.entries.size());
-
-        for (const auto& entry : payload.entries) {
-            std::string dst_type = (entry.dst_type == 0) ? "relay" : "node";
-            if (path_service && entry.dst_type == 0) {
-                path_service->update_node_relay_latency(node_id(), entry.dst_id, entry.rtt_ms);
-            }
-            db->update_latency("node", node_id(), dst_type, entry.dst_id, entry.rtt_ms);
-        }
+    auto result = wire::LatencyReportPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsControlSessionCoro: Invalid LATENCY_REPORT: error={}",
+                 static_cast<int>(result.error()));
         return;
     }
 
-    // Fall back to JSON
-    auto json = frame.payload_json();
-    if (json.is_null()) {
-        LOG_WARN("WsControlSessionCoro: Invalid LATENCY_REPORT - not binary (error={}) and not JSON",
-                 static_cast<int>(binary_result.error()));
-        return;
-    }
+    const auto& payload = *result;
+    LOG_DEBUG("WsControlSessionCoro: Node {} reported {} latency measurements",
+              node_id(), payload.entries.size());
 
-    try {
-        auto entries = json.at("entries").as_array();
-        LOG_DEBUG("WsControlSessionCoro: Node {} reported {} latency measurements (JSON)",
-                  node_id(), entries.size());
-
-        for (const auto& entry : entries) {
-            std::string dst_type = std::string(entry.at("dst_type").as_string());
-            uint32_t dst_id = static_cast<uint32_t>(entry.at("dst_id").as_int64());
-            uint32_t rtt_ms = static_cast<uint32_t>(entry.at("rtt_ms").as_int64());
-
-            if (path_service && dst_type == "relay") {
-                path_service->update_node_relay_latency(node_id(), dst_id, rtt_ms);
-            }
-            db->update_latency("node", node_id(), dst_type, dst_id, rtt_ms);
+    for (const auto& entry : payload.entries) {
+        std::string dst_type = (entry.dst_type == 0) ? "relay" : "node";
+        if (path_service && entry.dst_type == 0) {
+            path_service->update_node_relay_latency(node_id(), entry.dst_id, entry.rtt_ms);
         }
-    } catch (const std::exception& e) {
-        LOG_WARN("WsControlSessionCoro: Failed to parse latency report JSON: {}", e.what());
+        db->update_latency("node", node_id(), dst_type, entry.dst_id, entry.rtt_ms);
     }
 }
 
@@ -508,67 +447,33 @@ void WsControlSessionCoro::handle_endpoint_report(const wire::Frame& frame) {
 
     auto db = server_->get_database();
 
-    // Try binary deserialization first
-    auto binary_result = wire::P2PStatusPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        const auto& payload = *binary_result;
-        LOG_DEBUG("WsControlSessionCoro: Node {} reported P2P status (binary): peer={}, connected={}, rtt={}ms",
-                  node_id(), payload.peer_node_id, payload.connected, payload.rtt_ms);
-
-        // Store endpoint for this peer
-        if (payload.endpoint_ip != 0) {
-            std::vector<NodeEndpoint> endpoints;
-            NodeEndpoint nep;
-            nep.node_id = node_id();
-            // Convert IP from network byte order to string
-            struct in_addr addr;
-            addr.s_addr = payload.endpoint_ip;
-            char buf[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, &addr, buf, sizeof(buf))) {
-                nep.ip = buf;
-            }
-            nep.port = payload.endpoint_port;
-            nep.type = "p2p";
-            endpoints.push_back(nep);
-            db->update_node_endpoints(node_id(), endpoints);
-        }
+    auto result = wire::P2PStatusPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsControlSessionCoro: Invalid P2P_STATUS: error={}",
+                 static_cast<int>(result.error()));
         return;
     }
 
-    // Fall back to JSON
-    auto json = frame.payload_json();
-    if (json.is_null()) {
-        LOG_WARN("WsControlSessionCoro: Invalid P2P_STATUS - not binary (error={}) and not JSON",
-                 static_cast<int>(binary_result.error()));
-        return;
-    }
+    const auto& payload = *result;
+    LOG_DEBUG("WsControlSessionCoro: Node {} reported P2P status: peer={}, connected={}, rtt={}ms",
+              node_id(), payload.peer_node_id, payload.connected, payload.rtt_ms);
 
-    try {
-        if (!json.as_object().contains("endpoints")) {
-            LOG_DEBUG("WsControlSessionCoro: P2P_STATUS JSON has no endpoints field");
-            return;
-        }
-
-        auto endpoints_json = json.at("endpoints").as_array();
-        LOG_DEBUG("WsControlSessionCoro: Node {} reported {} endpoints (JSON)",
-                  node_id(), endpoints_json.size());
-
+    // Store endpoint for this peer
+    if (payload.endpoint_ip != 0) {
         std::vector<NodeEndpoint> endpoints;
-        for (const auto& ep : endpoints_json) {
-            NodeEndpoint nep;
-            nep.node_id = node_id();
-            nep.ip = std::string(ep.at("ip").as_string());
-            nep.port = static_cast<uint16_t>(ep.at("port").as_int64());
-            nep.type = ep.as_object().contains("type") ?
-                       std::string(ep.at("type").as_string()) : "stun";
-            endpoints.push_back(nep);
+        NodeEndpoint nep;
+        nep.node_id = node_id();
+        // Convert IP from network byte order to string
+        struct in_addr addr;
+        addr.s_addr = payload.endpoint_ip;
+        char buf[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &addr, buf, sizeof(buf))) {
+            nep.ip = buf;
         }
-
-        if (!endpoints.empty()) {
-            db->update_node_endpoints(node_id(), endpoints);
-        }
-    } catch (const std::exception& e) {
-        LOG_WARN("WsControlSessionCoro: Failed to parse endpoint report JSON: {}", e.what());
+        nep.port = payload.endpoint_port;
+        nep.type = "p2p";
+        endpoints.push_back(nep);
+        db->update_node_endpoints(node_id(), endpoints);
     }
 }
 
@@ -579,32 +484,17 @@ void WsControlSessionCoro::handle_p2p_request(const wire::Frame& frame) {
     }
 
     auto db = server_->get_database();
-    uint32_t peer_node_id = 0;
 
-    // Try binary deserialization first
-    auto binary_result = wire::P2PInitPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        peer_node_id = binary_result->peer_node_id;
-        LOG_INFO("WsControlSessionCoro: Node {} requesting P2P to peer {} (binary)",
-                 node_id(), peer_node_id);
-    } else {
-        // Fall back to JSON
-        auto json = frame.payload_json();
-        if (json.is_null()) {
-            LOG_WARN("WsControlSessionCoro: Invalid P2P_INIT - not binary (error={}) and not JSON",
-                     static_cast<int>(binary_result.error()));
-            return;
-        }
-
-        try {
-            peer_node_id = static_cast<uint32_t>(json.at("peer_node_id").as_int64());
-            LOG_INFO("WsControlSessionCoro: Node {} requesting P2P to peer {} (JSON)",
-                     node_id(), peer_node_id);
-        } catch (const std::exception& e) {
-            LOG_WARN("WsControlSessionCoro: Failed to parse P2P request JSON: {}", e.what());
-            return;
-        }
+    auto result = wire::P2PInitPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsControlSessionCoro: Invalid P2P_INIT: error={}",
+                 static_cast<int>(result.error()));
+        return;
     }
+
+    uint32_t peer_node_id = result->peer_node_id;
+    LOG_INFO("WsControlSessionCoro: Node {} requesting P2P to peer {}",
+             node_id(), peer_node_id);
 
     // Build binary response
     wire::P2PEndpointPayload response;
@@ -640,29 +530,15 @@ void WsControlSessionCoro::handle_config_ack(const wire::Frame& frame) {
         return;
     }
 
-    // Try binary deserialization first
-    auto binary_result = wire::ConfigAckPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        LOG_DEBUG("WsControlSessionCoro: Node {} acknowledged config version {} (binary)",
-                  node_id(), binary_result->version);
+    auto result = wire::ConfigAckPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsControlSessionCoro: Invalid CONFIG_ACK: error={}",
+                 static_cast<int>(result.error()));
         return;
     }
 
-    // Fall back to JSON
-    auto json = frame.payload_json();
-    if (json.is_null()) {
-        LOG_WARN("WsControlSessionCoro: Invalid CONFIG_ACK - not binary (error={}) and not JSON",
-                 static_cast<int>(binary_result.error()));
-        return;
-    }
-
-    try {
-        uint64_t version = static_cast<uint64_t>(json.at("version").as_int64());
-        LOG_DEBUG("WsControlSessionCoro: Node {} acknowledged config version {} (JSON)",
-                  node_id(), version);
-    } catch (const std::exception& e) {
-        LOG_WARN("WsControlSessionCoro: Failed to parse config ack JSON: {}", e.what());
-    }
+    LOG_DEBUG("WsControlSessionCoro: Node {} acknowledged config version {}",
+              node_id(), result->version);
 }
 
 void WsControlSessionCoro::handle_route_announce(const wire::Frame& frame) {
@@ -671,24 +547,15 @@ void WsControlSessionCoro::handle_route_announce(const wire::Frame& frame) {
         return;
     }
 
-    // Try binary deserialization first
-    auto binary_result = wire::RouteAnnouncePayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        LOG_DEBUG("WsControlSessionCoro: Node {} announcing route (binary): gateway={}, prefix={}/{}",
-                  node_id(), binary_result->gateway_node_id, binary_result->route.prefix, binary_result->route.prefix_len);
-        // TODO: Process route announcement
+    auto result = wire::RouteAnnouncePayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsControlSessionCoro: Invalid ROUTE_ANNOUNCE: error={}",
+                 static_cast<int>(result.error()));
         return;
     }
 
-    // Fall back to JSON
-    auto json = frame.payload_json();
-    if (json.is_null()) {
-        LOG_WARN("WsControlSessionCoro: Invalid ROUTE_ANNOUNCE - not binary (error={}) and not JSON",
-                 static_cast<int>(binary_result.error()));
-        return;
-    }
-
-    LOG_DEBUG("WsControlSessionCoro: Node {} announcing route (JSON)", node_id());
+    LOG_DEBUG("WsControlSessionCoro: Node {} announcing route: gateway={}, prefix={}/{}",
+              node_id(), result->gateway_node_id, result->route.prefix, result->route.prefix_len);
     // TODO: Process route announcement
 }
 
@@ -698,24 +565,16 @@ void WsControlSessionCoro::handle_route_withdraw(const wire::Frame& frame) {
         return;
     }
 
-    // Try binary deserialization first (uses RouteAnnouncePayload format)
-    auto binary_result = wire::RouteAnnouncePayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        LOG_DEBUG("WsControlSessionCoro: Node {} withdrawing route (binary): gateway={}, prefix={}/{}",
-                  node_id(), binary_result->gateway_node_id, binary_result->route.prefix, binary_result->route.prefix_len);
-        // TODO: Process route withdrawal
+    // Uses RouteAnnouncePayload format
+    auto result = wire::RouteAnnouncePayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsControlSessionCoro: Invalid ROUTE_WITHDRAW: error={}",
+                 static_cast<int>(result.error()));
         return;
     }
 
-    // Fall back to JSON
-    auto json = frame.payload_json();
-    if (json.is_null()) {
-        LOG_WARN("WsControlSessionCoro: Invalid ROUTE_WITHDRAW - not binary (error={}) and not JSON",
-                 static_cast<int>(binary_result.error()));
-        return;
-    }
-
-    LOG_DEBUG("WsControlSessionCoro: Node {} withdrawing route (JSON)", node_id());
+    LOG_DEBUG("WsControlSessionCoro: Node {} withdrawing route: gateway={}, prefix={}/{}",
+              node_id(), result->gateway_node_id, result->route.prefix, result->route.prefix_len);
     // TODO: Process route withdrawal
 }
 
@@ -774,7 +633,15 @@ void WsControlSessionCoro::send_config_update() {
         int64_t exp_ts = std::chrono::duration_cast<std::chrono::seconds>(exp.time_since_epoch()).count();
 
         auth_resp.auth_token = "auth." + std::to_string(nid) + "." + std::to_string(exp_ts);
-        auth_resp.relay_token = "relay." + std::to_string(nid) + "." + std::to_string(exp_ts);
+
+        // Generate proper JWT relay token via BuiltinRelay
+        auto* builtin_relay = server_->get_builtin_relay();
+        if (builtin_relay) {
+            auth_resp.relay_token = builtin_relay->session_manager()->create_relay_token(nid, netid);
+        } else {
+            // Fallback if no builtin relay (shouldn't happen in normal operation)
+            auth_resp.relay_token = "relay." + std::to_string(nid) + "." + std::to_string(exp_ts);
+        }
 
         auto auth_binary = auth_resp.serialize_binary();
         auto auth_frame = wire::Frame::create(wire::MessageType::AUTH_RESPONSE, std::move(auth_binary));
@@ -921,67 +788,22 @@ void WsServerSessionCoro::handle_server_register(const wire::Frame& frame) {
     auto db = server_->get_database();
     const auto& config = server_->get_config();
 
-    std::string token;
-    std::string name;
-    std::string region;
-    std::string url;
-    std::string stun_ip;
-    uint16_t stun_port = 3478;
-
-    // Try binary deserialization first
-    auto binary_result = wire::ServerRegisterPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        const auto& payload = *binary_result;
-        token = payload.server_token;
-        name = payload.name;
-        region = payload.region;
-        url = payload.relay_url;
-        stun_ip = payload.stun_ip;
-        stun_port = payload.stun_port;
-        LOG_DEBUG("WsServerSessionCoro: Parsed binary SERVER_REGISTER (name={}, region={})", name, region);
-    } else {
-        // Fall back to JSON
-        auto json = frame.payload_json();
-        if (json.is_null()) {
-            LOG_WARN("WsServerSessionCoro: Invalid SERVER_REGISTER - not binary (error={}) and not JSON",
-                     static_cast<int>(binary_result.error()));
-            send_error(wire::ErrorCode::INVALID_MESSAGE, "Invalid register payload");
-            return;
-        }
-
-        try {
-            if (json.as_object().contains("token")) {
-                token = std::string(json.at("token").as_string());
-            } else if (json.as_object().contains("server_token")) {
-                token = std::string(json.at("server_token").as_string());
-            }
-
-            name = json.as_object().contains("name") ?
-                   std::string(json.at("name").as_string()) : "unknown";
-            region = json.as_object().contains("region") ?
-                     std::string(json.at("region").as_string()) : "unknown";
-
-            if (json.as_object().contains("url")) {
-                url = std::string(json.at("url").as_string());
-            } else if (json.as_object().contains("relay_url")) {
-                url = std::string(json.at("relay_url").as_string());
-            } else if (json.as_object().contains("external_url")) {
-                url = std::string(json.at("external_url").as_string());
-            }
-
-            if (json.as_object().contains("stun_ip")) {
-                stun_ip = std::string(json.at("stun_ip").as_string());
-            }
-            if (json.as_object().contains("stun_port")) {
-                stun_port = static_cast<uint16_t>(json.at("stun_port").as_int64());
-            }
-            LOG_DEBUG("WsServerSessionCoro: Parsed JSON SERVER_REGISTER (name={}, region={})", name, region);
-        } catch (const std::exception& e) {
-            LOG_WARN("WsServerSessionCoro: Failed to parse SERVER_REGISTER JSON: {}", e.what());
-            send_error(wire::ErrorCode::INVALID_MESSAGE, "Invalid register payload");
-            return;
-        }
+    auto result = wire::ServerRegisterPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsServerSessionCoro: Invalid SERVER_REGISTER: error={}",
+                 static_cast<int>(result.error()));
+        send_error(wire::ErrorCode::INVALID_MESSAGE, "Invalid register payload");
+        return;
     }
+
+    const auto& payload = *result;
+    std::string token = payload.server_token;
+    std::string name = payload.name;
+    std::string region = payload.region;
+    std::string url = payload.relay_url;
+    std::string stun_ip = payload.stun_ip;
+    uint16_t stun_port = payload.stun_port;
+    LOG_DEBUG("WsServerSessionCoro: Parsed SERVER_REGISTER (name={}, region={})", name, region);
 
     // Verify server token
     if (!config.server_token.empty() && token != config.server_token) {
@@ -1061,40 +883,15 @@ void WsServerSessionCoro::handle_stats_report(const wire::Frame& frame) {
         return;
     }
 
-    uint32_t active_connections = 0;
-    uint64_t bytes_relayed = 0;
-
-    // Try binary deserialization first
-    auto binary_result = wire::ServerStatsPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        active_connections = binary_result->active_connections;
-        bytes_relayed = binary_result->bytes_relayed;
-        LOG_DEBUG("WsServerSessionCoro: Server {} stats (binary): {} connections, {} bytes",
-                  server_id_, active_connections, bytes_relayed);
-    } else {
-        // Fall back to JSON
-        auto json = frame.payload_json();
-        if (json.is_null()) {
-            LOG_WARN("WsServerSessionCoro: Invalid SERVER_LATENCY_REPORT - not binary (error={}) and not JSON",
-                     static_cast<int>(binary_result.error()));
-            return;
-        }
-
-        try {
-            if (json.as_object().contains("active_connections")) {
-                active_connections = static_cast<uint32_t>(json.at("active_connections").as_int64());
-            }
-            if (json.as_object().contains("bytes_relayed")) {
-                bytes_relayed = static_cast<uint64_t>(json.at("bytes_relayed").as_int64());
-            }
-
-            LOG_DEBUG("WsServerSessionCoro: Server {} stats (JSON): {} connections, {} bytes",
-                      server_id_, active_connections, bytes_relayed);
-        } catch (const std::exception& e) {
-            LOG_WARN("WsServerSessionCoro: Failed to parse stats JSON: {}", e.what());
-            return;
-        }
+    auto result = wire::ServerStatsPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsServerSessionCoro: Invalid SERVER_LATENCY_REPORT: error={}",
+                 static_cast<int>(result.error()));
+        return;
     }
+
+    LOG_DEBUG("WsServerSessionCoro: Server {} stats: {} connections, {} bytes",
+              server_id_, result->active_connections, result->bytes_relayed);
 
     // TODO: Store stats
 }
@@ -1105,69 +902,19 @@ void WsServerSessionCoro::handle_mesh_forward(const wire::Frame& frame) {
         return;
     }
 
-    // Try binary deserialization first
-    auto binary_result = wire::MeshForwardPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        const auto& payload = *binary_result;
-        LOG_DEBUG("WsServerSessionCoro: MESH_FORWARD (binary) from relay {}: dst_node={}, ttl={}",
-                  payload.src_relay_id, payload.dst_node_id, payload.ttl);
-
-        // Forward to target relay - for now, just log
-        // TODO: Implement actual mesh forwarding logic
+    auto result = wire::MeshForwardPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsServerSessionCoro: Invalid MESH_FORWARD: error={}",
+                 static_cast<int>(result.error()));
         return;
     }
 
-    // Fall back to JSON
-    auto json = frame.payload_json();
-    if (json.is_null()) {
-        LOG_WARN("WsServerSessionCoro: Invalid MESH_FORWARD - not binary (error={}) and not JSON",
-                 static_cast<int>(binary_result.error()));
-        return;
-    }
+    const auto& payload = *result;
+    LOG_DEBUG("WsServerSessionCoro: MESH_FORWARD from relay {}: dst_node={}, ttl={}",
+              payload.src_relay_id, payload.dst_node_id, payload.ttl);
 
-    try {
-        uint32_t src_node_id = static_cast<uint32_t>(json.at("src_node_id").as_int64());
-        uint32_t dst_node_id = static_cast<uint32_t>(json.at("dst_node_id").as_int64());
-
-        if (src_node_id == 0 || dst_node_id == 0) {
-            LOG_WARN("WsServerSessionCoro: Invalid mesh_forward JSON - missing node IDs");
-            return;
-        }
-
-        if (!json.as_object().contains("target_relays")) {
-            LOG_DEBUG("WsServerSessionCoro: No target relays for mesh_forward");
-            return;
-        }
-
-        auto target_relays = json.at("target_relays").as_array();
-
-        // Build binary forward message for target relay
-        wire::MeshForwardPayload forward;
-        forward.src_relay_id = server_id_;
-        forward.dst_node_id = dst_node_id;
-        forward.ttl = 3;
-        // Copy original frame payload as data
-        forward.data = frame.payload;
-
-        auto forward_binary = forward.serialize_binary();
-        auto forward_frame = wire::Frame::create(wire::MessageType::MESH_FORWARD, std::move(forward_binary));
-
-        int forwarded = 0;
-        for (const auto& relay : target_relays) {
-            uint32_t relay_id = static_cast<uint32_t>(relay.as_int64());
-            auto session = server_->get_session_manager()->get_server_session(relay_id);
-            if (session) {
-                session->send_frame(forward_frame);
-                forwarded++;
-            }
-        }
-
-        LOG_DEBUG("WsServerSessionCoro: Mesh forwarded {} -> {} via {} relays",
-                  src_node_id, dst_node_id, forwarded);
-
-    } catch (const std::exception& e) {
-        LOG_WARN("WsServerSessionCoro: Failed to parse mesh_forward JSON: {}", e.what());
-    }
+    // Forward to target relay - for now, just log
+    // TODO: Implement actual mesh forwarding logic
 }
 
 void WsServerSessionCoro::on_server_authenticated(uint32_t server_id) {
@@ -1263,38 +1010,17 @@ net::awaitable<void> WsBuiltinRelaySessionCoro::handle_relay_auth(const wire::Fr
         co_return;
     }
 
-    std::string token;
-
-    // Try binary deserialization first
-    auto binary_result = wire::RelayAuthPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        token = binary_result->relay_token;
-        LOG_DEBUG("WsBuiltinRelaySessionCoro: Parsed binary RELAY_AUTH");
-    } else {
-        // Fall back to JSON
-        auto json = frame.payload_json();
-        if (json.is_null()) {
-            LOG_WARN("WsBuiltinRelaySessionCoro: Invalid RELAY_AUTH - not binary (error={}) and not JSON",
-                     static_cast<int>(binary_result.error()));
-            send_auth_response(false, 0, "Invalid auth payload");
-            relay->stats().auth_failures++;
-            co_return;
-        }
-
-        try {
-            if (json.as_object().contains("relay_token")) {
-                token = std::string(json.at("relay_token").as_string());
-            } else if (json.as_object().contains("token")) {
-                token = std::string(json.at("token").as_string());
-            }
-            LOG_DEBUG("WsBuiltinRelaySessionCoro: Parsed JSON RELAY_AUTH");
-        } catch (const std::exception& e) {
-            LOG_WARN("WsBuiltinRelaySessionCoro: Failed to parse RELAY_AUTH JSON: {}", e.what());
-            send_auth_response(false, 0, "Invalid JSON payload");
-            relay->stats().auth_failures++;
-            co_return;
-        }
+    auto result = wire::RelayAuthPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsBuiltinRelaySessionCoro: Invalid RELAY_AUTH: error={}",
+                 static_cast<int>(result.error()));
+        send_auth_response(false, 0, "Invalid auth payload");
+        relay->stats().auth_failures++;
+        co_return;
     }
+
+    std::string token = result->relay_token;
+    LOG_DEBUG("WsBuiltinRelaySessionCoro: Parsed RELAY_AUTH");
 
     if (token.empty()) {
         LOG_WARN("WsBuiltinRelaySessionCoro: Missing relay token");
@@ -1376,18 +1102,10 @@ net::awaitable<void> WsBuiltinRelaySessionCoro::handle_data(const wire::Frame& f
 net::awaitable<void> WsBuiltinRelaySessionCoro::handle_ping(const wire::Frame& frame) {
     uint64_t timestamp = 0;
 
-    // Try binary deserialization first (MeshPingPayload has timestamp field)
-    auto binary_result = wire::MeshPingPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        timestamp = binary_result->timestamp;
-    } else {
-        // Fall back to JSON
-        auto json = frame.payload_json();
-        if (!json.is_null() && json.as_object().contains("timestamp")) {
-            try {
-                timestamp = static_cast<uint64_t>(json.at("timestamp").as_int64());
-            } catch (...) {}
-        }
+    // MeshPingPayload has timestamp field
+    auto result = wire::MeshPingPayload::deserialize_binary(frame.payload);
+    if (result) {
+        timestamp = result->timestamp;
     }
 
     send_pong(timestamp);

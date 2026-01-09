@@ -38,7 +38,8 @@ public:
     void remove_session(uint32_t node_id);
     void* get_session(uint32_t node_id);
 
-    // Token validation
+    // Token creation and validation
+    std::string create_relay_token(uint32_t node_id, uint32_t network_id);
     bool validate_relay_token(const std::string& token, uint32_t& node_id,
                               std::string& virtual_ip);
 

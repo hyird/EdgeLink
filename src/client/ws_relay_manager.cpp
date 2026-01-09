@@ -35,33 +35,20 @@ void WsRelayConnection::do_authenticate() {
 void WsRelayConnection::process_frame(const wire::Frame& frame) {
     // Handle auth response specially
     if (state() == State::AUTHENTICATING && frame.header.type == wire::MessageType::AUTH_RESPONSE) {
-        // Try binary deserialization first
-        auto binary_result = wire::AuthResponsePayload::deserialize_binary(frame.payload);
-        if (binary_result) {
-            if (!binary_result->success) {
-                auth_failed(binary_result->error_message);
-                return;
-            }
-            LOG_INFO("WsRelayConnection: Authenticated with relay {} (binary)", server_id_);
-            auth_complete();
-            return;
-        }
-
-        // Fall back to JSON
-        auto json_result = wire::parse_json_payload(frame);
-        if (!json_result) {
-            LOG_WARN("WsRelayConnection: Invalid AUTH_RESPONSE - not binary and not JSON");
+        auto result = wire::AuthResponsePayload::deserialize_binary(frame.payload);
+        if (!result) {
+            LOG_WARN("WsRelayConnection: Invalid AUTH_RESPONSE: error={}",
+                     static_cast<int>(result.error()));
             auth_failed("Invalid auth response");
             return;
         }
 
-        auto auth_result = wire::AuthResponsePayload::from_json(*json_result);
-        if (!auth_result || !auth_result->success) {
-            auth_failed(auth_result ? auth_result->error_message : "parse error");
+        if (!result->success) {
+            auth_failed(result->error_message);
             return;
         }
 
-        LOG_INFO("WsRelayConnection: Authenticated with relay {} (JSON)", server_id_);
+        LOG_INFO("WsRelayConnection: Authenticated with relay {}", server_id_);
         auth_complete();
         return;
     }
@@ -218,11 +205,13 @@ void WsRelayManager::on_relay_frame(uint32_t relay_id, const wire::Frame& frame)
         }
 
         case wire::MessageType::ERROR_MSG: {
-            wire::ErrorPayload error;
-            auto json_result = wire::parse_json_payload(frame);
-            if (json_result && error.from_json(*json_result)) {
+            auto result = wire::ErrorPayload::deserialize_binary(frame.payload);
+            if (result) {
                 LOG_WARN("WsRelayManager: Error from relay {}: {} - {}",
-                        relay_id, error.code, error.message);
+                        relay_id, result->code, result->message);
+            } else {
+                LOG_WARN("WsRelayManager: Error from relay {} (failed to parse): error={}",
+                        relay_id, static_cast<int>(result.error()));
             }
             break;
         }

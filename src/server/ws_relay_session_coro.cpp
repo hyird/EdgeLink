@@ -82,31 +82,19 @@ net::awaitable<void> WsRelaySessionCoro::handle_relay_auth(const wire::Frame& fr
         co_return;
     }
 
-    std::string token;
-
-    // Try binary deserialization first
-    auto binary_result = wire::RelayAuthPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        token = binary_result->relay_token;
-        LOG_DEBUG("WsRelaySessionCoro: Parsed binary RELAY_AUTH");
-    } else {
-        // Fall back to JSON
-        auto json_result = wire::parse_json_payload(frame);
-        if (!json_result || !json_result->as_object().contains("relay_token")) {
-            LOG_WARN("WsRelaySessionCoro: Invalid RELAY_AUTH - not binary (error={}) and not JSON",
-                     static_cast<int>(binary_result.error()));
-            send_auth_response(false, 0, "Missing relay_token");
-            server_->stats().auth_failures++;
-            co_return;
-        }
-        token = json_result->as_object().at("relay_token").as_string().c_str();
-        LOG_DEBUG("WsRelaySessionCoro: Parsed JSON RELAY_AUTH");
+    auto result = wire::RelayAuthPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsRelaySessionCoro: Failed to parse RELAY_AUTH: error={}",
+                 static_cast<int>(result.error()));
+        send_auth_response(false, 0, "Invalid payload");
+        server_->stats().auth_failures++;
+        co_return;
     }
 
     uint32_t node_id = 0;
     std::string virtual_ip;
 
-    if (!server_->validate_relay_token(token, node_id, virtual_ip)) {
+    if (!server_->validate_relay_token(result->relay_token, node_id, virtual_ip)) {
         send_auth_response(false, 0, "Invalid token");
         server_->stats().auth_failures++;
         co_return;
@@ -144,16 +132,9 @@ net::awaitable<void> WsRelaySessionCoro::handle_data(const wire::Frame& frame) {
 net::awaitable<void> WsRelaySessionCoro::handle_ping(const wire::Frame& frame) {
     uint64_t timestamp = 0;
 
-    // Try binary deserialization first (MeshPingPayload has timestamp)
-    auto binary_result = wire::MeshPingPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        timestamp = binary_result->timestamp;
-    } else {
-        // Fall back to JSON
-        auto json_result = wire::parse_json_payload(frame);
-        if (json_result && json_result->as_object().contains("timestamp")) {
-            timestamp = static_cast<uint64_t>(json_result->as_object().at("timestamp").as_int64());
-        }
+    auto result = wire::MeshPingPayload::deserialize_binary(frame.payload);
+    if (result) {
+        timestamp = result->timestamp;
     }
     send_pong(timestamp);
     co_return;
@@ -185,15 +166,8 @@ net::awaitable<void> WsRelaySessionCoro::handle_mesh_forward(const wire::Frame& 
 net::awaitable<void> WsRelaySessionCoro::handle_mesh_hello(const wire::Frame& frame) {
     auto result = wire::MeshHelloPayload::deserialize_binary(frame.payload);
     if (!result) {
-        // Try JSON fallback
-        auto json_result = wire::parse_json_payload(frame);
-        if (json_result) {
-            result = wire::MeshHelloPayload::from_json(*json_result);
-        }
-    }
-
-    if (!result) {
-        LOG_WARN("WsRelaySessionCoro: Invalid MESH_HELLO payload");
+        LOG_WARN("WsRelaySessionCoro: Failed to parse MESH_HELLO: error={}",
+                 static_cast<int>(result.error()));
         send_mesh_hello_ack(false, "Invalid payload");
         co_return;
     }
@@ -219,14 +193,8 @@ net::awaitable<void> WsRelaySessionCoro::handle_mesh_hello(const wire::Frame& fr
 net::awaitable<void> WsRelaySessionCoro::handle_mesh_ping(const wire::Frame& frame) {
     auto result = wire::MeshPingPayload::deserialize_binary(frame.payload);
     if (!result) {
-        auto json_result = wire::parse_json_payload(frame);
-        if (json_result) {
-            result = wire::MeshPingPayload::from_json(*json_result);
-        }
-    }
-
-    if (!result) {
-        LOG_WARN("WsRelaySessionCoro: Invalid MESH_PING payload");
+        LOG_WARN("WsRelaySessionCoro: Failed to parse MESH_PING: error={}",
+                 static_cast<int>(result.error()));
         co_return;
     }
 

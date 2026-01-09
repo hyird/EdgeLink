@@ -32,6 +32,13 @@ void* RelaySessionManager::get_session(uint32_t node_id) {
     return (it != sessions_.end()) ? it->second : nullptr;
 }
 
+std::string RelaySessionManager::create_relay_token(uint32_t node_id, uint32_t network_id) {
+    JWTManager jwt_manager(jwt_secret_);
+    // Allow all relays for now
+    std::vector<uint32_t> allowed_relays;
+    return jwt_manager.create_relay_token(node_id, network_id, allowed_relays);
+}
+
 bool RelaySessionManager::validate_relay_token(const std::string& token, uint32_t& node_id,
                                                std::string& virtual_ip) {
     JWTManager jwt_manager(jwt_secret_);

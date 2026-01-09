@@ -110,88 +110,45 @@ void ControllerClient::process_frame(const wire::Frame& frame) {
 }
 
 void ControllerClient::handle_register_response(const wire::Frame& frame) {
-    // Try binary deserialization first
-    auto binary_result = wire::ServerRegisterRespPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        const auto& resp = *binary_result;
-        LOG_DEBUG("ControllerClient: Parsed binary SERVER_REGISTER_RESP (success={}, server_id={})",
-                  resp.success, resp.server_id);
-
-        if (resp.success) {
-            server_id_ = resp.server_id;
-            server_.set_server_id(server_id_);
-            registered_ = true;
-
-            LOG_INFO("ControllerClient: Registered as server ID {}", server_id_);
-            auth_complete();
-        } else {
-            LOG_ERROR("ControllerClient: Registration failed: {}", resp.error_message);
-            if (connect_callback_) {
-                connect_callback_(false, resp.error_message);
-            }
-            auth_failed(resp.error_message);
-        }
-        return;
-    }
-
-    // Fall back to JSON
-    auto json_result = wire::parse_json_payload(frame);
-    if (!json_result) {
-        LOG_ERROR("ControllerClient: Failed to parse register response - not binary (error={}) and not JSON",
-                  static_cast<int>(binary_result.error()));
+    auto result = wire::ServerRegisterRespPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_ERROR("ControllerClient: Failed to parse SERVER_REGISTER_RESP: error={}",
+                  static_cast<int>(result.error()));
         auth_failed("Invalid register response");
         return;
     }
 
-    auto& json = json_result->as_object();
-    LOG_DEBUG("ControllerClient: Parsed JSON SERVER_REGISTER_RESP");
+    const auto& resp = *result;
+    LOG_DEBUG("ControllerClient: Parsed SERVER_REGISTER_RESP (success={}, server_id={})",
+              resp.success, resp.server_id);
 
-    if (json.contains("success") && json.at("success").as_bool()) {
-        server_id_ = static_cast<uint32_t>(json.at("server_id").as_int64());
+    if (resp.success) {
+        server_id_ = resp.server_id;
         server_.set_server_id(server_id_);
         registered_ = true;
 
         LOG_INFO("ControllerClient: Registered as server ID {}", server_id_);
-
-        // Signal auth complete to base class
         auth_complete();
     } else {
-        std::string error = json.contains("error_message")
-            ? json.at("error_message").as_string().c_str()
-            : "Unknown error";
-        LOG_ERROR("ControllerClient: Registration failed: {}", error);
-
+        LOG_ERROR("ControllerClient: Registration failed: {}", resp.error_message);
         if (connect_callback_) {
-            connect_callback_(false, error);
+            connect_callback_(false, resp.error_message);
         }
-        auth_failed(error);
+        auth_failed(resp.error_message);
     }
 }
 
 void ControllerClient::handle_node_loc(const wire::Frame& frame) {
-    auto json_result = wire::parse_json_payload(frame);
-    if (!json_result) {
-        LOG_WARN("ControllerClient: Failed to parse node location update");
+    auto result = wire::ServerNodeLocPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("ControllerClient: Failed to parse SERVER_NODE_LOC: error={}",
+                 static_cast<int>(result.error()));
         return;
     }
 
-    auto& json = json_result->as_object();
     std::vector<std::pair<uint32_t, std::vector<uint32_t>>> locations;
-
-    if (json.contains("nodes")) {
-        for (const auto& node : json.at("nodes").as_array()) {
-            const auto& n = node.as_object();
-            uint32_t node_id = static_cast<uint32_t>(n.at("node_id").as_int64());
-            std::vector<uint32_t> relay_ids;
-
-            if (n.contains("connected_relay_ids")) {
-                for (const auto& rid : n.at("connected_relay_ids").as_array()) {
-                    relay_ids.push_back(static_cast<uint32_t>(rid.as_int64()));
-                }
-            }
-
-            locations.emplace_back(node_id, std::move(relay_ids));
-        }
+    for (const auto& node : result->nodes) {
+        locations.emplace_back(node.node_id, node.connected_relay_ids);
     }
 
     if (node_loc_callback_) {
@@ -202,44 +159,25 @@ void ControllerClient::handle_node_loc(const wire::Frame& frame) {
 }
 
 void ControllerClient::handle_relay_list(const wire::Frame& frame) {
-    auto json_result = wire::parse_json_payload(frame);
-    if (!json_result) {
-        LOG_WARN("ControllerClient: Failed to parse relay list");
+    auto result = wire::ServerRelayListPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("ControllerClient: Failed to parse SERVER_RELAY_LIST: error={}",
+                 static_cast<int>(result.error()));
         return;
     }
 
-    auto& json = json_result->as_object();
-    std::vector<wire::RelayInfo> relays;
-
-    if (json.contains("relays")) {
-        for (const auto& relay : json.at("relays").as_array()) {
-            auto result = wire::RelayInfo::from_json(relay);
-            if (result) {
-                relays.push_back(std::move(*result));
-            }
-        }
-    }
-
     if (relay_list_callback_) {
-        relay_list_callback_(relays);
+        relay_list_callback_(result->relays);
     }
 
-    LOG_INFO("ControllerClient: Received relay list: {} relays", relays.size());
+    LOG_INFO("ControllerClient: Received relay list: {} relays", result->relays.size());
 }
 
 void ControllerClient::handle_blacklist(const wire::Frame& frame) {
-    // Try binary deserialization first
     auto result = wire::ServerBlacklistPayload::deserialize_binary(frame.payload);
     if (!result) {
-        // Fall back to JSON
-        auto json_result = wire::parse_json_payload(frame);
-        if (json_result) {
-            result = wire::ServerBlacklistPayload::from_json(*json_result);
-        }
-    }
-
-    if (!result) {
-        LOG_WARN("ControllerClient: Failed to parse blacklist update");
+        LOG_WARN("ControllerClient: Failed to parse SERVER_BLACKLIST: error={}",
+                 static_cast<int>(result.error()));
         return;
     }
 
@@ -263,26 +201,14 @@ void ControllerClient::handle_blacklist(const wire::Frame& frame) {
 }
 
 void ControllerClient::handle_error(const wire::Frame& frame) {
-    // Try binary deserialization first
-    auto binary_result = wire::ErrorPayload::deserialize_binary(frame.payload);
-    if (binary_result) {
-        LOG_ERROR("ControllerClient: Error from controller (binary): {} - {}",
-                  binary_result->code, binary_result->message);
+    auto result = wire::ErrorPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_ERROR("ControllerClient: Received ERROR_MSG but failed to parse: error={}",
+                  static_cast<int>(result.error()));
         return;
     }
-
-    // Fall back to JSON
-    auto json_result = wire::parse_json_payload(frame);
-    if (json_result) {
-        auto& json = json_result->as_object();
-        int code = json.contains("code") ? static_cast<int>(json.at("code").as_int64()) : 0;
-        std::string message = json.contains("message")
-            ? json.at("message").as_string().c_str()
-            : "Unknown error";
-        LOG_ERROR("ControllerClient: Error from controller (JSON): {} - {}", code, message);
-    } else {
-        LOG_ERROR("ControllerClient: Received ERROR_MSG but failed to parse - not binary and not JSON");
-    }
+    LOG_ERROR("ControllerClient: Error from controller: {} - {}",
+              result->code, result->message);
 }
 
 void ControllerClient::send_heartbeat() {
