@@ -5,6 +5,21 @@
 
 #include <regex>
 #include <chrono>
+#include <sodium.h>
+
+namespace {
+// Helper function for base64 encoding
+std::string base64_encode(const uint8_t* data, size_t len) {
+    size_t b64_len = sodium_base64_encoded_len(len, sodium_base64_VARIANT_ORIGINAL);
+    std::string result(b64_len, '\0');
+    sodium_bin2base64(result.data(), b64_len, data, len, sodium_base64_VARIANT_ORIGINAL);
+    // Remove null terminator if present
+    if (!result.empty() && result.back() == '\0') {
+        result.pop_back();
+    }
+    return result;
+}
+} // anonymous namespace
 
 namespace edgelink::controller {
 
@@ -228,39 +243,76 @@ net::awaitable<void> WsControlSessionCoro::on_disconnected(const std::string& re
 }
 
 void WsControlSessionCoro::handle_auth_request(const wire::Frame& frame) {
-    auto json = frame.payload_json();
-    if (json.is_null()) {
-        send_error(wire::ErrorCode::INVALID_MESSAGE, "Invalid auth request payload");
-        return;
-    }
-
     auto db = server_->get_database();
     auto& config = server_->get_config();
 
-    try {
+    std::string key;
+    std::string auth_key;
+    std::string hostname;
+    std::string os;
+    std::string arch;
+    std::string version;
+
+    // Try binary deserialization first
+    auto binary_result = wire::AuthRequestPayload::deserialize_binary(frame.payload);
+    if (binary_result) {
+        const auto& payload = *binary_result;
+        // Convert raw bytes to base64 for database lookup
+        key = base64_encode(payload.machine_key.data(), payload.machine_key.size());
+        auth_key = payload.auth_key;
+        hostname = payload.hostname;
+        os = payload.os;
+        arch = payload.arch;
+        version = payload.version;
+        LOG_DEBUG("WsControlSessionCoro: Parsed binary AUTH_REQUEST (auth_type={}, hostname={})",
+                  static_cast<int>(payload.auth_type), hostname);
+    } else {
+        // Fall back to JSON
+        auto json = frame.payload_json();
+        if (json.is_null()) {
+            LOG_WARN("WsControlSessionCoro: Invalid AUTH_REQUEST - not binary (error={}) and not JSON",
+                     static_cast<int>(binary_result.error()));
+            send_error(wire::ErrorCode::INVALID_MESSAGE, "Invalid auth request payload");
+            return;
+        }
+
         // Get machine key from JSON or query string
-        std::string key = machine_key_;
+        key = machine_key_;
         if (json.as_object().contains("machine_key")) {
             key = std::string(json.at("machine_key").as_string());
         } else if (json.as_object().contains("machine_key_pub")) {
             key = std::string(json.at("machine_key_pub").as_string());
         }
-
-        if (key.empty()) {
-            send_error(wire::ErrorCode::INVALID_CREDENTIALS, "Machine key required");
-            return;
-        }
-
-        machine_key_ = key;
-
-        // Get optional auth_key for new node registration
-        std::string auth_key;
         if (json.as_object().contains("auth_key")) {
             auth_key = std::string(json.at("auth_key").as_string());
         }
+        if (json.as_object().contains("hostname")) {
+            hostname = std::string(json.at("hostname").as_string());
+        }
+        if (json.as_object().contains("os")) {
+            os = std::string(json.at("os").as_string());
+        }
+        if (json.as_object().contains("arch")) {
+            arch = std::string(json.at("arch").as_string());
+        }
+        if (json.as_object().contains("version")) {
+            version = std::string(json.at("version").as_string());
+        }
+        LOG_DEBUG("WsControlSessionCoro: Parsed JSON AUTH_REQUEST (hostname={})", hostname);
+    }
 
-        LOG_DEBUG("WsControlSessionCoro: Auth request - machine_key: {}..., auth_key: {}",
-                  key.substr(0, 10), auth_key.empty() ? "(empty)" : auth_key.substr(0, 8) + "...");
+    if (key.empty()) {
+        LOG_WARN("WsControlSessionCoro: AUTH_REQUEST missing machine_key from {}", remote_address());
+        send_error(wire::ErrorCode::INVALID_CREDENTIALS, "Machine key required");
+        return;
+    }
+
+    machine_key_ = key;
+
+    LOG_DEBUG("WsControlSessionCoro: Auth request - machine_key: {}..., auth_key: {}",
+              key.substr(0, 10), auth_key.empty() ? "(empty)" : auth_key.substr(0, 8) + "...");
+
+    try {
 
         // Look up node by machine key
         auto node_opt = db->get_node_by_machine_key(key);
@@ -284,23 +336,11 @@ void WsControlSessionCoro::handle_auth_request(const wire::Frame& frame) {
             Node new_node;
             new_node.network_id = auth_key_opt->network_id;
             new_node.machine_key_pub = key;
-
-            if (json.as_object().contains("hostname")) {
-                new_node.hostname = std::string(json.at("hostname").as_string());
-                new_node.name = new_node.hostname;
-            }
-            if (json.as_object().contains("node_key")) {
-                new_node.node_key_pub = std::string(json.at("node_key").as_string());
-            }
-            if (json.as_object().contains("os")) {
-                new_node.os = std::string(json.at("os").as_string());
-            }
-            if (json.as_object().contains("arch")) {
-                new_node.arch = std::string(json.at("arch").as_string());
-            }
-            if (json.as_object().contains("version")) {
-                new_node.version = std::string(json.at("version").as_string());
-            }
+            new_node.hostname = hostname;
+            new_node.name = hostname;
+            new_node.os = os;
+            new_node.arch = arch;
+            new_node.version = version;
 
             new_node.authorized = true;
             new_node.online = true;
@@ -566,13 +606,19 @@ void WsControlSessionCoro::on_authenticated(uint32_t node_id, uint32_t network_i
 }
 
 void WsControlSessionCoro::send_error(wire::ErrorCode code, const std::string& message) {
-    boost::json::object error_json;
-    error_json["success"] = false;
-    error_json["error_code"] = static_cast<int>(code);
-    error_json["error_message"] = message;
+    LOG_DEBUG("WsControlSessionCoro: Sending AUTH_RESPONSE error (code={}, msg={})",
+              static_cast<int>(code), message);
 
-    auto frame = wire::create_json_frame(wire::MessageType::AUTH_RESPONSE, error_json);
+    wire::AuthResponsePayload payload;
+    payload.success = false;
+    payload.error_code = static_cast<uint16_t>(code);
+    payload.error_message = message;
+
+    auto binary = payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::AUTH_RESPONSE, std::move(binary));
     send_frame(frame);
+
+    LOG_DEBUG("WsControlSessionCoro: AUTH_RESPONSE error sent ({} bytes)", frame.payload.size());
 }
 
 void WsControlSessionCoro::send_config_update() {
@@ -581,98 +627,111 @@ void WsControlSessionCoro::send_config_update() {
     uint32_t nid = node_id();
     uint32_t netid = network_id();
 
-    boost::json::object config_json;
-    config_json["success"] = true;
-    config_json["node_id"] = nid;
-    config_json["network_id"] = netid;
-    config_json["virtual_ip"] = virtual_ip_;
+    LOG_DEBUG("WsControlSessionCoro: Preparing config update for node {} (network {})", nid, netid);
 
-    // Get network info
-    auto network_opt = db->get_network(netid);
-    if (network_opt) {
-        const Network& net = *network_opt;
-        boost::json::object net_json;
-        net_json["id"] = net.id;
-        net_json["name"] = net.name;
-        net_json["cidr"] = net.subnet;
-        net_json["mtu"] = 1400;
-        config_json["network"] = net_json;
+    // --- Step 1: Send AUTH_RESPONSE with success ---
+    {
+        wire::AuthResponsePayload auth_resp;
+        auth_resp.success = true;
+        auth_resp.node_id = nid;
+        auth_resp.network_id = netid;
+
+        // Convert virtual_ip string to uint32_t
+        struct in_addr addr;
+        if (inet_pton(AF_INET, virtual_ip_.c_str(), &addr) == 1) {
+            auth_resp.virtual_ip_int = addr.s_addr;  // Already in network byte order
+        }
+        auth_resp.virtual_ip = virtual_ip_;
+
+        // Generate tokens
+        auto now = std::chrono::system_clock::now();
+        auto exp = now + std::chrono::hours(24);
+        int64_t exp_ts = std::chrono::duration_cast<std::chrono::seconds>(exp.time_since_epoch()).count();
+
+        auth_resp.auth_token = "auth." + std::to_string(nid) + "." + std::to_string(exp_ts);
+        auth_resp.relay_token = "relay." + std::to_string(nid) + "." + std::to_string(exp_ts);
+
+        auto auth_binary = auth_resp.serialize_binary();
+        auto auth_frame = wire::Frame::create(wire::MessageType::AUTH_RESPONSE, std::move(auth_binary));
+        send_frame(auth_frame);
+
+        LOG_DEBUG("WsControlSessionCoro: AUTH_RESPONSE sent (node={}, ip={}, {} bytes)",
+                  nid, virtual_ip_, auth_frame.payload.size());
     }
 
-    // Generate tokens
-    auto now = std::chrono::system_clock::now();
-    auto exp = now + std::chrono::hours(24);
-    int64_t exp_ts = std::chrono::duration_cast<std::chrono::seconds>(exp.time_since_epoch()).count();
+    // --- Step 2: Send CONFIG with network data ---
+    {
+        wire::ConfigPayload config;
+        config.version = 1;
+        config.network_id = netid;
 
-    config_json["auth_token"] = "auth." + std::to_string(nid) + "." + std::to_string(exp_ts);
-    config_json["relay_token"] = "relay." + std::to_string(nid) + "." + std::to_string(exp_ts);
-    config_json["relay_token_expires_at"] = exp_ts;
+        // Get network info
+        auto network_opt = db->get_network(netid);
+        if (network_opt) {
+            const Network& net = *network_opt;
+            config.network_name = net.name;
+            config.subnet = net.subnet;
 
-    // Get peer list
-    boost::json::array peers;
-    auto nodes = db->list_nodes(netid);
-    for (const auto& n : nodes) {
-        if (n.id == nid) continue;
-        if (!n.authorized) continue;
-
-        boost::json::object peer;
-        peer["node_id"] = n.id;
-        peer["hostname"] = n.hostname;
-        peer["virtual_ip"] = n.virtual_ip;
-        peer["node_key_pub"] = n.node_key_pub;
-        peer["online"] = n.online;
-        peers.push_back(peer);
-    }
-    config_json["peers"] = peers;
-
-    // Get relay servers
-    boost::json::array relays;
-    auto servers = db->list_enabled_servers();
-    for (const auto& s : servers) {
-        boost::json::object relay;
-        relay["server_id"] = s.id;
-        relay["name"] = s.name;
-        relay["region"] = s.region;
-        relay["url"] = s.url;
-
-        if (path_service) {
-            uint32_t latency = path_service->get_node_relay_latency(nid, s.id);
-            if (latency > 0) {
-                relay["latency_ms"] = latency;
+            // Parse subnet CIDR
+            auto slash_pos = net.subnet.find('/');
+            if (slash_pos != std::string::npos) {
+                std::string subnet_ip = net.subnet.substr(0, slash_pos);
+                struct in_addr subnet_addr;
+                if (inet_pton(AF_INET, subnet_ip.c_str(), &subnet_addr) == 1) {
+                    config.subnet_ip = subnet_addr.s_addr;
+                }
+                config.subnet_mask = static_cast<uint8_t>(std::stoi(net.subnet.substr(slash_pos + 1)));
             }
         }
-        relays.push_back(relay);
-    }
-    config_json["relays"] = relays;
 
-    // Get subnet routes
-    boost::json::array subnet_routes;
-    auto all_routes = db->get_all_routes(netid);
-    for (const auto& route : all_routes) {
-        if (!route.enabled) continue;
-
-        auto gateway_node = db->get_node(route.node_id);
-        bool gateway_online = gateway_node && gateway_node->online;
-
-        boost::json::object route_obj;
-        route_obj["cidr"] = route.cidr;
-        route_obj["via_node_id"] = route.node_id;
-        route_obj["priority"] = route.priority;
-        route_obj["weight"] = route.weight;
-        route_obj["gateway_online"] = gateway_online;
-
-        if (gateway_node) {
-            route_obj["gateway_ip"] = gateway_node->virtual_ip;
+        // Get relay servers
+        auto servers = db->list_enabled_servers();
+        for (const auto& s : servers) {
+            wire::RelayInfo relay;
+            relay.server_id = s.id;
+            relay.name = s.name;
+            relay.region = s.region;
+            relay.url = s.url;
+            config.relays.push_back(relay);
         }
-        subnet_routes.push_back(route_obj);
+
+        // Get peer list
+        auto nodes = db->list_nodes(netid);
+        for (const auto& n : nodes) {
+            if (n.id == nid) continue;
+            if (!n.authorized) continue;
+
+            wire::PeerInfo peer;
+            peer.node_id = n.id;
+            peer.name = n.hostname;
+            peer.virtual_ip = n.virtual_ip;
+            peer.node_key_pub = n.node_key_pub;
+            peer.online = n.online;
+            config.peers.push_back(peer);
+        }
+
+        // Get subnet routes
+        auto all_routes = db->get_all_routes(netid);
+        for (const auto& route : all_routes) {
+            if (!route.enabled) continue;
+
+            wire::RouteInfo ri;
+            ri.from_cidr(route.cidr);
+            ri.gateway_node_id = route.node_id;
+            ri.priority = static_cast<uint16_t>(route.priority);
+            ri.weight = static_cast<uint16_t>(route.weight);
+            ri.enabled = route.enabled;
+            config.routes.push_back(ri);
+        }
+
+        auto config_binary = config.serialize_binary();
+        auto config_frame = wire::Frame::create(wire::MessageType::CONFIG, std::move(config_binary));
+        send_frame(config_frame);
+
+        LOG_DEBUG("WsControlSessionCoro: CONFIG sent ({} peers, {} relays, {} routes, {} bytes)",
+                  config.peers.size(), config.relays.size(), config.routes.size(),
+                  config_frame.payload.size());
     }
-    config_json["subnet_routes"] = subnet_routes;
-
-    LOG_DEBUG("WsControlSessionCoro: Sending config with {} peers, {} relays, {} routes",
-              peers.size(), relays.size(), subnet_routes.size());
-
-    auto frame = wire::create_json_frame(wire::MessageType::AUTH_RESPONSE, config_json);
-    send_frame(frame);
 }
 
 // ============================================================================

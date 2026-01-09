@@ -67,50 +67,99 @@ net::awaitable<void> ControlChannelCoro::on_connected() {
 }
 
 net::awaitable<std::optional<wire::Frame>> ControlChannelCoro::create_auth_frame() {
-    auto now = std::chrono::system_clock::now();
-    auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()).count();
-
-    boost::json::object auth_json;
-    auth_json["auth_type"] = static_cast<int>(auth_type_);
-    auth_json["timestamp"] = ts;
+    // Build AuthRequestPayload using binary format
+    wire::AuthRequestPayload payload;
+    payload.auth_type = auth_type_;
+    payload.machine_key = machine_key_pub_;
+    payload.node_key = node_key_pub_;
+    payload.timestamp = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
 
     // System info
     char hostname[256] = {0};
     gethostname(hostname, sizeof(hostname));
-    auth_json["hostname"] = hostname;
-    auth_json["version"] = "0.1.0";
+    payload.hostname = hostname;
+    payload.version = "0.1.0";
 
 #ifdef _WIN32
-    auth_json["os"] = "windows";
+    payload.os = "windows";
 #elif __linux__
-    auth_json["os"] = "linux";
+    payload.os = "linux";
 #elif __APPLE__
-    auth_json["os"] = "darwin";
+    payload.os = "darwin";
 #else
-    auth_json["os"] = "unknown";
+    payload.os = "unknown";
 #endif
 
 #if defined(__x86_64__) || defined(_M_X64)
-    auth_json["arch"] = "amd64";
+    payload.arch = "amd64";
 #elif defined(__aarch64__) || defined(_M_ARM64)
-    auth_json["arch"] = "arm64";
+    payload.arch = "arm64";
 #else
-    auth_json["arch"] = "unknown";
+    payload.arch = "unknown";
 #endif
 
+    // Auth-type specific data
     if (!auth_key_.empty()) {
-        auth_json["auth_key"] = auth_key_;
+        payload.auth_key = auth_key_;
     }
 
-    LOG_DEBUG("ControlChannelCoro: Creating auth frame");
-    co_return wire::create_json_frame(wire::MessageType::AUTH_REQUEST, auth_json);
+    // TODO: Sign the payload with machine_key_priv_
+    // For now, leave signature as zeros
+
+    // Serialize to binary
+    auto binary_payload = payload.serialize_binary();
+
+    LOG_DEBUG("ControlChannelCoro: Creating AUTH_REQUEST (binary, {} bytes, auth_type={})",
+              binary_payload.size(), static_cast<int>(auth_type_));
+
+    co_return wire::Frame::create(wire::MessageType::AUTH_REQUEST, std::move(binary_payload));
 }
 
 net::awaitable<bool> ControlChannelCoro::handle_auth_response(const wire::Frame& frame) {
+    LOG_DEBUG("ControlChannelCoro: Received AUTH_RESPONSE ({} bytes)", frame.payload.size());
+
+    // Try binary deserialization first
+    auto binary_result = wire::AuthResponsePayload::deserialize_binary(frame.payload);
+    if (binary_result) {
+        const auto& payload = *binary_result;
+        LOG_DEBUG("ControlChannelCoro: Parsed binary AUTH_RESPONSE (success={})", payload.success);
+
+        if (!payload.success) {
+            LOG_ERROR("ControlChannelCoro: Authentication failed: code={}, msg={}",
+                      payload.error_code, payload.error_message);
+            co_return false;
+        }
+
+        node_id_ = payload.node_id;
+        network_id_ = payload.network_id;
+        auth_token_ = payload.auth_token;
+        relay_token_ = payload.relay_token;
+
+        // Convert virtual_ip_int to string
+        if (payload.virtual_ip_int != 0) {
+            struct in_addr addr;
+            addr.s_addr = payload.virtual_ip_int;
+            char buf[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &addr, buf, sizeof(buf))) {
+                virtual_ip_ = buf;
+            }
+        } else if (!payload.virtual_ip.empty()) {
+            virtual_ip_ = payload.virtual_ip;
+        }
+
+        LOG_INFO("ControlChannelCoro: Authenticated as node {} ({})", node_id_, virtual_ip_);
+        co_return true;
+    }
+
+    // Fall back to JSON for backward compatibility
+    LOG_DEBUG("ControlChannelCoro: Binary parse failed (error={}), trying JSON",
+              static_cast<int>(binary_result.error()));
+
     auto json = frame.payload_json();
     if (json.is_null()) {
-        LOG_ERROR("ControlChannelCoro: Invalid auth response payload");
+        LOG_ERROR("ControlChannelCoro: Invalid auth response - not binary and not JSON");
         co_return false;
     }
 
@@ -139,11 +188,11 @@ net::awaitable<bool> ControlChannelCoro::handle_auth_response(const wire::Frame&
             relay_token_ = std::string(json.at("relay_token").as_string());
         }
 
-        LOG_INFO("ControlChannelCoro: Authenticated as node {} ({})", node_id_, virtual_ip_);
+        LOG_INFO("ControlChannelCoro: Authenticated as node {} ({}) [JSON]", node_id_, virtual_ip_);
         co_return true;
 
     } catch (const std::exception& e) {
-        LOG_ERROR("ControlChannelCoro: Failed to parse auth response: {}", e.what());
+        LOG_ERROR("ControlChannelCoro: Failed to parse JSON auth response: {}", e.what());
         co_return false;
     }
 }
@@ -195,98 +244,157 @@ net::awaitable<void> ControlChannelCoro::on_disconnected(const std::string& reas
 // ============================================================================
 
 void ControlChannelCoro::handle_config(const wire::Frame& frame) {
-    auto json = frame.payload_json();
-    if (json.is_null()) {
-        LOG_ERROR("ControlChannelCoro: Invalid config payload");
-        return;
+    LOG_DEBUG("ControlChannelCoro: Received CONFIG ({} bytes)", frame.payload.size());
+
+    ConfigUpdate update;
+    update.auth_token = auth_token_;
+    update.relay_token = relay_token_;
+    update.timestamp = std::chrono::system_clock::now();
+
+    // Try binary deserialization first
+    auto binary_result = wire::ConfigPayload::deserialize_binary(frame.payload);
+    if (binary_result) {
+        const auto& config = *binary_result;
+        LOG_DEBUG("ControlChannelCoro: Parsed binary CONFIG (version={}, {} peers, {} relays, {} routes)",
+                  config.version, config.peers.size(), config.relays.size(), config.routes.size());
+
+        update.version = config.version;
+        update.network.network_id = config.network_id;
+        update.network.network_name = config.network_name;
+        update.network.cidr = config.subnet;
+
+        // Convert peers
+        for (const auto& p : config.peers) {
+            PeerInfo peer;
+            peer.node_id = p.node_id;
+            peer.hostname = p.name;  // wire::PeerInfo uses 'name'
+            peer.virtual_ip = p.virtual_ip;
+            peer.online = p.online;
+            update.peers.push_back(std::move(peer));
+        }
+
+        // Convert relays
+        for (const auto& r : config.relays) {
+            RelayServerInfo relay;
+            relay.id = r.server_id;
+            relay.name = r.name;
+            relay.region = r.region;
+            relay.url = r.url;
+            update.relays.push_back(std::move(relay));
+        }
+
+        // Convert routes
+        for (const auto& r : config.routes) {
+            SubnetRouteInfo route;
+            route.cidr = r.to_cidr();
+            route.via_node_id = r.gateway_node_id;
+            route.priority = r.priority;
+            update.subnet_routes.push_back(std::move(route));
+        }
+
+        // Update tokens if present
+        if (!config.new_relay_token.empty()) {
+            relay_token_ = config.new_relay_token;
+            update.relay_token = relay_token_;
+        }
+    } else {
+        // Fall back to JSON
+        LOG_DEBUG("ControlChannelCoro: Binary CONFIG parse failed (error={}), trying JSON",
+                  static_cast<int>(binary_result.error()));
+
+        auto json = frame.payload_json();
+        if (json.is_null()) {
+            LOG_ERROR("ControlChannelCoro: Invalid CONFIG - not binary and not JSON");
+            return;
+        }
+
+        try {
+            if (json.as_object().contains("version")) {
+                update.version = static_cast<uint64_t>(json.at("version").as_int64());
+            }
+            if (json.as_object().contains("network_id")) {
+                update.network.network_id = static_cast<uint32_t>(json.at("network_id").as_int64());
+            }
+            if (json.as_object().contains("network_name")) {
+                update.network.network_name = std::string(json.at("network_name").as_string());
+            }
+            if (json.as_object().contains("subnet")) {
+                update.network.cidr = std::string(json.at("subnet").as_string());
+            }
+
+            if (json.as_object().contains("peers") && json.at("peers").is_array()) {
+                for (const auto& peer_json : json.at("peers").as_array()) {
+                    PeerInfo peer;
+                    peer.node_id = static_cast<uint32_t>(peer_json.at("node_id").as_int64());
+                    if (peer_json.as_object().contains("hostname")) {
+                        peer.hostname = std::string(peer_json.at("hostname").as_string());
+                    }
+                    if (peer_json.as_object().contains("virtual_ip")) {
+                        peer.virtual_ip = std::string(peer_json.at("virtual_ip").as_string());
+                    }
+                    if (peer_json.as_object().contains("online")) {
+                        peer.online = peer_json.at("online").as_bool();
+                    }
+                    update.peers.push_back(std::move(peer));
+                }
+            }
+
+            if (json.as_object().contains("relays") && json.at("relays").is_array()) {
+                for (const auto& relay_json : json.at("relays").as_array()) {
+                    RelayServerInfo relay;
+                    relay.id = static_cast<uint32_t>(relay_json.at("server_id").as_int64());
+                    if (relay_json.as_object().contains("name")) {
+                        relay.name = std::string(relay_json.at("name").as_string());
+                    }
+                    if (relay_json.as_object().contains("region")) {
+                        relay.region = std::string(relay_json.at("region").as_string());
+                    }
+                    if (relay_json.as_object().contains("url")) {
+                        relay.url = std::string(relay_json.at("url").as_string());
+                    }
+                    update.relays.push_back(std::move(relay));
+                }
+            }
+
+            if (json.as_object().contains("routes") && json.at("routes").is_array()) {
+                for (const auto& route_json : json.at("routes").as_array()) {
+                    SubnetRouteInfo route;
+                    if (route_json.as_object().contains("cidr")) {
+                        route.cidr = std::string(route_json.at("cidr").as_string());
+                    }
+                    if (route_json.as_object().contains("gateway_node_id")) {
+                        route.via_node_id = static_cast<uint32_t>(route_json.at("gateway_node_id").as_int64());
+                    }
+                    if (route_json.as_object().contains("priority")) {
+                        route.priority = static_cast<uint16_t>(route_json.at("priority").as_int64());
+                    }
+                    update.subnet_routes.push_back(std::move(route));
+                }
+            }
+
+            if (json.as_object().contains("relay_token")) {
+                relay_token_ = std::string(json.at("relay_token").as_string());
+                update.relay_token = relay_token_;
+            }
+
+            LOG_DEBUG("ControlChannelCoro: Parsed JSON CONFIG [fallback]");
+        } catch (const std::exception& e) {
+            LOG_ERROR("ControlChannelCoro: Failed to parse JSON CONFIG: {}", e.what());
+            return;
+        }
     }
 
-    try {
-        ConfigUpdate update;
+    network_config_ = update.network;
+    config_version_ = update.version;
 
-        if (json.as_object().contains("version")) {
-            update.version = static_cast<uint64_t>(json.at("version").as_int64());
-        }
+    LOG_INFO("ControlChannelCoro: Config received (version={}, {} peers, {} relays, {} routes)",
+             update.version, update.peers.size(), update.relays.size(), update.subnet_routes.size());
 
-        if (json.as_object().contains("network_id")) {
-            update.network.network_id = static_cast<uint32_t>(json.at("network_id").as_int64());
-        }
-        if (json.as_object().contains("network_name")) {
-            update.network.network_name = std::string(json.at("network_name").as_string());
-        }
-        if (json.as_object().contains("subnet")) {
-            update.network.cidr = std::string(json.at("subnet").as_string());
-        }
-
-        if (json.as_object().contains("peers") && json.at("peers").is_array()) {
-            for (const auto& peer_json : json.at("peers").as_array()) {
-                PeerInfo peer;
-                peer.node_id = static_cast<uint32_t>(peer_json.at("node_id").as_int64());
-                if (peer_json.as_object().contains("name")) {
-                    peer.hostname = std::string(peer_json.at("name").as_string());
-                }
-                if (peer_json.as_object().contains("virtual_ip")) {
-                    peer.virtual_ip = std::string(peer_json.at("virtual_ip").as_string());
-                }
-                if (peer_json.as_object().contains("online")) {
-                    peer.online = peer_json.at("online").as_bool();
-                }
-                update.peers.push_back(std::move(peer));
-            }
-        }
-
-        if (json.as_object().contains("relays") && json.at("relays").is_array()) {
-            for (const auto& relay_json : json.at("relays").as_array()) {
-                RelayServerInfo relay;
-                relay.id = static_cast<uint32_t>(relay_json.at("server_id").as_int64());
-                if (relay_json.as_object().contains("name")) {
-                    relay.name = std::string(relay_json.at("name").as_string());
-                }
-                if (relay_json.as_object().contains("region")) {
-                    relay.region = std::string(relay_json.at("region").as_string());
-                }
-                if (relay_json.as_object().contains("url")) {
-                    relay.url = std::string(relay_json.at("url").as_string());
-                }
-                update.relays.push_back(std::move(relay));
-            }
-        }
-
-        if (json.as_object().contains("routes") && json.at("routes").is_array()) {
-            for (const auto& route_json : json.at("routes").as_array()) {
-                SubnetRouteInfo route;
-                if (route_json.as_object().contains("cidr")) {
-                    route.cidr = std::string(route_json.at("cidr").as_string());
-                }
-                if (route_json.as_object().contains("gateway_node_id")) {
-                    route.via_node_id = static_cast<uint32_t>(route_json.at("gateway_node_id").as_int64());
-                }
-                if (route_json.as_object().contains("priority")) {
-                    route.priority = static_cast<uint16_t>(route_json.at("priority").as_int64());
-                }
-                update.subnet_routes.push_back(std::move(route));
-            }
-        }
-
-        update.auth_token = auth_token_;
-        if (json.as_object().contains("relay_token")) {
-            relay_token_ = std::string(json.at("relay_token").as_string());
-        }
-        update.relay_token = relay_token_;
-        update.timestamp = std::chrono::system_clock::now();
-
-        network_config_ = update.network;
-        config_version_ = update.version;
-
-        if (control_callbacks_.on_config_update) {
-            control_callbacks_.on_config_update(update);
-        }
-
-        send_config_ack(update.version);
-
-    } catch (const std::exception& e) {
-        LOG_ERROR("ControlChannelCoro: Failed to parse config: {}", e.what());
+    if (control_callbacks_.on_config_update) {
+        control_callbacks_.on_config_update(update);
     }
+
+    send_config_ack(update.version);
 }
 
 void ControlChannelCoro::handle_config_update(const wire::Frame& frame) {
