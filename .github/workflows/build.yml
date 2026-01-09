@@ -30,16 +30,11 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    # Restore build cache (FetchContent sources + compiled deps)
-    - name: Restore build cache
-      id: cache-build
-      uses: actions/cache/restore@v4
+    # Cache entire build directory
+    - name: Cache build
+      uses: actions/cache@v4
       with:
-        path: |
-          .deps
-          build/_deps
-          build/CMakeCache.txt
-          build/CMakeFiles
+        path: build
         key: build-linux-${{ hashFiles('third_party/*.cmake') }}-${{ github.sha }}
         restore-keys: |
           build-linux-${{ hashFiles('third_party/*.cmake') }}-
@@ -58,19 +53,6 @@ jobs:
 
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
-
-    # Save build cache after successful build
-    - name: Save build cache
-      if: success()
-      uses: actions/cache/save@v4
-      continue-on-error: true
-      with:
-        path: |
-          .deps
-          build/_deps
-          build/CMakeCache.txt
-          build/CMakeFiles
-        key: build-linux-${{ hashFiles('third_party/*.cmake') }}-${{ github.sha }}
 
     - name: Strip Binaries
       run: |
@@ -133,16 +115,11 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    # Restore build cache (FetchContent sources + compiled deps)
-    - name: Restore build cache
-      id: cache-build
-      uses: actions/cache/restore@v4
+    # Cache entire build directory
+    - name: Cache build
+      uses: actions/cache@v4
       with:
-        path: |
-          .deps
-          build/_deps
-          build/CMakeCache.txt
-          build/CMakeFiles
+        path: build
         key: build-windows-mingw-${{ hashFiles('third_party/*.cmake') }}-${{ github.sha }}
         restore-keys: |
           build-windows-mingw-${{ hashFiles('third_party/*.cmake') }}-
@@ -174,19 +151,6 @@ jobs:
 
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
-
-    # Save build cache after successful build
-    - name: Save build cache
-      if: success()
-      uses: actions/cache/save@v4
-      continue-on-error: true
-      with:
-        path: |
-          .deps
-          build/_deps
-          build/CMakeCache.txt
-          build/CMakeFiles
-        key: build-windows-mingw-${{ hashFiles('third_party/*.cmake') }}-${{ github.sha }}
 
     - name: Strip Binaries
       run: |
