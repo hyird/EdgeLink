@@ -67,9 +67,8 @@ jobs:
 
     # Step 3: Save source cache after configure (sources are downloaded during configure)
     - name: Save FetchContent sources cache
-      if: steps.cache-sources.outputs.cache-hit != 'true'
+      if: steps.cache-sources.outputs.cache-hit != 'true' && hashFiles('.deps/**') != ''
       uses: actions/cache/save@v4
-      continue-on-error: true
       with:
         path: .deps
         key: sources-linux-${{ hashFiles('third_party/*.cmake') }}
@@ -79,9 +78,8 @@ jobs:
 
     # Step 4: Save build cache after successful build
     - name: Save build artifacts cache
-      if: success()
+      if: success() && hashFiles('build/_deps/**') != ''
       uses: actions/cache/save@v4
-      continue-on-error: true
       with:
         path: |
           build/_deps
@@ -200,9 +198,8 @@ jobs:
 
     # Step 3: Save source cache after configure
     - name: Save FetchContent sources cache
-      if: steps.cache-sources.outputs.cache-hit != 'true'
+      if: steps.cache-sources.outputs.cache-hit != 'true' && hashFiles('.deps/**') != ''
       uses: actions/cache/save@v4
-      continue-on-error: true
       with:
         path: .deps
         key: sources-windows-mingw-${{ hashFiles('third_party/*.cmake') }}
@@ -212,9 +209,8 @@ jobs:
 
     # Step 4: Save build cache after successful build
     - name: Save build artifacts cache
-      if: success()
+      if: success() && hashFiles('build/_deps/**') != ''
       uses: actions/cache/save@v4
-      continue-on-error: true
       with:
         path: |
           build/_deps
