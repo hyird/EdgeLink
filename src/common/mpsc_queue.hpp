@@ -5,7 +5,6 @@
 #include <vector>
 #include <optional>
 #include <cstdint>
-#include <new>  // for hardware_destructive_interference_size
 
 namespace edgelink {
 
@@ -158,12 +157,8 @@ public:
 private:
     static constexpr size_t kMask = Capacity - 1;
 
-    // Cache line padding to avoid false sharing
-#ifdef __cpp_lib_hardware_interference_size
-    static constexpr size_t kCacheLineSize = std::hardware_destructive_interference_size;
-#else
+    // Cache line padding to avoid false sharing (64 bytes is standard for x86/x64 and ARM)
     static constexpr size_t kCacheLineSize = 64;
-#endif
 
     struct Cell {
         std::atomic<size_t> sequence;
