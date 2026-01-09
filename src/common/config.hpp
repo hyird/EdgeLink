@@ -84,8 +84,8 @@ struct BuiltinSTUNConfig {
 namespace paths {
     constexpr const char* WS_CONTROL = "/api/v1/control";  // Client -> Controller
     constexpr const char* WS_SERVER = "/api/v1/server";    // Server -> Controller
-    constexpr const char* WS_RELAY = "/relay";             // Client -> Relay (data)
-    constexpr const char* WS_MESH = "/mesh";               // Relay <-> Relay (mesh)
+    constexpr const char* WS_RELAY = "/api/v1/relay";      // Client -> Relay (data)
+    constexpr const char* WS_MESH = "/api/v1/mesh";        // Relay <-> Relay (mesh)
 }
 
 struct ControllerConfig {
