@@ -48,11 +48,21 @@ void IOContextPool::run() {
     }
 
     LOG_INFO("IOContextPool: Started {} worker threads", contexts_.size());
+
+    // Block until all threads complete (will happen when stop() is called)
+    for (auto& ctx : contexts_) {
+        if (ctx.thread.joinable()) {
+            ctx.thread.join();
+        }
+    }
+
+    stopped_.store(true, std::memory_order_release);
+    running_.store(false, std::memory_order_release);
 }
 
 void IOContextPool::stop() {
-    if (!running_.exchange(false, std::memory_order_acq_rel)) {
-        return;  // Not running
+    if (stopped_.load(std::memory_order_acquire)) {
+        return;  // Already stopped
     }
 
     // Release work guards to allow io_contexts to finish
@@ -69,14 +79,7 @@ void IOContextPool::stop() {
         }
     }
 
-    // Join all threads
-    for (auto& ctx : contexts_) {
-        if (ctx.thread.joinable()) {
-            ctx.thread.join();
-        }
-    }
-
-    stopped_.store(true, std::memory_order_release);
+    // Note: threads are joined in run() - no double join needed
     LOG_INFO("IOContextPool: Stopped");
 }
 
