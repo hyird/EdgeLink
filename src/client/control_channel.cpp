@@ -376,8 +376,52 @@ void ControlChannel::handle_p2p_init(const wire::Frame& frame) {
 }
 
 void ControlChannel::handle_route_update(const wire::Frame& frame) {
-    // TODO: Handle route updates
     LOG_DEBUG("ControlChannel: Received route update");
+
+    // Try binary deserialization first
+    auto result = wire::RouteUpdatePayload::deserialize_binary(frame.payload);
+    if (!result) {
+        // Fall back to JSON
+        auto json = frame.payload_json();
+        if (!json.is_null()) {
+            result = wire::RouteUpdatePayload::from_json(json);
+        }
+    }
+
+    if (!result) {
+        LOG_WARN("ControlChannel: Invalid route update payload");
+        return;
+    }
+
+    const auto& update = *result;
+    LOG_DEBUG("ControlChannel: Route update version={}, {} changes",
+              update.version, update.changes.size());
+
+    // Process route changes - log them for now
+    // The actual route table is managed by RouteManager which will be notified via callback
+    for (const auto& change : update.changes) {
+        switch (change.action) {
+            case wire::RouteUpdatePayload::Action::ADD:
+                LOG_DEBUG("ControlChannel: ADD route {} via node {}",
+                          change.route.to_cidr(), change.route.gateway_node_id);
+                break;
+
+            case wire::RouteUpdatePayload::Action::UPDATE:
+                LOG_DEBUG("ControlChannel: UPDATE route {} via node {}",
+                          change.route.to_cidr(), change.route.gateway_node_id);
+                break;
+
+            case wire::RouteUpdatePayload::Action::REMOVE:
+                LOG_DEBUG("ControlChannel: REMOVE route {} via node {}",
+                          change.route.to_cidr(), change.route.gateway_node_id);
+                break;
+        }
+    }
+
+    // Notify callback
+    if (control_callbacks_.on_route_update) {
+        control_callbacks_.on_route_update(update);
+    }
 }
 
 void ControlChannel::handle_error(const wire::Frame& frame) {

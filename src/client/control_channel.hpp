@@ -130,6 +130,7 @@ struct ControlCallbacks {
     std::function<void(const std::string& old_ip,
                        const std::string& new_ip,
                        const std::string& reason)> on_ip_change;
+    std::function<void(const wire::RouteUpdatePayload&)> on_route_update;
 };
 
 // ============================================================================

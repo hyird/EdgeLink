@@ -78,6 +78,7 @@ include(third_party/CMakeLists.txt)
 add_library(edgelink-common STATIC
     src/common/protocol.cpp
     src/common/frame.cpp
+    src/common/binary_codec.cpp
     src/common/config.cpp
     src/common/log.cpp
     src/common/jwt.cpp
@@ -104,6 +105,7 @@ target_link_libraries(edgelink-common PUBLIC
     nlohmann_json::nlohmann_json
     unofficial-sodium::sodium
     jwt-cpp::jwt-cpp
+    lz4::lz4
     Threads::Threads
 )
 

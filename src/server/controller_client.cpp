@@ -202,31 +202,38 @@ void ControllerClient::handle_relay_list(const wire::Frame& frame) {
 }
 
 void ControllerClient::handle_blacklist(const wire::Frame& frame) {
-    auto json_result = wire::parse_json_payload(frame);
-    if (!json_result) {
+    // Try binary deserialization first
+    auto result = wire::ServerBlacklistPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        // Fall back to JSON
+        auto json_result = wire::parse_json_payload(frame);
+        if (json_result) {
+            result = wire::ServerBlacklistPayload::from_json(*json_result);
+        }
+    }
+
+    if (!result) {
         LOG_WARN("ControllerClient: Failed to parse blacklist update");
         return;
     }
 
-    auto& json = json_result->as_object();
-    bool full_sync = json.contains("full_sync") && json.at("full_sync").as_bool();
+    const auto& payload = *result;
     std::vector<std::pair<std::string, int64_t>> entries;
+    for (const auto& e : payload.entries) {
+        entries.emplace_back(e.jti, e.expires_at);
+    }
 
-    if (json.contains("entries")) {
-        for (const auto& entry : json.at("entries").as_array()) {
-            const auto& e = entry.as_object();
-            std::string jti = e.at("jti").as_string().c_str();
-            int64_t expires_at = e.at("expires_at").as_int64();
-            entries.emplace_back(jti, expires_at);
-        }
+    // Update relay server's blacklist directly
+    for (const auto& [jti, expires_at] : entries) {
+        server_.session_manager()->add_to_blacklist(jti, expires_at);
     }
 
     if (blacklist_callback_) {
-        blacklist_callback_(full_sync, entries);
+        blacklist_callback_(payload.full_sync, entries);
     }
 
     LOG_DEBUG("ControllerClient: Updated token blacklist: {} entries (full_sync={})",
-              entries.size(), full_sync);
+              entries.size(), payload.full_sync);
 }
 
 void ControllerClient::handle_error(const wire::Frame& frame) {

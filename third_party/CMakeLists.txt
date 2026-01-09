@@ -29,25 +29,32 @@ if(BUILD_CONTROLLER)
 endif()
 
 # =============================================================================
-# 2. OpenSSL (needed by jwt-cpp and Boost.Beast)
+# 2. LZ4 (fast compression for frame payloads)
 # =============================================================================
-message(STATUS "Fetching OpenSSL...")
-include(${CMAKE_CURRENT_LIST_DIR}/openssl.cmake)
+message(STATUS "Fetching LZ4...")
+include(${CMAKE_CURRENT_LIST_DIR}/lz4.cmake)
 
 # =============================================================================
-# 3. libsodium
+# 3. BoringSSL (needed by jwt-cpp and Boost.Beast)
+#    BoringSSL is Google's fork of OpenSSL with better security and CMake support
+# =============================================================================
+message(STATUS "Fetching BoringSSL...")
+include(${CMAKE_CURRENT_LIST_DIR}/boringssl.cmake)
+
+# =============================================================================
+# 4. libsodium
 # =============================================================================
 message(STATUS "Fetching libsodium...")
 include(${CMAKE_CURRENT_LIST_DIR}/libsodium.cmake)
 
 # =============================================================================
-# 4. jwt-cpp (depends on nlohmann-json, OpenSSL)
+# 5. jwt-cpp (depends on nlohmann-json, BoringSSL for OpenSSL-compatible API)
 # =============================================================================
 message(STATUS "Fetching jwt-cpp...")
 include(${CMAKE_CURRENT_LIST_DIR}/jwt_cpp.cmake)
 
 # =============================================================================
-# 5. Boost (includes Beast for WebSocket support)
+# 6. Boost (includes Beast for WebSocket support)
 # =============================================================================
 message(STATUS "Fetching Boost...")
 include(${CMAKE_CURRENT_LIST_DIR}/boost.cmake)

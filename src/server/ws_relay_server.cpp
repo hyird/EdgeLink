@@ -141,9 +141,14 @@ private:
     void handle_relay_auth(const boost::json::object& payload);
     void handle_data(const wire::Frame& frame);
     void handle_ping(const boost::json::object& payload);
+    void handle_mesh_forward(const wire::Frame& frame);
+    void handle_mesh_hello(const wire::Frame& frame);
+    void handle_mesh_ping(const wire::Frame& frame);
 
     void send_auth_response(bool success, uint32_t node_id, const std::string& error = "");
     void send_pong(uint64_t timestamp);
+    void send_mesh_pong(uint64_t timestamp, uint32_t sequence);
+    void send_mesh_hello_ack(bool success, const std::string& error = "");
     void send_error(const std::string& code, const std::string& message);
 
     WsRelayServer* server_;
@@ -316,6 +321,18 @@ void WsRelayClientSession::handle_frame(const wire::Frame& frame) {
             break;
         }
 
+        case wire::MessageType::MESH_FORWARD:
+            handle_mesh_forward(frame);
+            break;
+
+        case wire::MessageType::MESH_HELLO:
+            handle_mesh_hello(frame);
+            break;
+
+        case wire::MessageType::MESH_PING:
+            handle_mesh_ping(frame);
+            break;
+
         default:
             LOG_DEBUG("WsRelayClientSession: Unhandled message type: {}",
                       static_cast<int>(frame.header.type));
@@ -377,6 +394,115 @@ void WsRelayClientSession::handle_ping(const boost::json::object& payload) {
         timestamp = static_cast<uint64_t>(payload.at("timestamp").as_int64());
     }
     send_pong(timestamp);
+}
+
+void WsRelayClientSession::handle_mesh_forward(const wire::Frame& frame) {
+    // Parse MESH_FORWARD payload
+    auto result = wire::MeshForwardPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        LOG_WARN("WsRelayClientSession: Invalid MESH_FORWARD payload");
+        return;
+    }
+
+    const auto& mesh_payload = *result;
+
+    // Check TTL
+    if (mesh_payload.ttl == 0) {
+        LOG_DEBUG("WsRelayClientSession: MESH_FORWARD TTL expired for node {}",
+                  mesh_payload.dst_node_id);
+        return;
+    }
+
+    // Check if destination is connected locally
+    void* session_ptr = server_->session_manager()->get_client_session(mesh_payload.dst_node_id);
+    if (session_ptr) {
+        // Deliver to local node
+        auto* dst_session = static_cast<WsRelayClientSession*>(session_ptr);
+        dst_session->send(mesh_payload.data);
+        server_->stats().bytes_forwarded += mesh_payload.data.size();
+        server_->stats().packets_forwarded++;
+        LOG_DEBUG("WsRelayClientSession: Delivered MESH_FORWARD to local node {}",
+                  mesh_payload.dst_node_id);
+        return;
+    }
+
+    // Need to forward to another relay
+    auto relay_ids = server_->session_manager()->get_node_relay_locations(mesh_payload.dst_node_id);
+    for (uint32_t relay_id : relay_ids) {
+        // Don't forward to source relay or ourselves
+        if (relay_id == mesh_payload.src_relay_id || relay_id == server_->server_id()) continue;
+
+        void* mesh_session_ptr = server_->session_manager()->get_mesh_session(relay_id);
+        if (mesh_session_ptr) {
+            // Create new MESH_FORWARD with decremented TTL
+            wire::MeshForwardPayload fwd_payload;
+            fwd_payload.src_relay_id = server_->server_id();
+            fwd_payload.dst_node_id = mesh_payload.dst_node_id;
+            fwd_payload.ttl = mesh_payload.ttl - 1;
+            fwd_payload.data = mesh_payload.data;
+
+            auto payload_bytes = fwd_payload.serialize_binary();
+            auto fwd_frame = wire::Frame::create(
+                wire::MessageType::MESH_FORWARD,
+                std::move(payload_bytes));
+
+            auto* relay_session = static_cast<WsRelayClientSession*>(mesh_session_ptr);
+            relay_session->send(fwd_frame.serialize());
+
+            LOG_DEBUG("WsRelayClientSession: Re-forwarded MESH_FORWARD to relay {} (TTL={})",
+                      relay_id, fwd_payload.ttl);
+            return;
+        }
+    }
+
+    LOG_DEBUG("WsRelayClientSession: Cannot forward MESH_FORWARD for node {} - no route",
+              mesh_payload.dst_node_id);
+}
+
+void WsRelayClientSession::handle_mesh_hello(const wire::Frame& frame) {
+    auto result = wire::MeshHelloPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        // Try JSON fallback
+        auto json_result = wire::parse_json_payload(frame);
+        if (json_result) {
+            result = wire::MeshHelloPayload::from_json(*json_result);
+        }
+    }
+
+    if (!result) {
+        LOG_WARN("WsRelayClientSession: Invalid MESH_HELLO payload");
+        send_mesh_hello_ack(false, "Invalid payload");
+        return;
+    }
+
+    const auto& hello = *result;
+
+    // TODO: Validate server_token with controller
+    LOG_INFO("WsRelayClientSession: MESH_HELLO from server {} (region: {})",
+             hello.server_id, hello.region);
+
+    // Register mesh session
+    server_->session_manager()->add_mesh_session(hello.server_id, this);
+
+    // Send acknowledgment
+    send_mesh_hello_ack(true);
+}
+
+void WsRelayClientSession::handle_mesh_ping(const wire::Frame& frame) {
+    auto result = wire::MeshPingPayload::deserialize_binary(frame.payload);
+    if (!result) {
+        auto json_result = wire::parse_json_payload(frame);
+        if (json_result) {
+            result = wire::MeshPingPayload::from_json(*json_result);
+        }
+    }
+
+    if (!result) {
+        LOG_WARN("WsRelayClientSession: Invalid MESH_PING payload");
+        return;
+    }
+
+    send_mesh_pong(result->timestamp, result->sequence);
 }
 
 void WsRelayClientSession::send(const std::vector<uint8_t>& data) {
@@ -444,6 +570,29 @@ void WsRelayClientSession::send_pong(uint64_t timestamp) {
     payload["timestamp"] = static_cast<int64_t>(timestamp);
 
     auto frame = wire::create_json_frame(wire::MessageType::PONG, payload);
+    send(frame.serialize());
+}
+
+void WsRelayClientSession::send_mesh_pong(uint64_t timestamp, uint32_t sequence) {
+    wire::MeshPingPayload pong_payload;
+    pong_payload.timestamp = timestamp;
+    pong_payload.sequence = sequence;
+
+    auto payload_bytes = pong_payload.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::MESH_PONG, std::move(payload_bytes));
+    send(frame.serialize());
+}
+
+void WsRelayClientSession::send_mesh_hello_ack(bool success, const std::string& error) {
+    wire::MeshHelloAckPayload ack;
+    ack.success = success;
+    ack.server_id = server_->server_id();
+    ack.region = "default";  // TODO: Get from config
+    ack.capabilities = wire::ServerCapability::RELAY;
+    ack.error_message = error;
+
+    auto payload_bytes = ack.serialize_binary();
+    auto frame = wire::Frame::create(wire::MessageType::MESH_HELLO_ACK, std::move(payload_bytes));
     send(frame.serialize());
 }
 
@@ -575,8 +724,37 @@ bool WsRelayServer::forward_data(uint32_t src_node, uint32_t dst_node,
     auto relay_ids = session_manager_.get_node_relay_locations(dst_node);
     if (!relay_ids.empty()) {
         // Forward via mesh to another relay
-        // TODO: Implement mesh forwarding
-        LOG_DEBUG("WsRelayServer: Node {} is on relay {}, mesh forwarding not yet implemented",
+        for (uint32_t relay_id : relay_ids) {
+            // Don't forward to ourselves
+            if (relay_id == server_id_) continue;
+
+            void* mesh_session_ptr = session_manager_.get_mesh_session(relay_id);
+            if (mesh_session_ptr) {
+                // Create MESH_FORWARD frame
+                wire::MeshForwardPayload mesh_payload;
+                mesh_payload.src_relay_id = server_id_;
+                mesh_payload.dst_node_id = dst_node;
+                mesh_payload.ttl = 3;  // Max 3 hops
+                mesh_payload.data = data;
+
+                auto payload_bytes = mesh_payload.serialize_binary();
+                auto frame = wire::Frame::create(
+                    wire::MessageType::MESH_FORWARD,
+                    std::move(payload_bytes));
+
+                auto* mesh_session = static_cast<WsRelayClientSession*>(mesh_session_ptr);
+                mesh_session->send(frame.serialize());
+
+                stats_.bytes_forwarded += data.size();
+                stats_.packets_forwarded++;
+
+                LOG_DEBUG("WsRelayServer: Forwarded data for node {} via mesh to relay {}",
+                          dst_node, relay_id);
+                return true;
+            }
+        }
+
+        LOG_DEBUG("WsRelayServer: Node {} is on relay {} but no mesh connection available",
                   dst_node, relay_ids[0]);
     }
 
