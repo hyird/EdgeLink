@@ -1078,11 +1078,8 @@ void Client::log_thread_stats() {
 
     // Log P2P manager stats
     if (p2p_manager_) {
-        auto p2p_stats = p2p_manager_->get_stats();
-        LOG_INFO("P2P Stats: connections={}, packets_sent={}, packets_recv={}",
-                 p2p_stats.active_connections,
-                 p2p_stats.packets_sent,
-                 p2p_stats.packets_received);
+        auto connected_peers = p2p_manager_->get_connected_peers();
+        LOG_INFO("P2P Stats: {} peers connected", connected_peers.size());
     }
 
     // Log Relay manager stats
