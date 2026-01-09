@@ -46,6 +46,10 @@ void WsSessionCoro::close() {
     write_signal_.cancel();
 }
 
+void WsSessionCoro::set_upgrade_request(HttpRequest req) {
+    upgrade_request_ = std::move(req);
+}
+
 void WsSessionCoro::send_binary(std::vector<uint8_t> data) {
     enqueue_send(std::move(data), false);
 }
@@ -95,7 +99,13 @@ net::awaitable<void> WsSessionCoro::run_session() {
         }));
 
         // Accept WebSocket handshake
-        co_await ws_.async_accept(net::use_awaitable);
+        // If we have a pre-read HTTP request, use async_accept(req)
+        // Otherwise, read the HTTP request ourselves with async_accept()
+        if (upgrade_request_) {
+            co_await ws_.async_accept(*upgrade_request_, net::use_awaitable);
+        } else {
+            co_await ws_.async_accept(net::use_awaitable);
+        }
 
         running_.store(true, std::memory_order_release);
         LOG_DEBUG("WsSessionCoro: Connection accepted from {}", remote_address());

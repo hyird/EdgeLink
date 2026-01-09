@@ -196,6 +196,9 @@ net::awaitable<void> WsServerCoro::handle_connection(tcp::socket socket, size_t 
 
         active_sessions_.fetch_add(1, std::memory_order_relaxed);
 
+        // Pass the pre-read HTTP request to the session
+        session->set_upgrade_request(std::move(req));
+
         // Start the session
         session->start();
 

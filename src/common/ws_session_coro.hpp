@@ -6,19 +6,25 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
 #include <boost/beast/websocket.hpp>
 #include <memory>
 #include <string>
 #include <queue>
 #include <atomic>
 #include <cstdint>
+#include <optional>
 
 namespace edgelink {
 
 namespace net = boost::asio;
 namespace beast = boost::beast;
+namespace http = beast::http;
 namespace websocket = beast::websocket;
 using tcp = boost::asio::ip::tcp;
+
+// HTTP request type for WebSocket upgrade
+using HttpRequest = http::request<http::string_body>;
 
 /**
  * WsSessionCoro - Coroutine-based WebSocket Session Base Class
@@ -57,6 +63,14 @@ public:
      * Spawns the main coroutine which handles the WebSocket lifecycle.
      */
     void start();
+
+    /**
+     * Set a pre-read HTTP upgrade request.
+     * Call this before start() when the HTTP request has already been read
+     * (e.g., by the server for path routing).
+     * The session will use async_accept(req) instead of async_accept().
+     */
+    void set_upgrade_request(HttpRequest req);
 
     /**
      * Request graceful close.
@@ -142,6 +156,9 @@ private:
 
     // WebSocket stream
     websocket::stream<tcp::socket> ws_;
+
+    // Pre-read HTTP upgrade request (set by server before start())
+    std::optional<HttpRequest> upgrade_request_;
 
     // Write queue
     struct WriteItem {
