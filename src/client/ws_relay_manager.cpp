@@ -33,8 +33,8 @@ void WsRelayConnection::do_authenticate() {
 }
 
 void WsRelayConnection::process_frame(const wire::Frame& frame) {
-    // Handle auth response specially
-    if (state() == State::AUTHENTICATING && frame.header.type == wire::MessageType::AUTH_RESPONSE) {
+    // Handle auth response specially (server sends RELAY_AUTH_RESP)
+    if (state() == State::AUTHENTICATING && frame.header.type == wire::MessageType::RELAY_AUTH_RESP) {
         auto result = wire::AuthResponsePayload::deserialize_binary(frame.payload);
         if (!result) {
             LOG_WARN("WsRelayConnection: Invalid AUTH_RESPONSE: error={}",

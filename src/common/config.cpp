@@ -248,7 +248,9 @@ std::optional<ControllerConfig> ControllerConfig::from_json(const boost::json::v
             const auto& stun = obj.at("builtin_stun").as_object();
             if (stun.contains("enabled")) cfg.builtin_stun.enabled = stun.at("enabled").as_bool();
             if (stun.contains("listen")) cfg.builtin_stun.listen = stun.at("listen").as_string().c_str();
+            // Support both "ip" and "external_ip" for backwards compatibility
             if (stun.contains("ip")) cfg.builtin_stun.ip = stun.at("ip").as_string().c_str();
+            else if (stun.contains("external_ip")) cfg.builtin_stun.ip = stun.at("external_ip").as_string().c_str();
             if (stun.contains("secondary_ip")) cfg.builtin_stun.secondary_ip = stun.at("secondary_ip").as_string().c_str();
         }
         
