@@ -6,6 +6,9 @@
 
 include(FetchContent)
 
+# Fix compatibility with older CMakeLists.txt in submodules (c-ares, etc.)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+
 # =============================================================================
 # gRPC Configuration Options
 # =============================================================================
