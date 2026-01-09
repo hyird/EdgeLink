@@ -1,14 +1,14 @@
 {
     "name": "relay-server-1",
     "controller": {
-        "url": "grpcs://controller.example.com:443",
+        "url": "wss://controller.example.com:443",
         "token": "YOUR_SERVER_TOKEN_HERE"
     },
     "relay": {
         "enabled": true,
         "listen_address": "0.0.0.0",
         "listen_port": 8443,
-        "external_url": "grpcs://relay1.example.com:8443",
+        "external_url": "wss://relay1.example.com:8443",
         "region": "us-east",
         "tls": {
             "enabled": true,

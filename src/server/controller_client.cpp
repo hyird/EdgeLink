@@ -1,5 +1,6 @@
 #include "controller_client.hpp"
 #include "ws_relay_server.hpp"
+#include "common/config.hpp"
 #include "common/log.hpp"
 
 namespace edgelink {
@@ -9,7 +10,7 @@ namespace edgelink {
 // ============================================================================
 
 ControllerClient::ControllerClient(net::io_context& ioc, WsRelayServer& server, const ServerConfig& config)
-    : WsClient(ioc, config.controller.url + "/server", "ControllerClient")
+    : WsClient(ioc, config.controller.url + paths::WS_SERVER, "ControllerClient")
     , server_(server)
     , config_(config)
 {
@@ -41,12 +42,12 @@ void ControllerClient::do_authenticate() {
     payload["name"] = config_.name;
     payload["region"] = config_.relay.region;
 
-    // Construct relay URL
+    // Construct relay URL (without path - client will append path internally)
     std::string relay_url = config_.relay.external_url;
     if (relay_url.empty()) {
         std::string scheme = config_.relay.tls.enabled ? "wss" : "ws";
         relay_url = scheme + "://" + config_.relay.listen_address + ":" +
-                    std::to_string(config_.relay.listen_port) + "/relay";
+                    std::to_string(config_.relay.listen_port);
     }
     payload["relay_url"] = relay_url;
 

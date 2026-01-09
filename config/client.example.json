@@ -1,5 +1,5 @@
 {
-    "controller_url": "grpcs://controller.example.com:443",
+    "controller_url": "wss://controller.example.com:443",
     "machine_key_pub": "",
     "machine_key_priv": "",
     "auth_key": "",

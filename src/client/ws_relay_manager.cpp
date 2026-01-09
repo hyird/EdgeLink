@@ -1,4 +1,5 @@
 #include "ws_relay_manager.hpp"
+#include "common/config.hpp"
 #include "common/log.hpp"
 
 namespace edgelink::client {
@@ -11,7 +12,7 @@ WsRelayConnection::WsRelayConnection(net::io_context& ioc, uint32_t server_id,
                                      const std::string& url, const std::string& region,
                                      const std::string& relay_token,
                                      std::function<void(uint32_t, const wire::Frame&)> on_frame)
-    : WsClient(ioc, url, "Relay-" + std::to_string(server_id))
+    : WsClient(ioc, url + paths::WS_RELAY, "Relay-" + std::to_string(server_id))
     , server_id_(server_id)
     , region_(region)
     , relay_token_(relay_token)

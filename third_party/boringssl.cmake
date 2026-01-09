@@ -19,6 +19,14 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(boringssl)
 
+# Disable -Werror for BoringSSL targets to fix format warnings on MinGW
+# The bssl tool has format string issues that cause build failures with -Werror
+if(MINGW)
+    if(TARGET bssl)
+        target_compile_options(bssl PRIVATE -Wno-error=format)
+    endif()
+endif()
+
 # Get BoringSSL source and binary directories
 FetchContent_GetProperties(boringssl SOURCE_DIR BORINGSSL_SOURCE_DIR BINARY_DIR BORINGSSL_BINARY_DIR)
 

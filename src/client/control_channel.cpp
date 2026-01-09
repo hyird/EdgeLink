@@ -1,4 +1,5 @@
 #include "client/control_channel.hpp"
+#include "common/config.hpp"
 #include "common/log.hpp"
 
 #ifdef _WIN32
@@ -22,7 +23,7 @@ ControlChannel::ControlChannel(
     const std::array<uint8_t, 32>& node_key_priv,
     const std::string& auth_key
 )
-    : WsClient(ioc, controller_url, "ControlChannel")
+    : WsClient(ioc, controller_url + paths::WS_CONTROL, "ControlChannel")
     , machine_key_pub_(machine_key_pub)
     , machine_key_priv_(machine_key_priv)
     , node_key_pub_(node_key_pub)

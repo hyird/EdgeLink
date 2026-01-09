@@ -145,7 +145,7 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
             srv.enabled = true;
         }
 
-        // Always update relay URL from config (now using WebSocket URL format)
+        // Always update relay URL from config (without path - client will append path internally)
         if (config.builtin_relay.enabled) {
             if (!config.builtin_relay.external_url.empty()) {
                 // Use configured external URL (for reverse proxy scenarios)
@@ -153,7 +153,7 @@ int run_server(const ControllerConfig& config, std::shared_ptr<Database> db) {
             } else {
                 // Default: use WebSocket listen address
                 std::string scheme = config.http.enable_tls ? "wss" : "ws";
-                srv.url = scheme + "://localhost:" + std::to_string(config.http.listen_port) + paths::WS_RELAY;
+                srv.url = scheme + "://localhost:" + std::to_string(config.http.listen_port);
             }
         } else {
             srv.url.clear();

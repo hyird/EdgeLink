@@ -27,7 +27,7 @@
     },
     "builtin_relay": {
         "enabled": true,
-        "external_url": "grpcs://vpn.example.com:443"
+        "external_url": "wss://vpn.example.com:443"
     },
     "builtin_stun": {
         "enabled": true,
