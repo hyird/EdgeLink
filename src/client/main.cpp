@@ -9,6 +9,7 @@
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>
 
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -96,6 +97,17 @@ int main(int argc, char* argv[]) {
         }
         cfg = *result;
         std::cout << "Loaded configuration from: " << config_file << std::endl;
+
+        // Default state_dir to config file's directory if not specified
+        if (cfg.state_dir.empty()) {
+            auto config_path = std::filesystem::absolute(config_file);
+            cfg.state_dir = config_path.parent_path().string();
+        }
+    } else {
+        // No config file: default state_dir to current directory
+        if (cfg.state_dir.empty()) {
+            cfg.state_dir = ".";
+        }
     }
 
     // Second pass: command line overrides

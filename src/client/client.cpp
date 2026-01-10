@@ -1,6 +1,5 @@
 #include "client/client.hpp"
 #include <spdlog/spdlog.h>
-#include <cstdlib>
 
 namespace edgelink::client {
 
@@ -234,21 +233,8 @@ asio::awaitable<bool> Client::start() {
     state_ = ClientState::STARTING;
     spdlog::info("Starting client...");
 
-    // Determine state directory (use platform default if not specified)
-    std::string state_dir = config_.state_dir;
-    if (state_dir.empty()) {
-#ifdef _WIN32
-        // Windows: use %LOCALAPPDATA%\EdgeLink or current directory
-        if (const char* appdata = std::getenv("LOCALAPPDATA")) {
-            state_dir = std::string(appdata) + "\\EdgeLink";
-        } else {
-            state_dir = ".edgelink";
-        }
-#else
-        // Linux/macOS: use /var/lib/edgelink
-        state_dir = "/var/lib/edgelink";
-#endif
-    }
+    // State directory (should be set by main, fallback to current directory)
+    std::string state_dir = config_.state_dir.empty() ? "." : config_.state_dir;
     spdlog::info("State directory: {}", state_dir);
 
     // Key file is always stored in state_dir
