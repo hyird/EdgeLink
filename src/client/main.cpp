@@ -271,14 +271,15 @@ int cmd_peers(int argc, char* argv[]) {
 
                     for (const auto& p : peers) {
                         auto& peer = p.as_object();
-                        std::string virtual_ip(peer.at("virtual_ip").as_string());
-                        std::string name(peer.at("name").as_string());
+                        auto& vip = peer.at("virtual_ip").as_string();
+                        auto& nm = peer.at("name").as_string();
+                        auto& conn = peer.at("connection_status").as_string();
+                        std::string virtual_ip(vip.data(), vip.size());
+                        std::string name(nm.data(), nm.size());
                         std::string status = peer.at("online").as_bool() ? "online" : "offline";
-                        std::string connection(peer.at("connection_status").as_string());
-                        std::string latency = std::to_string(peer.at("latency_ms").as_int64()) + "ms";
-                        if (peer.at("latency_ms").as_int64() == 0) {
-                            latency = "-";
-                        }
+                        std::string connection(conn.data(), conn.size());
+                        int64_t lat_ms = peer.at("latency_ms").as_int64();
+                        std::string latency = lat_ms > 0 ? std::to_string(lat_ms) + "ms" : "-";
 
                         std::cout << std::left
                                   << std::setw(16) << virtual_ip
