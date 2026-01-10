@@ -55,8 +55,9 @@ void print_help() {
               << "Usage: edgelink-client [options]\n\n"
               << "Options:\n"
               << "  -c, --config FILE     Load configuration from TOML file\n"
-              << "  --controller URL      Controller URL (default: wss://localhost:8443/api/v1/control)\n"
+              << "  --controller URL      Controller server address (default: localhost:8080)\n"
               << "  -a, --authkey KEY     AuthKey for authentication\n"
+              << "  --tls                 Enable TLS (wss://), default: disabled\n"
               << "  --tun                 Enable TUN device for IP-level routing\n"
               << "  --tun-name NAME       TUN device name (default: auto)\n"
               << "  --tun-mtu MTU         TUN device MTU (default: 1420)\n"
@@ -110,6 +111,8 @@ int main(int argc, char* argv[]) {
         } else if ((arg == "-t" || arg == "--test") && i + 2 < argc) {
             test_peer_ip = argv[++i];
             test_message = argv[++i];
+        } else if (arg == "--tls") {
+            cfg.tls = true;
         } else if (arg == "--tun") {
             cfg.enable_tun = true;
         } else if (arg == "--tun-name" && i + 1 < argc) {
@@ -150,6 +153,7 @@ int main(int argc, char* argv[]) {
         client::ClientConfig client_cfg;
         client_cfg.controller_url = cfg.controller_url;
         client_cfg.authkey = cfg.authkey;
+        client_cfg.tls = cfg.tls;
         client_cfg.auto_reconnect = cfg.auto_reconnect;
         client_cfg.reconnect_interval = cfg.reconnect_interval;
         client_cfg.ping_interval = cfg.ping_interval;

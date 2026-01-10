@@ -2,8 +2,11 @@
 # Copy this file to client.toml and modify as needed
 
 [controller]
-# Controller WebSocket URL
-url = "wss://localhost:8443/api/v1/control"
+# Controller server address (API paths are appended automatically)
+url = "localhost:8080"
+
+# Enable TLS (wss://), default: disabled
+tls = false
 
 # Authentication key (required)
 # Get this from your network administrator

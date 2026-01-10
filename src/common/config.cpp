@@ -125,6 +125,9 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             if (auto v = (*controller)["authkey"].value<std::string>()) {
                 config.authkey = *v;
             }
+            if (auto v = (*controller)["tls"].value<bool>()) {
+                config.tls = *v;
+            }
         }
 
         // [connection] section

@@ -1,0 +1,51 @@
+"D:\CLion 2025.3.1\bin\cmake\win\x64\bin\cmake.exe" -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_MAKE_PROGRAM=D:/CLion 2025.3.1/bin/ninja/win/x64/ninja.exe" -G Ninja -S D:\WorkSpace\EdgeLink -B D:\WorkSpace\EdgeLink\cmake-build-debug
+-- The C compiler identification is GNU 13.1.0
+-- The CXX compiler identification is GNU 13.1.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: D:/CLion 2025.3.1/bin/mingw/bin/gcc.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: D:/CLion 2025.3.1/bin/mingw/bin/g++.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Building for Windows
+-- Using MinGW compiler
+-- Fetching nlohmann_json...
+Cloning into 'nlohmann_json-src'...
+error: RPC failed; curl 56 schannel: server closed abruptly (missing close_notify)
+error: 15952 bytes of body are still expected
+fetch-pack: unexpected disconnect while reading sideband packet
+fatal: early EOF
+fatal: fetch-pack: invalid index-pack output
+Cloning into 'nlohmann_json-src'...
+error: RPC failed; curl 56 schannel: server closed abruptly (missing close_notify)
+error: 7646 bytes of body are still expected
+fetch-pack: unexpected disconnect while reading sideband packet
+fatal: early EOF
+fatal: fetch-pack: invalid index-pack output
+Cloning into 'nlohmann_json-src'...
+error: RPC failed; curl 56 schannel: server closed abruptly (missing close_notify)
+error: 10157 bytes of body are still expected
+fetch-pack: unexpected disconnect while reading sideband packet
+fatal: early EOF
+fatal: fetch-pack: invalid index-pack output
+Had to git clone more than once: 3 times.
+CMake Error at cmake-build-debug/CMakeFiles/fc-tmp/nlohmann_json/nlohmann_json-gitclone.cmake:50 (message):
+  Failed to clone repository: 'https://github.com/nlohmann/json.git'
+Call Stack (most recent call first):
+  cmake-build-debug/CMakeFiles/fc-tmp/nlohmann_json/download.cmake:7 (include)
+  D:/CLion 2025.3.1/bin/cmake/win/x64/share/cmake-4.1/Modules/FetchContent.cmake:1753 (include)
+  D:/CLion 2025.3.1/bin/cmake/win/x64/share/cmake-4.1/Modules/FetchContent.cmake:1706 (__FetchContent_doStepDirect)
+  D:/CLion 2025.3.1/bin/cmake/win/x64/share/cmake-4.1/Modules/FetchContent.cmake:1607 (__FetchContent_populateDirect)
+  D:/CLion 2025.3.1/bin/cmake/win/x64/share/cmake-4.1/Modules/FetchContent.cmake:2145:EVAL:2 (__FetchContent_doPopulation)
+  D:/CLion 2025.3.1/bin/cmake/win/x64/share/cmake-4.1/Modules/FetchContent.cmake:2145 (cmake_language)
+  D:/CLion 2025.3.1/bin/cmake/win/x64/share/cmake-4.1/Modules/FetchContent.cmake:2384 (__FetchContent_Populate)
+  third_party/nlohmann_json.cmake:17 (FetchContent_MakeAvailable)
+  third_party/CMakeLists.txt:20 (include)
+  CMakeLists.txt:73 (include)
+
+
+-- Configuring incomplete, errors occurred!

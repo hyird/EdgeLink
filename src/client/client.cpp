@@ -218,15 +218,44 @@ asio::awaitable<bool> Client::start() {
         co_return false;
     }
 
-    // Derive relay URL from controller URL
-    std::string relay_url = config_.controller_url;
-    auto pos = relay_url.find("/api/v1/control");
-    if (pos != std::string::npos) {
-        relay_url.replace(pos, 15, "/api/v1/relay");
+    // Build control and relay URLs from server address
+    std::string base_url = config_.controller_url;
+    // Remove trailing slash if present
+    if (!base_url.empty() && base_url.back() == '/') {
+        base_url.pop_back();
+    }
+    // Remove path if user accidentally included it
+    auto path_pos = base_url.find("/api/");
+    if (path_pos != std::string::npos) {
+        base_url = base_url.substr(0, path_pos);
     }
 
+    // Handle TLS scheme based on config
+    if (config_.tls) {
+        // Ensure wss:// scheme
+        if (base_url.substr(0, 5) == "ws://") {
+            base_url = "wss://" + base_url.substr(5);
+        } else if (base_url.substr(0, 6) != "wss://") {
+            base_url = "wss://" + base_url;
+        }
+    } else {
+        // Ensure ws:// scheme
+        if (base_url.substr(0, 6) == "wss://") {
+            base_url = "ws://" + base_url.substr(6);
+        } else if (base_url.substr(0, 5) != "ws://") {
+            base_url = "ws://" + base_url;
+        }
+    }
+
+    std::string control_url = base_url + "/api/v1/control";
+    std::string relay_url = base_url + "/api/v1/relay";
+
+    spdlog::info("TLS: {}", config_.tls ? "enabled" : "disabled");
+    spdlog::debug("Control URL: {}", control_url);
+    spdlog::debug("Relay URL: {}", relay_url);
+
     // Create channels
-    control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, config_.controller_url);
+    control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url);
     relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url);
 
     // Setup callbacks

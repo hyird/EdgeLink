@@ -18,8 +18,9 @@ namespace edgelink::client {
 
 // Client configuration
 struct ClientConfig {
-    std::string controller_url = "wss://localhost:8443/api/v1/control";
+    std::string controller_url = "ws://localhost:8080";  // Server address (path auto-appended)
     std::string authkey;
+    bool tls = false;  // Enable TLS (wss://) - default disabled
     bool auto_reconnect = true;
     std::chrono::seconds reconnect_interval{5};
     std::chrono::seconds ping_interval{30};

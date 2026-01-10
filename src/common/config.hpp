@@ -61,8 +61,9 @@ struct ControllerConfig {
 
 struct ClientConfig {
     // Connection settings
-    std::string controller_url = "wss://localhost:8443/api/v1/control";
+    std::string controller_url = "ws://localhost:8080";  // Server address (path auto-appended)
     std::string authkey;
+    bool tls = false;  // Enable TLS (wss://) - default disabled
 
     // Auto-reconnect settings
     bool auto_reconnect = true;
