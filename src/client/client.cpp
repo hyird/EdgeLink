@@ -255,8 +255,8 @@ asio::awaitable<bool> Client::start() {
     spdlog::debug("Relay URL: {}", relay_url);
 
     // Create channels
-    control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url);
-    relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url);
+    control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, config_.tls);
+    relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url, config_.tls);
 
     // Setup callbacks
     setup_callbacks();

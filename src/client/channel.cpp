@@ -20,17 +20,26 @@ const char* channel_state_name(ChannelState state) {
 // ============================================================================
 
 ControlChannel::ControlChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
-                               CryptoEngine& crypto, const std::string& url)
+                               CryptoEngine& crypto, const std::string& url, bool use_tls)
     : ioc_(ioc)
     , ssl_ctx_(ssl_ctx)
     , crypto_(crypto)
     , url_(url)
+    , use_tls_(use_tls)
     , write_timer_(ioc) {
     write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
 }
 
 void ControlChannel::set_callbacks(ControlChannelCallbacks callbacks) {
     callbacks_ = std::move(callbacks);
+}
+
+bool ControlChannel::is_ws_open() const {
+    if (use_tls_) {
+        return tls_ws_ && tls_ws_->is_open();
+    } else {
+        return plain_ws_ && plain_ws_->is_open();
+    }
 }
 
 asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
@@ -47,42 +56,64 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         }
 
         std::string host = std::string(parsed->host());
-        std::string port = parsed->has_port() ? std::string(parsed->port()) : "443";
+        std::string port = parsed->has_port() ? std::string(parsed->port()) :
+                           (use_tls_ ? "443" : "80");
         std::string target = std::string(parsed->path());
         if (target.empty()) target = "/api/v1/control";
 
-        spdlog::info("Connecting to controller: {}:{}{}", host, port, target);
+        spdlog::info("Connecting to controller: {}:{}{} (TLS: {})",
+                     host, port, target, use_tls_ ? "yes" : "no");
 
         // Resolve host
         tcp::resolver resolver(ioc_);
         auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
 
-        // Create SSL stream
-        ws_ = std::make_unique<WsStream>(ioc_, ssl_ctx_);
+        if (use_tls_) {
+            // Create TLS stream
+            tls_ws_ = std::make_unique<TlsWsStream>(ioc_, ssl_ctx_);
 
-        // Set SNI
-        if (!SSL_set_tlsext_host_name(ws_->next_layer().native_handle(), host.c_str())) {
-            spdlog::error("Failed to set SNI");
-            co_return false;
+            // Set SNI
+            if (!SSL_set_tlsext_host_name(tls_ws_->next_layer().native_handle(), host.c_str())) {
+                spdlog::error("Failed to set SNI");
+                co_return false;
+            }
+
+            // Connect TCP
+            auto& tcp_stream = beast::get_lowest_layer(*tls_ws_);
+            tcp_stream.expires_after(std::chrono::seconds(30));
+            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            // SSL handshake
+            tls_ws_->next_layer().set_verify_mode(ssl::verify_none); // TODO: proper verification
+            co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
+
+            // WebSocket handshake
+            tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+            tls_ws_->set_option(websocket::stream_base::decorator(
+                [](websocket::request_type& req) {
+                    req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
+                }));
+
+            co_await tls_ws_->async_handshake(host, target, asio::use_awaitable);
+
+        } else {
+            // Create plain stream
+            plain_ws_ = std::make_unique<PlainWsStream>(ioc_);
+
+            // Connect TCP
+            auto& tcp_stream = beast::get_lowest_layer(*plain_ws_);
+            tcp_stream.expires_after(std::chrono::seconds(30));
+            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            // WebSocket handshake
+            plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+            plain_ws_->set_option(websocket::stream_base::decorator(
+                [](websocket::request_type& req) {
+                    req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
+                }));
+
+            co_await plain_ws_->async_handshake(host, target, asio::use_awaitable);
         }
-
-        // Connect TCP
-        auto& tcp_stream = beast::get_lowest_layer(*ws_);
-        tcp_stream.expires_after(std::chrono::seconds(30));
-        co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
-
-        // SSL handshake
-        ws_->next_layer().set_verify_mode(ssl::verify_none); // TODO: proper verification
-        co_await ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
-
-        // WebSocket handshake
-        ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-        ws_->set_option(websocket::stream_base::decorator(
-            [](websocket::request_type& req) {
-                req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
-            }));
-
-        co_await ws_->async_handshake(host, target, asio::use_awaitable);
 
         spdlog::info("WebSocket connected, authenticating...");
         state_ = ChannelState::AUTHENTICATING;
@@ -138,11 +169,14 @@ asio::awaitable<bool> ControlChannel::reconnect() {
 }
 
 asio::awaitable<void> ControlChannel::close() {
-    if (ws_ && ws_->is_open()) {
-        try {
-            co_await ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
-        } catch (...) {}
-    }
+    try {
+        if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
+            co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+        } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
+            co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+        }
+    } catch (...) {}
+
     state_ = ChannelState::DISCONNECTED;
 
     if (callbacks_.on_disconnected) {
@@ -171,9 +205,14 @@ asio::awaitable<void> ControlChannel::read_loop() {
     try {
         beast::flat_buffer buffer;
 
-        while (ws_ && ws_->is_open()) {
+        while (is_ws_open()) {
             buffer.clear();
-            co_await ws_->async_read(buffer, asio::use_awaitable);
+
+            if (use_tls_) {
+                co_await tls_ws_->async_read(buffer, asio::use_awaitable);
+            } else {
+                co_await plain_ws_->async_read(buffer, asio::use_awaitable);
+            }
 
             auto data = buffer.data();
             std::span<const uint8_t> span(
@@ -201,7 +240,7 @@ asio::awaitable<void> ControlChannel::read_loop() {
 
 asio::awaitable<void> ControlChannel::write_loop() {
     try {
-        while (ws_ && ws_->is_open()) {
+        while (is_ws_open()) {
             if (write_queue_.empty()) {
                 writing_ = false;
                 co_await write_timer_.async_wait(asio::use_awaitable);
@@ -212,7 +251,11 @@ asio::awaitable<void> ControlChannel::write_loop() {
                 auto data = std::move(write_queue_.front());
                 write_queue_.pop();
 
-                co_await ws_->async_write(asio::buffer(data), asio::use_awaitable);
+                if (use_tls_) {
+                    co_await tls_ws_->async_write(asio::buffer(data), asio::use_awaitable);
+                } else {
+                    co_await plain_ws_->async_write(asio::buffer(data), asio::use_awaitable);
+                }
             }
         }
     } catch (const boost::system::system_error& e) {
@@ -371,18 +414,28 @@ asio::awaitable<void> ControlChannel::send_raw(std::span<const uint8_t> data) {
 // ============================================================================
 
 RelayChannel::RelayChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
-                           CryptoEngine& crypto, PeerManager& peers, const std::string& url)
+                           CryptoEngine& crypto, PeerManager& peers,
+                           const std::string& url, bool use_tls)
     : ioc_(ioc)
     , ssl_ctx_(ssl_ctx)
     , crypto_(crypto)
     , peers_(peers)
     , url_(url)
+    , use_tls_(use_tls)
     , write_timer_(ioc) {
     write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
 }
 
 void RelayChannel::set_callbacks(RelayChannelCallbacks callbacks) {
     callbacks_ = std::move(callbacks);
+}
+
+bool RelayChannel::is_ws_open() const {
+    if (use_tls_) {
+        return tls_ws_ && tls_ws_->is_open();
+    } else {
+        return plain_ws_ && plain_ws_->is_open();
+    }
 }
 
 asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_token) {
@@ -397,34 +450,51 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
         }
 
         std::string host = std::string(parsed->host());
-        std::string port = parsed->has_port() ? std::string(parsed->port()) : "443";
+        std::string port = parsed->has_port() ? std::string(parsed->port()) :
+                           (use_tls_ ? "443" : "80");
         std::string target = std::string(parsed->path());
         if (target.empty()) target = "/api/v1/relay";
 
-        spdlog::info("Connecting to relay: {}:{}{}", host, port, target);
+        spdlog::info("Connecting to relay: {}:{}{} (TLS: {})",
+                     host, port, target, use_tls_ ? "yes" : "no");
 
         // Resolve host
         tcp::resolver resolver(ioc_);
         auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
 
-        // Create SSL stream
-        ws_ = std::make_unique<WsStream>(ioc_, ssl_ctx_);
+        if (use_tls_) {
+            // Create TLS stream
+            tls_ws_ = std::make_unique<TlsWsStream>(ioc_, ssl_ctx_);
 
-        // Set SNI
-        SSL_set_tlsext_host_name(ws_->next_layer().native_handle(), host.c_str());
+            // Set SNI
+            SSL_set_tlsext_host_name(tls_ws_->next_layer().native_handle(), host.c_str());
 
-        // Connect TCP
-        auto& tcp_stream = beast::get_lowest_layer(*ws_);
-        tcp_stream.expires_after(std::chrono::seconds(30));
-        co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+            // Connect TCP
+            auto& tcp_stream = beast::get_lowest_layer(*tls_ws_);
+            tcp_stream.expires_after(std::chrono::seconds(30));
+            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
 
-        // SSL handshake
-        ws_->next_layer().set_verify_mode(ssl::verify_none);
-        co_await ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
+            // SSL handshake
+            tls_ws_->next_layer().set_verify_mode(ssl::verify_none);
+            co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
 
-        // WebSocket handshake
-        ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-        co_await ws_->async_handshake(host, target, asio::use_awaitable);
+            // WebSocket handshake
+            tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+            co_await tls_ws_->async_handshake(host, target, asio::use_awaitable);
+
+        } else {
+            // Create plain stream
+            plain_ws_ = std::make_unique<PlainWsStream>(ioc_);
+
+            // Connect TCP
+            auto& tcp_stream = beast::get_lowest_layer(*plain_ws_);
+            tcp_stream.expires_after(std::chrono::seconds(30));
+            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            // WebSocket handshake
+            plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+            co_await plain_ws_->async_handshake(host, target, asio::use_awaitable);
+        }
 
         spdlog::info("Relay WebSocket connected, authenticating...");
         state_ = ChannelState::AUTHENTICATING;
@@ -457,11 +527,14 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
 }
 
 asio::awaitable<void> RelayChannel::close() {
-    if (ws_ && ws_->is_open()) {
-        try {
-            co_await ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
-        } catch (...) {}
-    }
+    try {
+        if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
+            co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+        } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
+            co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+        }
+    } catch (...) {}
+
     state_ = ChannelState::DISCONNECTED;
 
     if (callbacks_.on_disconnected) {
@@ -506,9 +579,14 @@ asio::awaitable<void> RelayChannel::read_loop() {
     try {
         beast::flat_buffer buffer;
 
-        while (ws_ && ws_->is_open()) {
+        while (is_ws_open()) {
             buffer.clear();
-            co_await ws_->async_read(buffer, asio::use_awaitable);
+
+            if (use_tls_) {
+                co_await tls_ws_->async_read(buffer, asio::use_awaitable);
+            } else {
+                co_await plain_ws_->async_read(buffer, asio::use_awaitable);
+            }
 
             auto data = buffer.data();
             std::span<const uint8_t> span(
@@ -536,7 +614,7 @@ asio::awaitable<void> RelayChannel::read_loop() {
 
 asio::awaitable<void> RelayChannel::write_loop() {
     try {
-        while (ws_ && ws_->is_open()) {
+        while (is_ws_open()) {
             if (write_queue_.empty()) {
                 writing_ = false;
                 co_await write_timer_.async_wait(asio::use_awaitable);
@@ -547,7 +625,11 @@ asio::awaitable<void> RelayChannel::write_loop() {
                 auto data = std::move(write_queue_.front());
                 write_queue_.pop();
 
-                co_await ws_->async_write(asio::buffer(data), asio::use_awaitable);
+                if (use_tls_) {
+                    co_await tls_ws_->async_write(asio::buffer(data), asio::use_awaitable);
+                } else {
+                    co_await plain_ws_->async_write(asio::buffer(data), asio::use_awaitable);
+                }
             }
         }
     } catch (const boost::system::system_error& e) {

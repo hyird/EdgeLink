@@ -17,6 +17,7 @@
 #include <memory>
 #include <queue>
 #include <string>
+#include <variant>
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -38,8 +39,12 @@ enum class ChannelState {
 
 const char* channel_state_name(ChannelState state);
 
-// WebSocket stream type
-using WsStream = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
+// WebSocket stream types
+using TlsWsStream = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
+using PlainWsStream = websocket::stream<beast::tcp_stream>;
+
+// Legacy alias
+using WsStream = TlsWsStream;
 
 // Forward declaration
 class Client;
@@ -61,7 +66,7 @@ struct ControlChannelCallbacks {
 class ControlChannel : public std::enable_shared_from_this<ControlChannel> {
 public:
     ControlChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
-                   CryptoEngine& crypto, const std::string& url);
+                   CryptoEngine& crypto, const std::string& url, bool use_tls);
 
     // Connect and authenticate
     asio::awaitable<bool> connect(const std::string& authkey);
@@ -104,13 +109,19 @@ private:
     asio::awaitable<void> send_frame(FrameType type, std::span<const uint8_t> payload);
     asio::awaitable<void> send_raw(std::span<const uint8_t> data);
 
+    // Helper to check if stream is open
+    bool is_ws_open() const;
+
     asio::io_context& ioc_;
     ssl::context& ssl_ctx_;
     CryptoEngine& crypto_;
     std::string url_;
     std::string authkey_;
+    bool use_tls_;
 
-    std::unique_ptr<WsStream> ws_;
+    // WebSocket stream (either TLS or plain)
+    std::unique_ptr<TlsWsStream> tls_ws_;
+    std::unique_ptr<PlainWsStream> plain_ws_;
     ChannelState state_ = ChannelState::DISCONNECTED;
 
     // Write queue
@@ -146,7 +157,7 @@ struct RelayChannelCallbacks {
 class RelayChannel : public std::enable_shared_from_this<RelayChannel> {
 public:
     RelayChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
-                 CryptoEngine& crypto, PeerManager& peers, const std::string& url);
+                 CryptoEngine& crypto, PeerManager& peers, const std::string& url, bool use_tls);
 
     // Connect and authenticate with relay token
     asio::awaitable<bool> connect(const std::vector<uint8_t>& relay_token);
@@ -175,13 +186,19 @@ private:
     asio::awaitable<void> send_frame(FrameType type, std::span<const uint8_t> payload);
     asio::awaitable<void> send_raw(std::span<const uint8_t> data);
 
+    // Helper to check if stream is open
+    bool is_ws_open() const;
+
     asio::io_context& ioc_;
     ssl::context& ssl_ctx_;
     CryptoEngine& crypto_;
     PeerManager& peers_;
     std::string url_;
+    bool use_tls_;
 
-    std::unique_ptr<WsStream> ws_;
+    // WebSocket stream (either TLS or plain)
+    std::unique_ptr<TlsWsStream> tls_ws_;
+    std::unique_ptr<PlainWsStream> plain_ws_;
     ChannelState state_ = ChannelState::DISCONNECTED;
 
     // Write queue
