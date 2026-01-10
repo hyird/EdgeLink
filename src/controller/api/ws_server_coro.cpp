@@ -555,8 +555,8 @@ void WsControlSessionCoro::handle_route_announce(const wire::Frame& frame) {
         return;
     }
 
-    LOG_DEBUG("WsControlSessionCoro: Node {} announcing route: gateway={}, prefix={}/{}",
-              node_id(), result->gateway_node_id, result->route.prefix, result->route.prefix_len);
+    LOG_DEBUG("WsControlSessionCoro: Node {} announcing {} routes from gateway={}",
+              node_id(), result->routes.size(), result->gateway_node_id);
     // TODO: Process route announcement
 }
 
@@ -574,8 +574,8 @@ void WsControlSessionCoro::handle_route_withdraw(const wire::Frame& frame) {
         return;
     }
 
-    LOG_DEBUG("WsControlSessionCoro: Node {} withdrawing route: gateway={}, prefix={}/{}",
-              node_id(), result->gateway_node_id, result->route.prefix, result->route.prefix_len);
+    LOG_DEBUG("WsControlSessionCoro: Node {} withdrawing {} routes from gateway={}",
+              node_id(), result->routes.size(), result->gateway_node_id);
     // TODO: Process route withdrawal
 }
 
