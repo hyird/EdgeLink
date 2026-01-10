@@ -1,0 +1,42 @@
+# EdgeLink Controller Configuration
+# Copy this file to controller.toml and modify as needed
+
+[server]
+# Bind address for the server
+bind = "0.0.0.0"
+
+# Port to listen on
+port = 8443
+
+# Number of IO threads (0 = auto, uses hardware_concurrency)
+threads = 0
+
+[ssl]
+# SSL certificate file (PEM format)
+# If not specified, a self-signed certificate will be generated
+# cert = "/path/to/cert.pem"
+
+# SSL private key file (PEM format)
+# key = "/path/to/key.pem"
+
+[database]
+# SQLite database file path
+path = "edgelink.db"
+
+[jwt]
+# JWT secret for token signing
+# If not specified, a random secret is generated (tokens won't survive restarts)
+# secret = "your-secret-key-here"
+
+# Auth token validity in hours (default: 24)
+auth_token_hours = 24
+
+# Relay token validity in minutes (default: 90)
+relay_token_minutes = 90
+
+[log]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Log file (optional, logs to console if not specified)
+# file = "/var/log/edgelink-controller.log"

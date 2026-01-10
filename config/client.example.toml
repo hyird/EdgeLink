@@ -1,0 +1,32 @@
+# EdgeLink Client Configuration
+# Copy this file to client.toml and modify as needed
+
+[controller]
+# Controller WebSocket URL
+url = "wss://localhost:8443/api/v1/control"
+
+# Authentication key (required)
+# Get this from your network administrator
+authkey = "tskey-dev-test123"
+
+[connection]
+# Automatically reconnect on disconnect
+auto_reconnect = true
+
+# Reconnection interval in seconds
+reconnect_interval = 5
+
+# Keepalive ping interval in seconds
+ping_interval = 30
+
+[storage]
+# Directory for storing client state (keys, etc.)
+# If not specified, uses platform-specific default
+# state_dir = "/var/lib/edgelink"
+
+[log]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Log file (optional, logs to console if not specified)
+# file = "/var/log/edgelink-client.log"

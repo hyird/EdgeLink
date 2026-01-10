@@ -7,7 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
 option(BUILD_CONTROLLER "Build the controller" ON)
-option(BUILD_SERVER "Build the relay/stun server" ON)
+option(BUILD_SERVER "Build the relay/stun server" OFF)  # Not yet implemented
 option(BUILD_CLIENT "Build the client" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(EDGELINK_STATIC "Build fully static binaries" OFF)
@@ -80,6 +80,7 @@ add_library(edgelink-common STATIC
     src/common/frame.cpp
     src/common/message.cpp
     src/common/crypto.cpp
+    src/common/config.cpp
 )
 
 target_include_directories(edgelink-common PUBLIC
@@ -100,6 +101,7 @@ target_link_libraries(edgelink-common PUBLIC
     unofficial-sodium::sodium
     jwt-cpp::jwt-cpp
     lz4::lz4
+    tomlplusplus::tomlplusplus
     Threads::Threads
 )
 

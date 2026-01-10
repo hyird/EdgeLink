@@ -22,6 +22,9 @@ include(${CMAKE_CURRENT_LIST_DIR}/nlohmann_json.cmake)
 message(STATUS "Fetching spdlog...")
 include(${CMAKE_CURRENT_LIST_DIR}/spdlog.cmake)
 
+message(STATUS "Fetching toml++...")
+include(${CMAKE_CURRENT_LIST_DIR}/tomlplusplus.cmake)
+
 # SQLite3 - only needed for controller
 if(BUILD_CONTROLLER)
     message(STATUS "Fetching sqlite3...")

@@ -1,0 +1,86 @@
+#pragma once
+
+#include <string>
+#include <vector>
+#include <optional>
+#include <cstdint>
+#include <chrono>
+#include <expected>
+
+namespace edgelink {
+
+// ============================================================================
+// Configuration Error
+// ============================================================================
+
+enum class ConfigError {
+    FILE_NOT_FOUND,
+    PARSE_ERROR,
+    INVALID_VALUE,
+    MISSING_REQUIRED,
+};
+
+std::string config_error_message(ConfigError error);
+
+// ============================================================================
+// Controller Configuration
+// ============================================================================
+
+struct ControllerConfig {
+    // Server settings
+    std::string bind_address = "0.0.0.0";
+    uint16_t port = 8443;
+    size_t num_threads = 0;  // 0 = auto (hardware_concurrency)
+
+    // SSL settings
+    std::string cert_file;
+    std::string key_file;
+
+    // Database settings
+    std::string database_path = "edgelink.db";
+
+    // JWT settings
+    std::string jwt_secret;  // Empty = auto-generate
+    std::chrono::hours auth_token_validity{24};
+    std::chrono::minutes relay_token_validity{90};
+
+    // Logging
+    std::string log_level = "info";
+    std::string log_file;
+
+    // Load from TOML file
+    static std::expected<ControllerConfig, ConfigError> load(const std::string& path);
+
+    // Load from TOML string (for testing)
+    static std::expected<ControllerConfig, ConfigError> parse(const std::string& toml_content);
+};
+
+// ============================================================================
+// Client Configuration
+// ============================================================================
+
+struct ClientConfig {
+    // Connection settings
+    std::string controller_url = "wss://localhost:8443/api/v1/control";
+    std::string authkey;
+
+    // Auto-reconnect settings
+    bool auto_reconnect = true;
+    std::chrono::seconds reconnect_interval{5};
+    std::chrono::seconds ping_interval{30};
+
+    // Key storage
+    std::string state_dir;  // Directory for storing keys, empty = auto
+
+    // Logging
+    std::string log_level = "info";
+    std::string log_file;
+
+    // Load from TOML file
+    static std::expected<ClientConfig, ConfigError> load(const std::string& path);
+
+    // Load from TOML string (for testing)
+    static std::expected<ClientConfig, ConfigError> parse(const std::string& toml_content);
+};
+
+} // namespace edgelink
