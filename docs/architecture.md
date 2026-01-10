@@ -1,6 +1,6 @@
 # EdgeLink 架构设计文档
 
-> **版本**: 2.5
+> **版本**: 2.6
 > **更新日期**: 2026-01-10
 > **协议版本**: 0x02
 
@@ -380,6 +380,41 @@ signed_data = auth_type (1B)
 | error_code  | 2 B  | 错误码 (失败时有效)            |
 | error_msg   | 变长 | 错误消息 (失败时有效)          |
 
+#### 2.4.3.1 AUTH_CHALLENGE Payload (Type=0x03)
+
+用于双因素认证或额外验证场景。
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│challenge_id│challenge_ty│  expires   │  challenge │
+│   (4 B)    │   (1 B)    │   (8 B)    │  (变长)    │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段         | 大小 | 说明                                |
+| ------------ | ---- | ----------------------------------- |
+| challenge_id | 4 B  | 挑战标识符                          |
+| challenge_ty | 1 B  | 挑战类型: 0x01=TOTP, 0x02=SMS, 0x03=Email |
+| expires      | 8 B  | 过期时间戳 (毫秒)                   |
+| challenge    | 变长 | 挑战数据 (如加密的 nonce)           |
+
+#### 2.4.3.2 AUTH_VERIFY Payload (Type=0x04)
+
+客户端对挑战的响应。
+
+```
+┌────────────┬────────────┬────────────┐
+│challenge_id│response_len│  response  │
+│   (4 B)    │   (2 B)    │  (变长)    │
+└────────────┴────────────┴────────────┘
+```
+
+| 字段         | 大小 | 说明                      |
+| ------------ | ---- | ------------------------- |
+| challenge_id | 4 B  | 对应的挑战标识符          |
+| response_len | 2 B  | 响应数据长度              |
+| response     | 变长 | 响应数据 (如 TOTP 验证码) |
+
 #### 2.4.4 CONFIG Payload (Type=0x10)
 
 ```
@@ -397,6 +432,24 @@ signed_data = auth_type (1B)
 │  (数组)    │(len+bytes) │    (8 B)                │
 └────────────┴────────────┴─────────────────────────┘
 ```
+
+| 字段         | 大小 | 说明                                |
+| ------------ | ---- | ----------------------------------- |
+| version      | 8 B  | 配置版本号                          |
+| network_id   | 4 B  | 网络 ID                             |
+| subnet       | 4 B  | 网络地址 (如 10.0.0.0)              |
+| subnet_mask  | 1 B  | 子网掩码位数 (如 8)                 |
+| network_name | 变长 | 网络名称                            |
+| relay_count  | 2 B  | Relay 服务器数量                    |
+| stun_count   | 2 B  | STUN 服务器数量                     |
+| peer_count   | 2 B  | Peer 节点数量                       |
+| route_count  | 2 B  | 路由数量                            |
+| relays[]     | 变长 | RelayInfo 数组 (见 2.4.37)          |
+| stuns[]      | 变长 | STUNInfo 数组 (见 2.4.38)           |
+| peers[]      | 变长 | PeerInfo 数组 (见 2.4.20)           |
+| routes[]     | 变长 | RouteInfo 数组 (见 2.4.18)          |
+| relay_token  | 变长 | JWT Relay Token                     |
+| expires      | 8 B  | relay_token 过期时间戳 (毫秒)       |
 
 #### 2.4.4.1 CONFIG_UPDATE Payload (Type=0x11)
 
@@ -438,6 +491,39 @@ signed_data = auth_type (1B)
 | 0x0004 | ROUTE_CHANGED   | Route 列表有变更        |
 | 0x0008 | TOKEN_REFRESH   | 包含新的 relay_token    |
 | 0x0010 | FULL_SYNC       | 需要全量同步 (忽略增量) |
+
+#### 2.4.4.2 CONFIG_ACK Payload (Type=0x12)
+
+客户端确认配置已应用。
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│  version   │   status   │error_count │ error_items│
+│   (8 B)    │   (1 B)    │   (2 B)    │  (变长)    │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段        | 大小 | 说明                                  |
+| ----------- | ---- | ------------------------------------- |
+| version     | 8 B  | 确认的配置版本号                      |
+| status      | 1 B  | 0x00=成功, 0x01=部分失败, 0x02=全部失败 |
+| error_count | 2 B  | 失败项数量                            |
+| error_items | 变长 | 失败项数组 (见下表)                   |
+
+**error_items 结构**：
+
+```
+┌────────────┬────────────┬────────────┐
+│ item_type  │  item_id   │ error_code │
+│   (1 B)    │   (4 B)    │   (2 B)    │
+└────────────┴────────────┴────────────┘
+```
+
+| item_type | 说明        |
+| --------- | ----------- |
+| 0x01      | Relay 配置  |
+| 0x02      | Peer 配置   |
+| 0x03      | Route 配置  |
 
 #### 2.4.5 DATA Payload (Type=0x20，端到端加密)
 
@@ -521,6 +607,34 @@ signed_data = auth_type (1B)
 
 > **时间戳单位约定**：本协议中所有 timestamp 字段统一使用**毫秒**为单位 (Unix epoch 毫秒)，包括但不限于 AUTH_REQUEST、PING/PONG、P2P_PING/PONG 等消息。
 
+#### 2.4.9.1 LATENCY_REPORT Payload (Type=0x32)
+
+客户端向 Controller 报告到各 Relay 的延迟。
+
+```
+┌────────────┬────────────┬────────────────────────────┐
+│ report_cnt │  reports[] │                            │
+│   (2 B)    │  (数组)    │                            │
+└────────────┴────────────┴────────────────────────────┘
+```
+
+**LatencyEntry 结构**：
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│ server_id  │ latency_ms │  jitter_ms │ packet_loss│
+│   (4 B)    │   (2 B)    │   (2 B)    │   (1 B)    │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段        | 大小 | 说明                           |
+| ----------- | ---- | ------------------------------ |
+| report_cnt  | 2 B  | 报告条目数量                   |
+| server_id   | 4 B  | Relay 服务器 ID                |
+| latency_ms  | 2 B  | 平均延迟 (毫秒)                |
+| jitter_ms   | 2 B  | 延迟抖动 (毫秒)                |
+| packet_loss | 1 B  | 丢包率 (0-100)                 |
+
 #### 2.4.10 P2P_INIT Payload (Type=0x40)
 
 ```
@@ -584,6 +698,28 @@ signed_data = auth_type (1B)
 | status    | 1 B  | 0x00=断开, 0x01=P2P连接, 0x02=仅Relay     |
 | latency   | 2 B  | 延迟 (毫秒)                               |
 | path      | 1 B  | 路径类型: 0x01=LAN, 0x02=STUN, 0x03=Relay |
+
+#### 2.4.13.1 P2P_KEEPALIVE Payload (Type=0x44，UDP)
+
+P2P 连接保活消息，双向发送。
+
+```
+┌────────────┬────────────┬────────────┐
+│ timestamp  │  seq_num   │   flags    │
+│   (8 B)    │   (4 B)    │   (1 B)    │
+└────────────┴────────────┴────────────┘
+```
+
+| 字段      | 大小 | 说明                           |
+| --------- | ---- | ------------------------------ |
+| timestamp | 8 B  | 发送时间戳 (毫秒)              |
+| seq_num   | 4 B  | 序列号                         |
+| flags     | 1 B  | 标志: 0x01=请求响应, 0x02=响应 |
+
+**行为规范**：
+- 发送间隔: 15 秒 (可配置)
+- 超时判定: 连续 3 次无响应视为断开
+- 收到 flags=0x01 时，应立即发送 flags=0x02 响应
 
 #### 2.4.14 ROUTE_ANNOUNCE Payload (Type=0x80)
 
@@ -740,6 +876,309 @@ allowed_subnets 示例: ["192.168.1.0/24", "10.0.0.0/8"]
   08                    # prefix_len = 8
 ```
 
+#### 2.4.23 SERVER_REGISTER Payload (Type=0x50)
+
+Relay 向 Controller 注册。
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│server_token│   name     │   region   │capabilities│
+│ (len+bytes)│ (len+str)  │ (len+str)  │   (2 B)    │
+├────────────┼────────────┼────────────┼────────────┤
+│ public_ip  │public_port │ stun_port  │  version   │
+│ (ip_type+ip)│   (2 B)   │   (2 B)    │ (len+str)  │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段         | 大小 | 说明                              |
+| ------------ | ---- | --------------------------------- |
+| server_token | 变长 | 服务器注册令牌 (JWT)              |
+| name         | 变长 | 服务器名称                        |
+| region       | 变长 | 区域标识                          |
+| capabilities | 2 B  | 能力标志 (0x01=RELAY, 0x02=STUN)  |
+| public_ip    | 变长 | 公网 IP (1B ip_type + 4/16B ip)   |
+| public_port  | 2 B  | 公网端口                          |
+| stun_port    | 2 B  | STUN 端口 (0=未启用)              |
+| version      | 变长 | 软件版本                          |
+
+#### 2.4.24 SERVER_REGISTER_RESP Payload (Type=0x51)
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│  success   │ server_id  │ error_code │ error_msg  │
+│   (1 B)    │   (4 B)    │   (2 B)    │ (len+str)  │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段       | 大小 | 说明                         |
+| ---------- | ---- | ---------------------------- |
+| success    | 1 B  | 0x00=失败, 0x01=成功         |
+| server_id  | 4 B  | 分配的服务器 ID              |
+| error_code | 2 B  | 错误码 (失败时有效)          |
+| error_msg  | 变长 | 错误消息 (失败时有效)        |
+
+#### 2.4.25 SERVER_NODE_LOC Payload (Type=0x52)
+
+Controller 通知 Relay 节点位置信息。
+
+```
+┌────────────┬────────────┬────────────────────────────┐
+│  node_cnt  │  nodes[]   │                            │
+│   (2 B)    │  (数组)    │                            │
+└────────────┴────────────┴────────────────────────────┘
+```
+
+**NodeLocation 结构**：
+
+```
+┌────────────┬────────────┬────────────┐
+│  node_id   │ server_id  │   flags    │
+│   (4 B)    │   (4 B)    │   (1 B)    │
+└────────────┴────────────┴────────────┘
+```
+
+| 字段      | 大小 | 说明                                |
+| --------- | ---- | ----------------------------------- |
+| node_id   | 4 B  | 节点 ID                             |
+| server_id | 4 B  | 节点连接的 Relay ID (0=未连接)      |
+| flags     | 1 B  | 0x01=在线, 0x02=仅此Relay可达       |
+
+#### 2.4.26 SERVER_BLACKLIST Payload (Type=0x53)
+
+Controller 推送黑名单更新。
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│  action    │ entry_cnt  │  entries[] │            │
+│   (1 B)    │   (2 B)    │  (数组)    │            │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+**BlacklistEntry 结构**：
+
+```
+┌────────────┬────────────┬────────────┐
+│ entry_type │   value    │ expires_at │
+│   (1 B)    │ (变长)     │   (8 B)    │
+└────────────┴────────────┴────────────┘
+```
+
+| 字段       | 大小 | 说明                                  |
+| ---------- | ---- | ------------------------------------- |
+| action     | 1 B  | 0x01=添加, 0x02=删除, 0x03=全量替换   |
+| entry_type | 1 B  | 0x01=node_id, 0x02=jti, 0x03=ip       |
+| value      | 变长 | 根据 entry_type 变化                  |
+| expires_at | 8 B  | 过期时间戳 (毫秒, 0=永久)             |
+
+#### 2.4.27 SERVER_HEARTBEAT Payload (Type=0x54)
+
+Relay 向 Controller 发送心跳。
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│ timestamp  │ conn_count │ bandwidth  │  cpu_usage │
+│   (8 B)    │   (4 B)    │   (4 B)    │   (1 B)    │
+├────────────┼────────────┼────────────┼────────────┤
+│ mem_usage  │ queue_len  │            │            │
+│   (1 B)    │   (4 B)    │            │            │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段       | 大小 | 说明                     |
+| ---------- | ---- | ------------------------ |
+| timestamp  | 8 B  | 发送时间戳 (毫秒)        |
+| conn_count | 4 B  | 当前连接数               |
+| bandwidth  | 4 B  | 当前带宽 (Kbps)          |
+| cpu_usage  | 1 B  | CPU 使用率 (0-100)       |
+| mem_usage  | 1 B  | 内存使用率 (0-100)       |
+| queue_len  | 4 B  | 消息队列长度             |
+
+#### 2.4.28 SERVER_RELAY_LIST Payload (Type=0x55)
+
+Controller 向 Relay 推送其他 Relay 列表。
+
+```
+┌────────────┬────────────┬────────────────────────────┐
+│ relay_cnt  │  relays[]  │                            │
+│   (2 B)    │ (RelayInfo)│                            │
+└────────────┴────────────┴────────────────────────────┘
+```
+
+#### 2.4.29 SERVER_LATENCY_REPORT Payload (Type=0x56)
+
+Relay 向 Controller 报告到其他 Relay 的延迟。
+
+```
+┌────────────┬────────────┬────────────────────────────┐
+│ report_cnt │  reports[] │                            │
+│   (2 B)    │  (数组)    │                            │
+└────────────┴────────────┴────────────────────────────┘
+```
+
+**RelayLatencyEntry 结构**：
+
+```
+┌────────────┬────────────┬────────────┐
+│ server_id  │ latency_ms │   status   │
+│   (4 B)    │   (2 B)    │   (1 B)    │
+└────────────┴────────────┴────────────┘
+```
+
+| 字段       | 大小 | 说明                           |
+| ---------- | ---- | ------------------------------ |
+| server_id  | 4 B  | 目标 Relay ID                  |
+| latency_ms | 2 B  | 平均延迟 (毫秒)                |
+| status     | 1 B  | 0x00=不可达, 0x01=可达         |
+
+#### 2.4.30 RELAY_AUTH Payload (Type=0x60)
+
+客户端向 Relay 认证。
+
+```
+┌────────────┬────────────┬────────────┐
+│relay_token │  node_id   │  node_key  │
+│ (len+bytes)│   (4 B)    │  (32 B)    │
+└────────────┴────────────┴────────────┘
+```
+
+| 字段        | 大小 | 说明                     |
+| ----------- | ---- | ------------------------ |
+| relay_token | 变长 | JWT Relay Token          |
+| node_id     | 4 B  | 客户端节点 ID            |
+| node_key    | 32 B | X25519 公钥              |
+
+#### 2.4.31 RELAY_AUTH_RESP Payload (Type=0x61)
+
+```
+┌────────────┬────────────┬────────────┐
+│  success   │ error_code │ error_msg  │
+│   (1 B)    │   (2 B)    │ (len+str)  │
+└────────────┴────────────┴────────────┘
+```
+
+| 字段       | 大小 | 说明                  |
+| ---------- | ---- | --------------------- |
+| success    | 1 B  | 0x00=失败, 0x01=成功  |
+| error_code | 2 B  | 错误码 (失败时有效)   |
+| error_msg  | 变长 | 错误消息 (失败时有效) |
+
+#### 2.4.32 MESH_HELLO Payload (Type=0x70)
+
+Relay 之间建立 Mesh 连接。
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│ server_id  │mesh_token  │capabilities│  version   │
+│   (4 B)    │ (len+bytes)│   (2 B)    │ (len+str)  │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段         | 大小 | 说明                    |
+| ------------ | ---- | ----------------------- |
+| server_id    | 4 B  | 发起方 Relay ID         |
+| mesh_token   | 变长 | Mesh 认证令牌           |
+| capabilities | 2 B  | 能力标志                |
+| version      | 变长 | 协议版本                |
+
+#### 2.4.33 MESH_HELLO_ACK Payload (Type=0x71)
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│  success   │ server_id  │capabilities│ error_msg  │
+│   (1 B)    │   (4 B)    │   (2 B)    │ (len+str)  │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段         | 大小 | 说明                     |
+| ------------ | ---- | ------------------------ |
+| success      | 1 B  | 0x00=失败, 0x01=成功     |
+| server_id    | 4 B  | 响应方 Relay ID          |
+| capabilities | 2 B  | 能力标志                 |
+| error_msg    | 变长 | 错误消息 (失败时有效)    |
+
+#### 2.4.34 MESH_FORWARD Payload (Type=0x72)
+
+Relay 之间转发数据。
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│  src_node  │  dst_node  │  hop_count │  payload   │
+│   (4 B)    │   (4 B)    │   (1 B)    │  (变长)    │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段      | 大小 | 说明                        |
+| --------- | ---- | --------------------------- |
+| src_node  | 4 B  | 源节点 ID                   |
+| dst_node  | 4 B  | 目标节点 ID                 |
+| hop_count | 1 B  | 跳数 (防环路，最大 3)       |
+| payload   | 变长 | 原始 DATA Payload (加密后)  |
+
+#### 2.4.35 MESH_PING Payload (Type=0x73)
+
+```
+┌────────────┬────────────┐
+│ timestamp  │  seq_num   │
+│   (8 B)    │   (4 B)    │
+└────────────┴────────────┘
+```
+
+#### 2.4.36 MESH_PONG Payload (Type=0x74)
+
+```
+┌────────────┬────────────┐
+│ timestamp  │  seq_num   │
+│   (8 B)    │   (4 B)    │
+└────────────┴────────────┘
+```
+
+| 字段      | 大小 | 说明                  |
+| --------- | ---- | --------------------- |
+| timestamp | 8 B  | 发送时间戳 (毫秒)     |
+| seq_num   | 4 B  | 序列号，PONG 原样返回 |
+
+#### 2.4.37 RelayInfo 结构
+
+CONFIG 和 CONFIG_UPDATE 中使用的 Relay 信息结构。
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│ server_id  │   name     │   region   │capabilities│
+│   (4 B)    │ (len+str)  │ (len+str)  │   (2 B)    │
+├────────────┼────────────┼────────────┼────────────┤
+│ public_ip  │public_port │ stun_port  │  priority  │
+│(ip_type+ip)│   (2 B)    │   (2 B)    │   (1 B)    │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段         | 大小 | 说明                              |
+| ------------ | ---- | --------------------------------- |
+| server_id    | 4 B  | 服务器 ID                         |
+| name         | 变长 | 服务器名称                        |
+| region       | 变长 | 区域标识                          |
+| capabilities | 2 B  | 能力标志 (0x01=RELAY, 0x02=STUN)  |
+| public_ip    | 变长 | 公网 IP (1B ip_type + 4/16B ip)   |
+| public_port  | 2 B  | Relay 端口                        |
+| stun_port    | 2 B  | STUN 端口 (0=未启用)              |
+| priority     | 1 B  | 优先级 (1=最高)                   |
+
+#### 2.4.38 STUNInfo 结构
+
+CONFIG 中使用的 STUN 服务器信息。
+
+```
+┌────────────┬────────────┬────────────┐
+│  ip_type   │     ip     │    port    │
+│   (1 B)    │ (4/16 B)   │   (2 B)    │
+└────────────┴────────────┴────────────┘
+```
+
+| 字段    | 大小   | 说明                   |
+| ------- | ------ | ---------------------- |
+| ip_type | 1 B    | 0x04=IPv4, 0x06=IPv6   |
+| ip      | 4/16 B | STUN 服务器 IP         |
+| port    | 2 B    | STUN 端口 (默认 3478)  |
+
 ### 2.5 协议子规范
 
 #### 2.5.1 分片规范 (FRAGMENTED)
@@ -771,6 +1210,7 @@ allowed_subnets 示例: ["192.168.1.0/24", "10.0.0.0/8"]
 | 触发条件       | 原始业务 Payload > 65521 字节 (65530 - 9)  |
 | 每片最大业务数据 | 65521 字节 (Length 上限 65530 减去 Fragment Header 9B) |
 | Frame.Type     | 分片帧的 Type 保持原始消息类型             |
+| orig_type      | Fragment Header 中重复记录原始类型 (用于校验) |
 | Frame.Flags    | 设置 FRAGMENTED (0x08) 标志                |
 | Length 字段    | Fragment Header (9B) + 本片业务数据长度    |
 | 重组超时       | 30 秒内未收齐所有分片则丢弃                |
@@ -1613,9 +2053,11 @@ Client A               Controller               Client B
 | network_id   | uint32    | 所属网络             |
 | machine_key  | blob(32)  | Ed25519 公钥         |
 | node_key     | blob(32)  | X25519 公钥          |
-| virtual_ip   | uint32    | 虚拟 IP (网络字节序) |
+| virtual_ip   | string    | 虚拟 IP (如 "10.0.0.5")  |
 | hostname     | string    | 主机名               |
 | os           | string    | 操作系统             |
+| arch         | string    | CPU 架构             |
+| version      | string    | 客户端版本           |
 | is_exit_node | bool      | 是否为 Exit Node     |
 | is_gateway   | bool      | 是否为子网网关       |
 | last_seen    | timestamp | 最后在线时间         |
@@ -2520,7 +2962,10 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | http.enable_tls          | bool   | false     | 启用 TLS                 |
 | tls.cert_path            | string | -         | 证书路径                 |
 | tls.key_path             | string | -         | 私钥路径                 |
-| jwt.secret               | string | -         | JWT 密钥                 |
+| jwt.algorithm            | string | "ES256"   | 签名算法: ES256(推荐)/HS256 |
+| jwt.private_key_path     | string | -         | ES256 私钥路径           |
+| jwt.public_key_path      | string | -         | ES256 公钥路径           |
+| jwt.secret               | string | -         | HS256 密钥 (开发环境)    |
 | jwt.auth_token_ttl       | uint32 | 1440      | Auth Token 有效期(分钟)  |
 | jwt.relay_token_ttl      | uint32 | 90        | Relay Token 有效期(分钟) |
 | database.path            | string | -         | 数据库路径               |
@@ -2678,7 +3123,10 @@ edgelink-controller <子命令> [选项]
 | `--cert`          | -               | TLS 证书路径            |
 | `--key`           | -               | TLS 私钥路径            |
 | `--db`            | `./edgelink.db` | SQLite 数据库路径       |
-| `--jwt-secret`    | -               | JWT 签名密钥 (必需)     |
+| `--jwt-algorithm` | `ES256`         | JWT 算法: ES256/HS256   |
+| `--jwt-private-key`| -              | ES256 私钥路径          |
+| `--jwt-public-key` | -              | ES256 公钥路径          |
+| `--jwt-secret`    | -               | HS256 密钥 (开发环境)   |
 | `--builtin-relay` | `false`         | 启用内置 Relay          |
 | `--builtin-stun`  | `false`         | 启用内置 STUN           |
 | `--public-ip`     | -               | 公网 IP (用于 NAT 检测) |
@@ -2940,9 +3388,18 @@ EdgeLink Client 1.0.0
 #### 完整部署流程
 
 ```
-# 1. 初始化 Controller
+# 1. 生成 JWT 密钥对 (ES256)
+openssl ecparam -genkey -name prime256v1 -out /etc/edgelink/jwt-private.pem
+openssl ec -in /etc/edgelink/jwt-private.pem -pubout -out /etc/edgelink/jwt-public.pem
+
+# 2. 初始化并启动 Controller
 edgelink-controller init --admin admin --db /var/lib/edgelink/db.sqlite
-edgelink-controller serve --jwt-secret "$(openssl rand -hex 32)" &
+edgelink-controller serve \
+    --jwt-private-key /etc/edgelink/jwt-private.pem \
+    --jwt-public-key /etc/edgelink/jwt-public.pem &
+
+# 开发环境可使用 HS256:
+# edgelink-controller serve --jwt-algorithm HS256 --jwt-secret "$(openssl rand -hex 32)" &
 
 # 2. 创建 AuthKey
 edgelink-controller authkey create --reusable --description "公司设备"
@@ -3241,7 +3698,10 @@ cert_path = "/etc/edgelink/cert.pem"
 key_path = "/etc/edgelink/key.pem"
 
 [jwt]
-secret = "your-secret-key-here"
+algorithm = "ES256"                    # 生产环境推荐
+private_key_path = "/etc/edgelink/jwt-private.pem"
+public_key_path = "/etc/edgelink/jwt-public.pem"
+# secret = "your-secret-key-here"     # HS256 开发环境使用
 auth_token_ttl = 1440
 relay_token_ttl = 90
 
@@ -3452,6 +3912,34 @@ Controller 使用 SQLite 持久化存储，以下为核心表结构。
 | latency_ms     | INTEGER   | NOT NULL                  | 延迟 (毫秒)             |
 | reported_at    | INTEGER   | NOT NULL                  | 报告时间 (毫秒时间戳)   |
 
+#### user_nodes 表 (用户-节点绑定)
+
+| 列名           | 类型      | 约束                      | 说明                    |
+| -------------- | --------- | ------------------------- | ----------------------- |
+| id             | INTEGER   | PRIMARY KEY AUTOINCREMENT | 绑定 ID                 |
+| user_id        | INTEGER   | NOT NULL REFERENCES users(id) | 用户 ID             |
+| node_id        | INTEGER   | NOT NULL REFERENCES nodes(id) | 节点 ID             |
+| role           | TEXT      | NOT NULL DEFAULT 'owner'  | 角色: owner/admin/viewer |
+| created_at     | INTEGER   | NOT NULL                  | 创建时间 (毫秒时间戳)   |
+
+> UNIQUE 约束: (user_id, node_id) 防止重复绑定。
+
+#### p2p_connections 表
+
+| 列名           | 类型      | 约束                      | 说明                    |
+| -------------- | --------- | ------------------------- | ----------------------- |
+| id             | INTEGER   | PRIMARY KEY AUTOINCREMENT | 连接 ID                 |
+| node_a         | INTEGER   | NOT NULL REFERENCES nodes(id) | 节点 A ID           |
+| node_b         | INTEGER   | NOT NULL REFERENCES nodes(id) | 节点 B ID           |
+| state          | TEXT      | NOT NULL                  | 状态: attempting/established/failed |
+| method         | TEXT      |                           | 打洞方式: direct/stun/relay |
+| relay_id       | INTEGER   | REFERENCES servers(id)    | 中继服务器 (如使用)     |
+| established_at | INTEGER   |                           | 建立时间 (毫秒时间戳)   |
+| last_activity  | INTEGER   |                           | 最后活动时间 (毫秒时间戳) |
+| created_at     | INTEGER   | NOT NULL                  | 创建时间 (毫秒时间戳)   |
+
+> UNIQUE 约束: (node_a, node_b) 其中 node_a < node_b (规范化存储)。
+
 #### 索引定义
 
 ```sql
@@ -3464,6 +3952,12 @@ CREATE INDEX idx_authkeys_user ON authkeys(user_id);
 CREATE INDEX idx_authkeys_network ON authkeys(network_id);
 CREATE INDEX idx_endpoints_node ON endpoints(node_id);
 CREATE INDEX idx_latency_node_server ON latency_reports(node_id, server_id);
+CREATE UNIQUE INDEX idx_user_nodes_unique ON user_nodes(user_id, node_id);
+CREATE INDEX idx_user_nodes_user ON user_nodes(user_id);
+CREATE INDEX idx_user_nodes_node ON user_nodes(node_id);
+CREATE UNIQUE INDEX idx_p2p_connections_unique ON p2p_connections(node_a, node_b);
+CREATE INDEX idx_p2p_connections_node ON p2p_connections(node_a);
+CREATE INDEX idx_p2p_connections_state ON p2p_connections(state);
 ```
 
 ### 附录 K: 术语表
