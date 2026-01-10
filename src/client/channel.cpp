@@ -576,7 +576,13 @@ asio::awaitable<void> RelayChannel::close() {
 
 asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const uint8_t> plaintext) {
     if (state_ != ChannelState::CONNECTED) {
-        spdlog::warn("Cannot send data: relay not connected");
+        spdlog::warn("Cannot send data: relay not connected (state={})", channel_state_name(state_));
+        co_return false;
+    }
+
+    if (!is_ws_open()) {
+        spdlog::warn("Cannot send data: WebSocket not open");
+        state_ = ChannelState::DISCONNECTED;
         co_return false;
     }
 
@@ -603,7 +609,8 @@ asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const ui
 
     co_await send_frame(FrameType::DATA, data.serialize());
 
-    spdlog::trace("Sent {} bytes to peer {}", plaintext.size(), peer_id);
+    spdlog::debug("Queued {} bytes for peer {} (encrypted {} bytes)",
+                  plaintext.size(), peer_id, data.encrypted_payload.size());
     co_return true;
 }
 
@@ -660,6 +667,7 @@ asio::awaitable<void> RelayChannel::write_loop() {
                     continue;
                 }
                 if (ec) {
+                    spdlog::debug("Relay write_loop: timer error {}", ec.message());
                     break;
                 }
             }
@@ -669,17 +677,30 @@ asio::awaitable<void> RelayChannel::write_loop() {
                 auto data = std::move(write_queue_.front());
                 write_queue_.pop();
 
+                spdlog::debug("Relay write_loop: sending {} bytes", data.size());
+
                 if (use_tls_) {
                     co_await tls_ws_->async_write(asio::buffer(data), asio::use_awaitable);
                 } else {
                     co_await plain_ws_->async_write(asio::buffer(data), asio::use_awaitable);
                 }
+
+                spdlog::debug("Relay write_loop: sent {} bytes", data.size());
             }
         }
     } catch (const boost::system::system_error& e) {
         if (e.code() != asio::error::operation_aborted) {
-            spdlog::debug("Relay channel write error: {}", e.what());
+            spdlog::warn("Relay channel write error: {}", e.what());
         }
+    }
+
+    // Write loop exited - WebSocket is closed
+    spdlog::warn("Relay write_loop exited, {} queued messages dropped", write_queue_.size());
+    writing_ = false;
+
+    // Clear queue to avoid memory leak
+    while (!write_queue_.empty()) {
+        write_queue_.pop();
     }
 }
 
