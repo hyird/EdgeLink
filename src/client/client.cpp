@@ -70,7 +70,9 @@ void Client::setup_callbacks() {
 
     control_cbs.on_disconnected = [this]() {
         spdlog::warn("Control channel disconnected");
-        if (state_ == ClientState::RUNNING && config_.auto_reconnect) {
+        // Reconnect if we were running or in the middle of connecting
+        if (config_.auto_reconnect && state_ != ClientState::STOPPED &&
+            state_ != ClientState::RECONNECTING) {
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         }
     };
@@ -126,7 +128,9 @@ void Client::setup_callbacks() {
 
     relay_cbs.on_disconnected = [this]() {
         spdlog::warn("Relay channel disconnected");
-        if (state_ == ClientState::RUNNING && config_.auto_reconnect) {
+        // Reconnect if we were running or in the middle of connecting
+        if (config_.auto_reconnect && state_ != ClientState::STOPPED &&
+            state_ != ClientState::RECONNECTING) {
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         }
     };
@@ -454,13 +458,30 @@ asio::awaitable<void> Client::reconnect() {
     // Teardown TUN on reconnect
     teardown_tun();
 
+    // Close existing channels
+    if (relay_) {
+        try { co_await relay_->close(); } catch (...) {}
+        relay_.reset();
+    }
+    if (control_) {
+        try { co_await control_->close(); } catch (...) {}
+        control_.reset();
+    }
+
     try {
         reconnect_timer_.expires_after(config_.reconnect_interval);
         co_await reconnect_timer_.async_wait(asio::use_awaitable);
 
         // Try to reconnect
         state_ = ClientState::STOPPED;
-        co_await start();
+        bool success = co_await start();
+
+        if (!success && config_.auto_reconnect) {
+            // start() failed, schedule another attempt
+            spdlog::warn("Reconnect failed, will retry in {}s",
+                         config_.reconnect_interval.count());
+            asio::co_spawn(ioc_, reconnect(), asio::detached);
+        }
 
     } catch (const boost::system::system_error& e) {
         if (e.code() != asio::error::operation_aborted) {
