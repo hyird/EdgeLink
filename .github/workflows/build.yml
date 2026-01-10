@@ -30,15 +30,14 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    # Cache entire build directory
+    # Cache entire build directory (invalidates when third_party changes)
     - name: Cache build
       uses: actions/cache@v4
       with:
         path: build
-        key: build-linux-${{ hashFiles('third_party/*.cmake') }}-${{ github.sha }}
+        key: build-linux-v2-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
         restore-keys: |
-          build-linux-${{ hashFiles('third_party/*.cmake') }}-
-          build-linux-
+          build-linux-v2-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
 
     - name: Configure CMake (FetchContent + musl static)
       run: |
@@ -113,15 +112,14 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    # Cache entire build directory
+    # Cache entire build directory (invalidates when third_party changes)
     - name: Cache build
       uses: actions/cache@v4
       with:
         path: build
-        key: build-windows-mingw-${{ hashFiles('third_party/*.cmake') }}-${{ github.sha }}
+        key: build-windows-mingw-v2-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
         restore-keys: |
-          build-windows-mingw-${{ hashFiles('third_party/*.cmake') }}-
-          build-windows-mingw-
+          build-windows-mingw-v2-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
 
     - name: Cache wintun
       uses: actions/cache@v4
