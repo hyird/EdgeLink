@@ -47,6 +47,9 @@ public:
     // Get peer by virtual IP
     std::optional<Peer> get_peer_by_ip(const IPv4Address& ip) const;
 
+    // Get peer IP by node ID (for logging)
+    std::string get_peer_ip_str(NodeId peer_id) const;
+
     // Check if peer exists
     bool has_peer(NodeId peer_id) const;
 

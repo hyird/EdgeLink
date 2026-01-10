@@ -81,7 +81,8 @@ void Client::setup_callbacks() {
     RelayChannelCallbacks relay_cbs;
 
     relay_cbs.on_data = [this](NodeId src, std::span<const uint8_t> data) {
-        spdlog::debug("Received {} bytes from node {}", data.size(), src);
+        auto src_peer_ip = peers_.get_peer_ip_str(src);
+        spdlog::debug("Received {} bytes from {}", data.size(), src_peer_ip);
 
         // If TUN mode is enabled, write IP packets to TUN device
         if (is_tun_enabled() && ip_packet::version(data) == 4) {
@@ -215,7 +216,7 @@ void Client::on_tun_packet(std::span<const uint8_t> packet) {
         return;
     }
 
-    spdlog::debug("Forwarding to peer {} ({})", peer->info.node_id,
+    spdlog::debug("Forwarding to {} ({})", peer->info.virtual_ip.to_string(),
                   peer->info.online ? "online" : "offline");
 
     // Send via relay

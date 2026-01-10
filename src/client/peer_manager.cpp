@@ -189,6 +189,15 @@ bool PeerManager::has_peer(NodeId peer_id) const {
     return peers_.find(peer_id) != peers_.end();
 }
 
+std::string PeerManager::get_peer_ip_str(NodeId peer_id) const {
+    std::shared_lock lock(mutex_);
+    auto it = peers_.find(peer_id);
+    if (it == peers_.end()) {
+        return std::to_string(peer_id);  // Fallback to node ID
+    }
+    return it->second.info.virtual_ip.to_string();
+}
+
 bool PeerManager::ensure_session_key(NodeId peer_id) {
     // Check if already derived
     if (crypto_.has_session_key(peer_id)) {

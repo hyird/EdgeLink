@@ -588,7 +588,7 @@ asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const ui
 
     // Ensure session key exists
     if (!peers_.ensure_session_key(peer_id)) {
-        spdlog::warn("Cannot send data to peer {}: no session key", peer_id);
+        spdlog::warn("Cannot send data to {}: no session key", peers_.get_peer_ip_str(peer_id));
         co_return false;
     }
 
@@ -596,7 +596,7 @@ asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const ui
     std::array<uint8_t, CHACHA20_NONCE_SIZE> nonce;
     auto encrypted = crypto_.encrypt(peer_id, plaintext, nonce);
     if (!encrypted) {
-        spdlog::error("Failed to encrypt data for peer {}", peer_id);
+        spdlog::error("Failed to encrypt data for {}", peers_.get_peer_ip_str(peer_id));
         co_return false;
     }
 
@@ -609,8 +609,8 @@ asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const ui
 
     co_await send_frame(FrameType::DATA, data.serialize());
 
-    spdlog::debug("Queued {} bytes for peer {} (encrypted {} bytes)",
-                  plaintext.size(), peer_id, data.encrypted_payload.size());
+    spdlog::debug("Queued {} bytes for {} (encrypted {} bytes)",
+                  plaintext.size(), peers_.get_peer_ip_str(peer_id), data.encrypted_payload.size());
     co_return true;
 }
 
@@ -751,44 +751,45 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
         co_return;
     }
 
-    spdlog::debug("Relay handle_data: DATA from {} to {}, encrypted {} bytes",
-                 data->src_node, data->dst_node, data->encrypted_payload.size());
+    spdlog::debug("Relay handle_data: DATA from {} to me, encrypted {} bytes",
+                 peers_.get_peer_ip_str(data->src_node), data->encrypted_payload.size());
 
     // Ensure session key exists for sender
     if (!peers_.ensure_session_key(data->src_node)) {
-        spdlog::warn("Cannot decrypt data from peer {}: no session key", data->src_node);
+        spdlog::warn("Cannot decrypt data from {}: no session key", peers_.get_peer_ip_str(data->src_node));
         co_return;
     }
 
     // Decrypt
+    auto peer_ip = peers_.get_peer_ip_str(data->src_node);
     auto plaintext = crypto_.decrypt(data->src_node, data->nonce, data->encrypted_payload);
     if (!plaintext) {
-        spdlog::warn("Failed to decrypt data from peer {}, renegotiating session key...", data->src_node);
+        spdlog::warn("Failed to decrypt data from {}, renegotiating session key...", peer_ip);
 
         // Clear old session key and re-derive
         crypto_.remove_session_key(data->src_node);
 
         // Try to derive new session key
         if (!peers_.ensure_session_key(data->src_node)) {
-            spdlog::error("Failed to renegotiate session key for peer {}", data->src_node);
+            spdlog::error("Failed to renegotiate session key for {}", peer_ip);
             co_return;
         }
 
-        spdlog::info("Session key renegotiated for peer {}", data->src_node);
+        spdlog::info("Session key renegotiated for {}", peer_ip);
 
         // Retry decryption with new key
         plaintext = crypto_.decrypt(data->src_node, data->nonce, data->encrypted_payload);
         if (!plaintext) {
-            spdlog::warn("Decryption still failed after renegotiation, peer {} may have different node_key", data->src_node);
+            spdlog::warn("Decryption still failed after renegotiation, {} may have different node_key", peer_ip);
             co_return;
         }
 
-        spdlog::info("Decryption succeeded after session key renegotiation for peer {}", data->src_node);
+        spdlog::info("Decryption succeeded after session key renegotiation for {}", peer_ip);
     }
 
     peers_.update_last_seen(data->src_node);
 
-    spdlog::debug("Relay handle_data: decrypted {} bytes from peer {}", plaintext->size(), data->src_node);
+    spdlog::debug("Relay handle_data: decrypted {} bytes from {}", plaintext->size(), peer_ip);
 
     if (callbacks_.on_data) {
         callbacks_.on_data(data->src_node, *plaintext);
