@@ -319,7 +319,13 @@ asio::awaitable<bool> Client::start() {
     bool connected = co_await control_->connect(config_.authkey);
     if (!connected) {
         spdlog::error("Failed to connect to controller");
-        state_ = ClientState::STOPPED;
+        if (config_.auto_reconnect) {
+            spdlog::info("Will retry in {}s...", config_.reconnect_interval.count());
+            state_ = ClientState::STOPPED;
+            asio::co_spawn(ioc_, reconnect(), asio::detached);
+        } else {
+            state_ = ClientState::STOPPED;
+        }
         co_return false;
     }
 
@@ -332,7 +338,13 @@ asio::awaitable<bool> Client::start() {
                                 asio::post(ioc_, asio::use_awaitable));
         if (timer.expiry() <= std::chrono::steady_clock::now()) {
             spdlog::error("Authentication timeout");
-            state_ = ClientState::STOPPED;
+            if (config_.auto_reconnect) {
+                spdlog::info("Will retry in {}s...", config_.reconnect_interval.count());
+                state_ = ClientState::STOPPED;
+                asio::co_spawn(ioc_, reconnect(), asio::detached);
+            } else {
+                state_ = ClientState::STOPPED;
+            }
             co_return false;
         }
         co_await asio::post(ioc_, asio::use_awaitable);
@@ -346,7 +358,13 @@ asio::awaitable<bool> Client::start() {
     if (!connected) {
         spdlog::error("Failed to connect to relay");
         co_await control_->close();
-        state_ = ClientState::STOPPED;
+        if (config_.auto_reconnect) {
+            spdlog::info("Will retry in {}s...", config_.reconnect_interval.count());
+            state_ = ClientState::STOPPED;
+            asio::co_spawn(ioc_, reconnect(), asio::detached);
+        } else {
+            state_ = ClientState::STOPPED;
+        }
         co_return false;
     }
 
@@ -358,7 +376,13 @@ asio::awaitable<bool> Client::start() {
         if (timer.expiry() <= std::chrono::steady_clock::now()) {
             spdlog::error("Relay authentication timeout");
             co_await control_->close();
-            state_ = ClientState::STOPPED;
+            if (config_.auto_reconnect) {
+                spdlog::info("Will retry in {}s...", config_.reconnect_interval.count());
+                state_ = ClientState::STOPPED;
+                asio::co_spawn(ioc_, reconnect(), asio::detached);
+            } else {
+                state_ = ClientState::STOPPED;
+            }
             co_return false;
         }
         co_await asio::post(ioc_, asio::use_awaitable);
