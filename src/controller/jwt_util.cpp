@@ -1,8 +1,13 @@
 #include "controller/jwt_util.hpp"
 #include <jwt-cpp/jwt.h>
+#include <jwt-cpp/traits/nlohmann-json/traits.h>
 #include <spdlog/spdlog.h>
 
 namespace edgelink::controller {
+
+// Use nlohmann_json traits for jwt-cpp
+using json_traits = jwt::traits::nlohmann_json;
+using json_claim = jwt::basic_claim<json_traits>;
 
 std::string jwt_error_message(JwtError error) {
     switch (error) {
@@ -24,14 +29,14 @@ std::expected<std::string, JwtError> JwtUtil::create_auth_token(
         auto now = std::chrono::system_clock::now();
         auto exp = now + validity;
 
-        auto token = jwt::create()
+        auto token = jwt::create<json_traits>()
             .set_issuer(ISSUER)
             .set_type("JWT")
             .set_issued_at(now)
             .set_expires_at(exp)
-            .set_payload_claim("typ", jwt::claim(std::string(AUTH_TOKEN_TYPE)))
-            .set_payload_claim("nid", jwt::claim(static_cast<int64_t>(node_id)))
-            .set_payload_claim("net", jwt::claim(static_cast<int64_t>(network_id)))
+            .set_payload_claim("typ", json_claim(std::string(AUTH_TOKEN_TYPE)))
+            .set_payload_claim("nid", json_claim(static_cast<int64_t>(node_id)))
+            .set_payload_claim("net", json_claim(static_cast<int64_t>(network_id)))
             .sign(jwt::algorithm::hs256{secret_});
 
         return token;
@@ -48,14 +53,14 @@ std::expected<std::string, JwtError> JwtUtil::create_relay_token(
         auto now = std::chrono::system_clock::now();
         auto exp = now + validity;
 
-        auto token = jwt::create()
+        auto token = jwt::create<json_traits>()
             .set_issuer(ISSUER)
             .set_type("JWT")
             .set_issued_at(now)
             .set_expires_at(exp)
-            .set_payload_claim("typ", jwt::claim(std::string(RELAY_TOKEN_TYPE)))
-            .set_payload_claim("nid", jwt::claim(static_cast<int64_t>(node_id)))
-            .set_payload_claim("net", jwt::claim(static_cast<int64_t>(network_id)))
+            .set_payload_claim("typ", json_claim(std::string(RELAY_TOKEN_TYPE)))
+            .set_payload_claim("nid", json_claim(static_cast<int64_t>(node_id)))
+            .set_payload_claim("net", json_claim(static_cast<int64_t>(network_id)))
             .sign(jwt::algorithm::hs256{secret_});
 
         return token;
@@ -67,11 +72,11 @@ std::expected<std::string, JwtError> JwtUtil::create_relay_token(
 
 std::expected<AuthTokenClaims, JwtError> JwtUtil::verify_auth_token(const std::string& token) {
     try {
-        auto verifier = jwt::verify()
+        auto verifier = jwt::verify<json_traits>()
             .allow_algorithm(jwt::algorithm::hs256{secret_})
             .with_issuer(ISSUER);
 
-        auto decoded = jwt::decode(token);
+        auto decoded = jwt::decode<json_traits>(token);
         verifier.verify(decoded);
 
         // Check token type
@@ -107,11 +112,11 @@ std::expected<AuthTokenClaims, JwtError> JwtUtil::verify_auth_token(const std::s
 
 std::expected<RelayTokenClaims, JwtError> JwtUtil::verify_relay_token(const std::string& token) {
     try {
-        auto verifier = jwt::verify()
+        auto verifier = jwt::verify<json_traits>()
             .allow_algorithm(jwt::algorithm::hs256{secret_})
             .with_issuer(ISSUER);
 
-        auto decoded = jwt::decode(token);
+        auto decoded = jwt::decode<json_traits>(token);
         verifier.verify(decoded);
 
         // Check token type
@@ -147,7 +152,7 @@ std::expected<RelayTokenClaims, JwtError> JwtUtil::verify_relay_token(const std:
 
 std::optional<uint64_t> JwtUtil::get_token_expiry(const std::string& token) {
     try {
-        auto decoded = jwt::decode(token);
+        auto decoded = jwt::decode<json_traits>(token);
         auto exp = decoded.get_expires_at();
         return std::chrono::duration_cast<std::chrono::seconds>(
             exp.time_since_epoch()).count();
