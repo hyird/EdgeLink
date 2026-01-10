@@ -15,8 +15,7 @@ template<typename StreamType>
 SessionBase<StreamType>::SessionBase(StreamType&& ws, SessionManager& manager)
     : ws_(std::move(ws))
     , manager_(manager)
-    , write_timer_(ws_.get_executor()) {
-    write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
+    , write_channel_(ws_.get_executor(), 1024) {  // Buffer up to 1024 messages
 }
 
 template<typename StreamType>
@@ -31,17 +30,11 @@ template<typename StreamType>
 asio::awaitable<void> SessionBase<StreamType>::send_raw(std::span<const uint8_t> data) {
     std::vector<uint8_t> copy(data.begin(), data.end());
 
-    // Post to ws_ executor to serialize queue access (lock-free)
-    std::weak_ptr<SessionBase<StreamType>> weak_self = this->shared_from_this();
-    asio::post(ws_.get_executor(), [weak_self, d = std::move(copy)]() mutable {
-        auto self = weak_self.lock();
-        if (!self) return;  // Session already destroyed
-
-        self->write_queue_.push(std::move(d));
-        if (!self->writing_) {
-            self->write_timer_.cancel();
-        }
-    });
+    // Try non-blocking send first (fast path)
+    if (!write_channel_.try_send(boost::system::error_code{}, std::move(copy))) {
+        // Channel full, this shouldn't happen often with 1024 buffer
+        spdlog::warn("Write channel full for node {}", node_id_);
+    }
     co_return;
 }
 
@@ -86,30 +79,19 @@ template<typename StreamType>
 asio::awaitable<void> SessionBase<StreamType>::write_loop() {
     try {
         while (ws_.is_open()) {
-            if (write_queue_.empty()) {
-                writing_ = false;
-                // Reset timer for next wait
-                write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
-                boost::system::error_code ec;
-                co_await write_timer_.async_wait(asio::redirect_error(asio::use_awaitable, ec));
-                // Timer cancelled means new data arrived, continue loop
-                if (ec == asio::error::operation_aborted) {
-                    continue;
+            // Wait for data from channel (thread-safe, lock-free)
+            auto [ec, data] = co_await write_channel_.async_receive(asio::as_tuple(asio::use_awaitable));
+            if (ec) {
+                if (ec == asio::experimental::channel_errc::channel_closed) {
+                    break;  // Normal shutdown
                 }
-                if (ec) {
-                    break;
-                }
+                spdlog::debug("Write channel error: {}", ec.message());
+                break;
             }
 
-            writing_ = true;
-            while (!write_queue_.empty() && ws_.is_open()) {
-                auto data = std::move(write_queue_.front());
-                write_queue_.pop();
-
-                spdlog::debug("Session write_loop: sending {} bytes to node {}", data.size(), node_id_);
-                co_await ws_.async_write(asio::buffer(data), asio::use_awaitable);
-                spdlog::debug("Session write_loop: sent {} bytes to node {}", data.size(), node_id_);
-            }
+            spdlog::debug("Session write_loop: sending {} bytes to node {}", data.size(), node_id_);
+            co_await ws_.async_write(asio::buffer(data), asio::use_awaitable);
+            spdlog::debug("Session write_loop: sent {} bytes to node {}", data.size(), node_id_);
         }
     } catch (const boost::system::system_error& e) {
         if (e.code() != asio::error::operation_aborted &&
@@ -117,6 +99,9 @@ asio::awaitable<void> SessionBase<StreamType>::write_loop() {
             spdlog::debug("Session write error: {}", e.what());
         }
     }
+
+    // Close channel on exit
+    write_channel_.close();
 }
 
 template<typename StreamType>

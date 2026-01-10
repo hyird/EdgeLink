@@ -7,9 +7,9 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/ssl.hpp>
+#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <functional>
 #include <memory>
-#include <queue>
 #include <string>
 
 namespace asio = boost::asio;
@@ -105,10 +105,9 @@ protected:
     NodeId node_id_ = 0;
     NetworkId network_id_ = 0;
 
-    // Write queue (all access must be on ws_ executor via post)
-    std::queue<std::vector<uint8_t>> write_queue_;
-    bool writing_ = false;
-    asio::steady_timer write_timer_;
+    // Write channel (thread-safe, lock-free)
+    using WriteChannel = asio::experimental::concurrent_channel<void(boost::system::error_code, std::vector<uint8_t>)>;
+    WriteChannel write_channel_;
 
     // Read buffer
     beast::flat_buffer read_buffer_;
