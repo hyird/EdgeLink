@@ -3616,6 +3616,8 @@ level = "info"  # 全局默认等级
 "controller.db" = "info"        # 数据库正常级别
 ```
 
+| 配置项                   | 类型   | 默认值    | 说明                     |
+| ------------------------ | ------ | --------- | ------------------------ |
 | worker_threads           | uint32 | 0         | 工作线程数 (0=CPU核心数) |
 | control_heartbeat.interval | uint32 | 30      | 控制通道心跳发送间隔 (秒) |
 | control_heartbeat.timeout  | uint32 | 90      | 控制通道心跳超时时间 (秒) |
