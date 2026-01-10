@@ -108,7 +108,10 @@ Database::~Database() {
 }
 
 std::expected<void, DbError> Database::open(const std::string& path) {
-    int rc = sqlite3_open(path.c_str(), &db_);
+    // Open with FULLMUTEX for thread-safe access from multiple threads
+    int rc = sqlite3_open_v2(path.c_str(), &db_,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+        nullptr);
     if (rc != SQLITE_OK) {
         spdlog::error("Failed to open database: {}", sqlite3_errmsg(db_));
         sqlite3_close(db_);
@@ -120,6 +123,7 @@ std::expected<void, DbError> Database::open(const std::string& path) {
     execute("PRAGMA journal_mode=WAL");
     execute("PRAGMA synchronous=NORMAL");
     execute("PRAGMA foreign_keys=ON");
+    execute("PRAGMA busy_timeout=5000");
 
     spdlog::info("Database opened: {}", path);
     return {};
