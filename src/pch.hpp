@@ -10,15 +10,23 @@
 #include <cstring>
 #include <deque>
 #include <expected>
+#include <filesystem>
 #include <format>
 #include <functional>
+#include <future>
+#include <iomanip>
+#include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -44,6 +52,9 @@
 
 // Boost.URL
 #include <boost/url.hpp>
+
+// Boost.JSON
+#include <boost/json.hpp>
 
 // Logging
 #include <spdlog/spdlog.h>
