@@ -1,9 +1,13 @@
 #include "controller/jwt_util.hpp"
+#include "common/logger.hpp"
 #include <jwt-cpp/jwt.h>
 #include <jwt-cpp/traits/nlohmann-json/traits.h>
-#include <spdlog/spdlog.h>
 
 namespace edgelink::controller {
+
+namespace {
+auto& log() { return Logger::get("controller.jwt"); }
+}
 
 // Use nlohmann_json traits for jwt-cpp
 using json_traits = jwt::traits::nlohmann_json;
@@ -41,7 +45,7 @@ std::expected<std::string, JwtError> JwtUtil::create_auth_token(
 
         return token;
     } catch (const std::exception& e) {
-        spdlog::error("Failed to create auth token: {}", e.what());
+        log().error("Failed to create auth token: {}", e.what());
         return std::unexpected(JwtError::CREATION_FAILED);
     }
 }
@@ -65,7 +69,7 @@ std::expected<std::string, JwtError> JwtUtil::create_relay_token(
 
         return token;
     } catch (const std::exception& e) {
-        spdlog::error("Failed to create relay token: {}", e.what());
+        log().error("Failed to create relay token: {}", e.what());
         return std::unexpected(JwtError::CREATION_FAILED);
     }
 }
@@ -99,13 +103,13 @@ std::expected<AuthTokenClaims, JwtError> JwtUtil::verify_auth_token(const std::s
 
         return claims;
     } catch (const jwt::error::token_verification_exception& e) {
-        spdlog::debug("Auth token verification failed: {}", e.what());
+        log().debug("Auth token verification failed: {}", e.what());
         if (std::string(e.what()).find("expired") != std::string::npos) {
             return std::unexpected(JwtError::EXPIRED);
         }
         return std::unexpected(JwtError::SIGNATURE_INVALID);
     } catch (const std::exception& e) {
-        spdlog::debug("Auth token decode failed: {}", e.what());
+        log().debug("Auth token decode failed: {}", e.what());
         return std::unexpected(JwtError::INVALID_TOKEN);
     }
 }
@@ -139,13 +143,13 @@ std::expected<RelayTokenClaims, JwtError> JwtUtil::verify_relay_token(const std:
 
         return claims;
     } catch (const jwt::error::token_verification_exception& e) {
-        spdlog::debug("Relay token verification failed: {}", e.what());
+        log().debug("Relay token verification failed: {}", e.what());
         if (std::string(e.what()).find("expired") != std::string::npos) {
             return std::unexpected(JwtError::EXPIRED);
         }
         return std::unexpected(JwtError::SIGNATURE_INVALID);
     } catch (const std::exception& e) {
-        spdlog::debug("Relay token decode failed: {}", e.what());
+        log().debug("Relay token decode failed: {}", e.what());
         return std::unexpected(JwtError::INVALID_TOKEN);
     }
 }

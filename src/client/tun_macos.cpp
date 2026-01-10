@@ -2,9 +2,13 @@
 // Uses utun interface (to be implemented)
 
 #include "client/tun_device.hpp"
-#include <spdlog/spdlog.h>
+#include "common/logger.hpp"
 
 #ifdef __APPLE__
+
+namespace {
+auto& log() { return edgelink::Logger::get("client.tun"); }
+}
 
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -42,7 +46,7 @@ public:
         // Create utun socket
         int fd = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
         if (fd < 0) {
-            spdlog::error("Failed to create utun socket: {}", strerror(errno));
+            log().error("Failed to create utun socket: {}", strerror(errno));
             return std::unexpected(TunError::OPEN_FAILED);
         }
 
@@ -51,7 +55,7 @@ public:
         strncpy(ci.ctl_name, UTUN_CONTROL_NAME, sizeof(ci.ctl_name) - 1);
 
         if (ioctl(fd, CTLIOCGINFO, &ci) < 0) {
-            spdlog::error("Failed to get utun control info: {}", strerror(errno));
+            log().error("Failed to get utun control info: {}", strerror(errno));
             ::close(fd);
             return std::unexpected(TunError::OPEN_FAILED);
         }
@@ -75,7 +79,7 @@ public:
         sc.sc_unit = unit + 1; // utun unit numbers are 1-indexed
 
         if (connect(fd, reinterpret_cast<struct sockaddr*>(&sc), sizeof(sc)) < 0) {
-            spdlog::error("Failed to connect utun: {}", strerror(errno));
+            log().error("Failed to connect utun: {}", strerror(errno));
             ::close(fd);
             return std::unexpected(TunError::OPEN_FAILED);
         }
@@ -84,7 +88,7 @@ public:
         char ifname[IFNAMSIZ];
         socklen_t ifname_len = sizeof(ifname);
         if (getsockopt(fd, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, ifname, &ifname_len) < 0) {
-            spdlog::error("Failed to get utun interface name: {}", strerror(errno));
+            log().error("Failed to get utun interface name: {}", strerror(errno));
             ::close(fd);
             return std::unexpected(TunError::OPEN_FAILED);
         }
@@ -95,7 +99,7 @@ public:
         // Assign to ASIO stream
         stream_.assign(fd_);
 
-        spdlog::info("macOS utun device opened: {}", name_);
+        log().info("macOS utun device opened: {}", name_);
         return {};
     }
 
@@ -116,7 +120,7 @@ public:
 
         int result = system(cmd.c_str());
         if (result != 0) {
-            spdlog::error("Failed to configure utun: ifconfig returned {}", result);
+            log().error("Failed to configure utun: ifconfig returned {}", result);
             return std::unexpected(TunError::CONFIGURE_FAILED);
         }
 
@@ -124,7 +128,7 @@ public:
         netmask_ = netmask;
         mtu_ = mtu;
 
-        spdlog::info("macOS utun {} configured: {}/{} MTU={}", name_, ip.to_string(),
+        log().info("macOS utun {} configured: {}/{} MTU={}", name_, ip.to_string(),
                      netmask.to_string(), mtu);
         return {};
     }
@@ -139,7 +143,7 @@ public:
 
         if (fd_ >= 0) {
             fd_ = -1;
-            spdlog::info("macOS utun device {} closed", name_);
+            log().info("macOS utun device {} closed", name_);
         }
     }
 
@@ -183,7 +187,7 @@ public:
         asio::write(stream_, asio::buffer(buf), ec);
 
         if (ec) {
-            spdlog::debug("utun write error: {}", ec.message());
+            log().debug("utun write error: {}", ec.message());
             return std::unexpected(TunError::WRITE_FAILED);
         }
 
@@ -212,7 +216,7 @@ public:
                 asio::use_awaitable);
             co_return std::expected<void, TunError>{};
         } catch (const boost::system::system_error& e) {
-            spdlog::debug("utun async write error: {}", e.what());
+            log().debug("utun async write error: {}", e.what());
             co_return std::unexpected(TunError::WRITE_FAILED);
         }
     }
@@ -226,7 +230,7 @@ private:
             [this](const boost::system::error_code& ec, size_t bytes) {
                 if (ec) {
                     if (ec != asio::error::operation_aborted) {
-                        spdlog::debug("utun read error: {}", ec.message());
+                        log().debug("utun read error: {}", ec.message());
                     }
                     return;
                 }

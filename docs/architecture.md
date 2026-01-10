@@ -3663,60 +3663,7 @@ Client 收到响应:
 
 ### 9.16 运维集成
 
-#### 9.16.1 Prometheus 指标
-
-**通用指标** (所有组件)：
-
-| 指标名                              | 类型      | 标签                    | 说明                    |
-| ----------------------------------- | --------- | ----------------------- | ----------------------- |
-| `edgelink_info`                     | Gauge     | version, component      | 版本信息 (值恒为 1)     |
-| `edgelink_uptime_seconds`           | Gauge     | -                       | 进程运行时间            |
-| `edgelink_log_messages_total`       | Counter   | level                   | 各级别日志消息计数      |
-| `edgelink_log_dropped_total`        | Counter   | -                       | 队列溢出丢弃的日志数    |
-
-**Controller 指标**：
-
-| 指标名                                    | 类型      | 标签              | 说明                    |
-| ----------------------------------------- | --------- | ----------------- | ----------------------- |
-| `edgelink_controller_connections_active`  | Gauge     | type=client/relay | 当前活跃连接数          |
-| `edgelink_controller_nodes_total`         | Gauge     | status=online/offline | 节点总数            |
-| `edgelink_controller_auth_requests_total` | Counter   | result, auth_type | 认证请求计数            |
-| `edgelink_controller_config_pushes_total` | Counter   | type              | 配置推送计数            |
-| `edgelink_controller_db_queries_total`    | Counter   | operation         | 数据库查询计数          |
-| `edgelink_controller_db_latency_seconds`  | Histogram | operation         | 数据库操作延迟          |
-
-**Relay 指标**：
-
-| 指标名                                  | 类型      | 标签              | 说明                    |
-| --------------------------------------- | --------- | ----------------- | ----------------------- |
-| `edgelink_relay_connections_active`     | Gauge     | type=client/mesh  | 当前活跃连接数          |
-| `edgelink_relay_data_bytes_total`       | Counter   | direction=tx/rx   | 传输数据量              |
-| `edgelink_relay_packets_total`          | Counter   | direction=tx/rx   | 传输数据包数            |
-| `edgelink_relay_forward_latency_seconds`| Histogram | path=local/mesh   | 转发延迟                |
-| `edgelink_relay_auth_requests_total`    | Counter   | result            | 客户端认证请求          |
-| `edgelink_relay_controller_connected`   | Gauge     | -                 | Controller 连接状态 (0/1)|
-| `edgelink_relay_mesh_peers_total`       | Gauge     | -                 | Mesh 连接的 Relay 数量  |
-
-**Client 指标**：
-
-| 指标名                                  | 类型      | 标签              | 说明                    |
-| --------------------------------------- | --------- | ----------------- | ----------------------- |
-| `edgelink_client_state`                 | Gauge     | state             | 当前状态 (枚举值)       |
-| `edgelink_client_peers_total`           | Gauge     | status=p2p/relay  | 对端节点数              |
-| `edgelink_client_p2p_success_rate`      | Gauge     | -                 | P2P 打洞成功率          |
-| `edgelink_client_data_bytes_total`      | Counter   | direction, path   | 传输数据量              |
-| `edgelink_client_latency_seconds`       | Histogram | peer_node, path   | 到各节点延迟            |
-| `edgelink_client_controller_latency_seconds` | Gauge | -                | Controller RTT          |
-| `edgelink_client_relay_latency_seconds` | Gauge     | relay_id          | Relay RTT               |
-
-**Prometheus 端点**：
-
-| 端点             | 说明                    |
-| ---------------- | ----------------------- |
-| `/metrics`       | Prometheus 格式指标     |
-| 默认端口         | 与主服务同端口          |
-
-#### 9.16.2 日志采集配置示例
+#### 9.16.1 日志采集配置示例
 
 **Filebeat (ELK)**:
 ```yaml

@@ -1,5 +1,5 @@
 #include "client/channel.hpp"
-#include <spdlog/spdlog.h>
+#include "common/logger.hpp"
 #include <chrono>
 
 #ifdef _WIN32
@@ -12,6 +12,8 @@
 namespace edgelink::client {
 
 namespace {
+
+auto& log() { return Logger::get("client.channel"); }
 
 // Get system hostname (cross-platform)
 std::string get_hostname() {
@@ -109,7 +111,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         // Parse URL
         auto parsed = boost::urls::parse_uri(url_);
         if (!parsed) {
-            spdlog::error("Invalid control URL: {}", url_);
+            log().error("Invalid control URL: {}", url_);
             co_return false;
         }
 
@@ -119,7 +121,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         std::string target = std::string(parsed->path());
         if (target.empty()) target = "/api/v1/control";
 
-        spdlog::info("Connecting to controller: {}:{}{} (TLS: {})",
+        log().info("Connecting to controller: {}:{}{} (TLS: {})",
                      host, port, target, use_tls_ ? "yes" : "no");
 
         // Resolve host
@@ -132,7 +134,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
 
             // Set SNI
             if (!SSL_set_tlsext_host_name(tls_ws_->next_layer().native_handle(), host.c_str())) {
-                spdlog::error("Failed to set SNI");
+                log().error("Failed to set SNI");
                 co_return false;
             }
 
@@ -180,7 +182,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
             plain_ws_->binary(true);
         }
 
-        spdlog::info("WebSocket connected, authenticating...");
+        log().info("WebSocket connected, authenticating...");
         state_ = ChannelState::AUTHENTICATING;
 
         // Build AUTH_REQUEST
@@ -200,7 +202,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         auto sign_data = req.get_sign_data();
         auto sig = crypto_.sign(sign_data);
         if (!sig) {
-            spdlog::error("Failed to sign AUTH_REQUEST");
+            log().error("Failed to sign AUTH_REQUEST");
             co_return false;
         }
         req.signature = *sig;
@@ -221,7 +223,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         co_return true;
 
     } catch (const std::exception& e) {
-        spdlog::error("Control channel connection failed: {}", e.what());
+        log().error("Control channel connection failed: {}", e.what());
         state_ = ChannelState::DISCONNECTED;
         co_return false;
     }
@@ -230,7 +232,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
 asio::awaitable<bool> ControlChannel::reconnect() {
     // Reconnect using machine key authentication (for already registered nodes)
     if (node_id_ == 0) {
-        spdlog::error("Cannot reconnect: not previously authenticated");
+        log().error("Cannot reconnect: not previously authenticated");
         co_return false;
     }
 
@@ -253,7 +255,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
         // Parse URL
         auto parsed = boost::urls::parse_uri(url_);
         if (!parsed) {
-            spdlog::error("Invalid control URL: {}", url_);
+            log().error("Invalid control URL: {}", url_);
             state_ = ChannelState::DISCONNECTED;
             co_return false;
         }
@@ -264,7 +266,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
         std::string target = std::string(parsed->path());
         if (target.empty()) target = "/api/v1/control";
 
-        spdlog::info("Reconnecting to controller: {}:{}{} (TLS: {})",
+        log().info("Reconnecting to controller: {}:{}{} (TLS: {})",
                      host, port, target, use_tls_ ? "yes" : "no");
 
         // Resolve host
@@ -277,7 +279,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
 
             // Set SNI
             if (!SSL_set_tlsext_host_name(tls_ws_->next_layer().native_handle(), host.c_str())) {
-                spdlog::error("Failed to set SNI");
+                log().error("Failed to set SNI");
                 state_ = ChannelState::DISCONNECTED;
                 co_return false;
             }
@@ -326,7 +328,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
             plain_ws_->binary(true);
         }
 
-        spdlog::info("WebSocket reconnected, authenticating with machine key...");
+        log().info("WebSocket reconnected, authenticating with machine key...");
         state_ = ChannelState::AUTHENTICATING;
 
         // Build AUTH_REQUEST with MACHINE auth type (no authkey needed)
@@ -346,7 +348,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
         auto sign_data = req.get_sign_data();
         auto sig = crypto_.sign(sign_data);
         if (!sig) {
-            spdlog::error("Failed to sign AUTH_REQUEST");
+            log().error("Failed to sign AUTH_REQUEST");
             state_ = ChannelState::DISCONNECTED;
             co_return false;
         }
@@ -368,7 +370,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
         co_return true;
 
     } catch (const std::exception& e) {
-        spdlog::error("Control channel reconnection failed: {}", e.what());
+        log().error("Control channel reconnection failed: {}", e.what());
         state_ = ChannelState::DISCONNECTED;
         co_return false;
     }
@@ -430,7 +432,7 @@ asio::awaitable<void> ControlChannel::read_loop() {
 
             auto result = FrameCodec::decode(span);
             if (!result) {
-                spdlog::warn("Control: failed to decode frame");
+                log().warn("Control: failed to decode frame");
                 continue;
             }
 
@@ -438,7 +440,7 @@ asio::awaitable<void> ControlChannel::read_loop() {
         }
     } catch (const boost::system::system_error& e) {
         if (e.code() != websocket::error::closed) {
-            spdlog::debug("Control channel read error: {}", e.what());
+            log().debug("Control channel read error: {}", e.what());
         }
     }
 
@@ -481,13 +483,13 @@ asio::awaitable<void> ControlChannel::write_loop() {
         }
     } catch (const boost::system::system_error& e) {
         if (e.code() != asio::error::operation_aborted) {
-            spdlog::debug("Control channel write error: {}", e.what());
+            log().debug("Control channel write error: {}", e.what());
         }
     }
 }
 
 asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
-    spdlog::debug("Control: received {} frame", frame_type_name(frame.header.type));
+    log().debug("Control: received {} frame", frame_type_name(frame.header.type));
 
     switch (frame.header.type) {
         case FrameType::AUTH_RESPONSE:
@@ -506,7 +508,7 @@ asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
             co_await handle_error(frame);
             break;
         default:
-            spdlog::warn("Control: unhandled frame type 0x{:02X}",
+            log().warn("Control: unhandled frame type 0x{:02X}",
                          static_cast<uint8_t>(frame.header.type));
             break;
     }
@@ -515,12 +517,12 @@ asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
 asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
     auto resp = AuthResponse::parse(frame.payload);
     if (!resp) {
-        spdlog::error("Failed to parse AUTH_RESPONSE");
+        log().error("Failed to parse AUTH_RESPONSE");
         co_return;
     }
 
     if (!resp->success) {
-        spdlog::error("Authentication failed: {} (code {})", resp->error_msg, resp->error_code);
+        log().error("Authentication failed: {} (code {})", resp->error_msg, resp->error_code);
         if (callbacks_.on_error) {
             callbacks_.on_error(resp->error_code, resp->error_msg);
         }
@@ -536,7 +538,7 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
 
     crypto_.set_node_id(node_id_);
 
-    spdlog::info("Authenticated as node {} with IP {}", node_id_, virtual_ip_.to_string());
+    log().info("Authenticated as node {} with IP {}", node_id_, virtual_ip_.to_string());
 
     // Note: state_ is set to CONNECTED after receiving CONFIG, not here
     // This ensures peers are populated before on_connected is called
@@ -549,11 +551,11 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
 asio::awaitable<void> ControlChannel::handle_config(const Frame& frame) {
     auto config = Config::parse(frame.payload);
     if (!config) {
-        spdlog::error("Failed to parse CONFIG");
+        log().error("Failed to parse CONFIG");
         co_return;
     }
 
-    spdlog::info("Received CONFIG v{} with {} peers", config->version, config->peers.size());
+    log().info("Received CONFIG v{} with {} peers", config->version, config->peers.size());
 
     // Save subnet mask for TUN configuration
     subnet_mask_ = config->subnet_mask;
@@ -582,16 +584,16 @@ asio::awaitable<void> ControlChannel::handle_config(const Frame& frame) {
 asio::awaitable<void> ControlChannel::handle_config_update(const Frame& frame) {
     auto update = ConfigUpdate::parse(frame.payload);
     if (!update) {
-        spdlog::error("Failed to parse CONFIG_UPDATE");
+        log().error("Failed to parse CONFIG_UPDATE");
         co_return;
     }
 
-    spdlog::debug("Received CONFIG_UPDATE v{}", update->version);
+    log().debug("Received CONFIG_UPDATE v{}", update->version);
 
     // Update relay token if present
     if (has_flag(update->update_flags, ConfigUpdateFlags::TOKEN_REFRESH)) {
         relay_token_ = update->relay_token;
-        spdlog::debug("Relay token refreshed");
+        log().debug("Relay token refreshed");
     }
 
     if (callbacks_.on_config_update) {
@@ -609,7 +611,7 @@ asio::awaitable<void> ControlChannel::handle_pong(const Frame& frame) {
         std::chrono::system_clock::now().time_since_epoch()).count();
     uint64_t rtt = now - pong->timestamp;
 
-    spdlog::debug("Control PONG: RTT={}ms", rtt);
+    log().debug("Control PONG: RTT={}ms", rtt);
 }
 
 asio::awaitable<void> ControlChannel::handle_error(const Frame& frame) {
@@ -618,7 +620,7 @@ asio::awaitable<void> ControlChannel::handle_error(const Frame& frame) {
         co_return;
     }
 
-    spdlog::error("Control error {}: {}", error->error_code, error->error_msg);
+    log().error("Control error {}: {}", error->error_code, error->error_msg);
 
     if (callbacks_.on_error) {
         callbacks_.on_error(error->error_code, error->error_msg);
@@ -674,7 +676,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
         // Parse URL
         auto parsed = boost::urls::parse_uri(url_);
         if (!parsed) {
-            spdlog::error("Invalid relay URL: {}", url_);
+            log().error("Invalid relay URL: {}", url_);
             co_return false;
         }
 
@@ -684,7 +686,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
         std::string target = std::string(parsed->path());
         if (target.empty()) target = "/api/v1/relay";
 
-        spdlog::info("Connecting to relay: {}:{}{} (TLS: {})",
+        log().info("Connecting to relay: {}:{}{} (TLS: {})",
                      host, port, target, use_tls_ ? "yes" : "no");
 
         // Resolve host
@@ -732,7 +734,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             plain_ws_->binary(true);
         }
 
-        spdlog::info("Relay WebSocket connected, authenticating...");
+        log().info("Relay WebSocket connected, authenticating...");
         state_ = ChannelState::AUTHENTICATING;
 
         // Build RELAY_AUTH
@@ -756,7 +758,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
         co_return true;
 
     } catch (const std::exception& e) {
-        spdlog::error("Relay channel connection failed: {}", e.what());
+        log().error("Relay channel connection failed: {}", e.what());
         state_ = ChannelState::DISCONNECTED;
         co_return false;
     }
@@ -784,19 +786,19 @@ asio::awaitable<void> RelayChannel::close() {
 
 asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const uint8_t> plaintext) {
     if (state_ != ChannelState::CONNECTED) {
-        spdlog::warn("Cannot send data: relay not connected (state={})", channel_state_name(state_));
+        log().warn("Cannot send data: relay not connected (state={})", channel_state_name(state_));
         co_return false;
     }
 
     if (!is_ws_open()) {
-        spdlog::warn("Cannot send data: WebSocket not open");
+        log().warn("Cannot send data: WebSocket not open");
         state_ = ChannelState::DISCONNECTED;
         co_return false;
     }
 
     // Ensure session key exists
     if (!peers_.ensure_session_key(peer_id)) {
-        spdlog::warn("Cannot send data to {}: no session key", peers_.get_peer_ip_str(peer_id));
+        log().warn("Cannot send data to {}: no session key", peers_.get_peer_ip_str(peer_id));
         co_return false;
     }
 
@@ -804,7 +806,7 @@ asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const ui
     std::array<uint8_t, CHACHA20_NONCE_SIZE> nonce;
     auto encrypted = crypto_.encrypt(peer_id, plaintext, nonce);
     if (!encrypted) {
-        spdlog::error("Failed to encrypt data for {}", peers_.get_peer_ip_str(peer_id));
+        log().error("Failed to encrypt data for {}", peers_.get_peer_ip_str(peer_id));
         co_return false;
     }
 
@@ -817,7 +819,7 @@ asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const ui
 
     co_await send_frame(FrameType::DATA, data.serialize());
 
-    spdlog::debug("Queued {} bytes for {} (encrypted {} bytes)",
+    log().debug("Queued {} bytes for {} (encrypted {} bytes)",
                   plaintext.size(), peers_.get_peer_ip_str(peer_id), data.encrypted_payload.size());
     co_return true;
 }
@@ -839,21 +841,21 @@ asio::awaitable<void> RelayChannel::read_loop() {
             std::span<const uint8_t> span(
                 static_cast<const uint8_t*>(data.data()), data.size());
 
-            spdlog::debug("Relay read_loop: received {} bytes", span.size());
+            log().debug("Relay read_loop: received {} bytes", span.size());
 
             auto result = FrameCodec::decode(span);
             if (!result) {
-                spdlog::warn("Relay: failed to decode frame ({} bytes)", span.size());
+                log().warn("Relay: failed to decode frame ({} bytes)", span.size());
                 continue;
             }
 
-            spdlog::debug("Relay read_loop: decoded frame type 0x{:02X}",
+            log().debug("Relay read_loop: decoded frame type 0x{:02X}",
                          static_cast<uint8_t>(result->first.header.type));
             co_await handle_frame(result->first);
         }
     } catch (const boost::system::system_error& e) {
         if (e.code() != websocket::error::closed) {
-            spdlog::debug("Relay channel read error: {}", e.what());
+            log().debug("Relay channel read error: {}", e.what());
         }
     }
 
@@ -878,7 +880,7 @@ asio::awaitable<void> RelayChannel::write_loop() {
                     continue;
                 }
                 if (ec) {
-                    spdlog::debug("Relay write_loop: timer error {}", ec.message());
+                    log().debug("Relay write_loop: timer error {}", ec.message());
                     break;
                 }
             }
@@ -888,7 +890,7 @@ asio::awaitable<void> RelayChannel::write_loop() {
                 auto data = std::move(write_queue_.front());
                 write_queue_.pop();
 
-                spdlog::debug("Relay write_loop: sending {} bytes", data.size());
+                log().debug("Relay write_loop: sending {} bytes", data.size());
 
                 if (use_tls_) {
                     co_await tls_ws_->async_write(asio::buffer(data), asio::use_awaitable);
@@ -896,17 +898,17 @@ asio::awaitable<void> RelayChannel::write_loop() {
                     co_await plain_ws_->async_write(asio::buffer(data), asio::use_awaitable);
                 }
 
-                spdlog::debug("Relay write_loop: sent {} bytes", data.size());
+                log().debug("Relay write_loop: sent {} bytes", data.size());
             }
         }
     } catch (const boost::system::system_error& e) {
         if (e.code() != asio::error::operation_aborted) {
-            spdlog::warn("Relay channel write error: {}", e.what());
+            log().warn("Relay channel write error: {}", e.what());
         }
     }
 
     // Write loop exited - WebSocket is closed
-    spdlog::warn("Relay write_loop exited, {} queued messages dropped", write_queue_.size());
+    log().warn("Relay write_loop exited, {} queued messages dropped", write_queue_.size());
     writing_ = false;
 
     // Clear queue to avoid memory leak
@@ -927,7 +929,7 @@ asio::awaitable<void> RelayChannel::handle_frame(const Frame& frame) {
             co_await handle_pong(frame);
             break;
         default:
-            spdlog::warn("Relay: unhandled frame type 0x{:02X}",
+            log().warn("Relay: unhandled frame type 0x{:02X}",
                          static_cast<uint8_t>(frame.header.type));
             break;
     }
@@ -936,17 +938,17 @@ asio::awaitable<void> RelayChannel::handle_frame(const Frame& frame) {
 asio::awaitable<void> RelayChannel::handle_relay_auth_resp(const Frame& frame) {
     auto resp = RelayAuthResp::parse(frame.payload);
     if (!resp) {
-        spdlog::error("Failed to parse RELAY_AUTH_RESP");
+        log().error("Failed to parse RELAY_AUTH_RESP");
         co_return;
     }
 
     if (!resp->success) {
-        spdlog::error("Relay auth failed: {} (code {})", resp->error_msg, resp->error_code);
+        log().error("Relay auth failed: {} (code {})", resp->error_msg, resp->error_code);
         co_return;
     }
 
     state_ = ChannelState::CONNECTED;
-    spdlog::info("Relay channel connected");
+    log().info("Relay channel connected");
 
     if (callbacks_.on_connected) {
         callbacks_.on_connected();
@@ -954,20 +956,20 @@ asio::awaitable<void> RelayChannel::handle_relay_auth_resp(const Frame& frame) {
 }
 
 asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
-    spdlog::debug("Relay handle_data: processing {} bytes", frame.payload.size());
+    log().debug("Relay handle_data: processing {} bytes", frame.payload.size());
 
     auto data = DataPayload::parse(frame.payload);
     if (!data) {
-        spdlog::warn("Failed to parse DATA payload");
+        log().warn("Failed to parse DATA payload");
         co_return;
     }
 
-    spdlog::debug("Relay handle_data: DATA from {} to me, encrypted {} bytes",
+    log().debug("Relay handle_data: DATA from {} to me, encrypted {} bytes",
                  peers_.get_peer_ip_str(data->src_node), data->encrypted_payload.size());
 
     // Ensure session key exists for sender
     if (!peers_.ensure_session_key(data->src_node)) {
-        spdlog::warn("Cannot decrypt data from {}: no session key", peers_.get_peer_ip_str(data->src_node));
+        log().warn("Cannot decrypt data from {}: no session key", peers_.get_peer_ip_str(data->src_node));
         co_return;
     }
 
@@ -975,32 +977,32 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
     auto peer_ip = peers_.get_peer_ip_str(data->src_node);
     auto plaintext = crypto_.decrypt(data->src_node, data->nonce, data->encrypted_payload);
     if (!plaintext) {
-        spdlog::warn("Failed to decrypt data from {}, renegotiating session key...", peer_ip);
+        log().warn("Failed to decrypt data from {}, renegotiating session key...", peer_ip);
 
         // Clear old session key and re-derive
         crypto_.remove_session_key(data->src_node);
 
         // Try to derive new session key
         if (!peers_.ensure_session_key(data->src_node)) {
-            spdlog::error("Failed to renegotiate session key for {}", peer_ip);
+            log().error("Failed to renegotiate session key for {}", peer_ip);
             co_return;
         }
 
-        spdlog::info("Session key renegotiated for {}", peer_ip);
+        log().info("Session key renegotiated for {}", peer_ip);
 
         // Retry decryption with new key
         plaintext = crypto_.decrypt(data->src_node, data->nonce, data->encrypted_payload);
         if (!plaintext) {
-            spdlog::warn("Decryption still failed after renegotiation, {} may have different node_key", peer_ip);
+            log().warn("Decryption still failed after renegotiation, {} may have different node_key", peer_ip);
             co_return;
         }
 
-        spdlog::info("Decryption succeeded after session key renegotiation for {}", peer_ip);
+        log().info("Decryption succeeded after session key renegotiation for {}", peer_ip);
     }
 
     peers_.update_last_seen(data->src_node);
 
-    spdlog::debug("Relay handle_data: decrypted {} bytes from {}", plaintext->size(), peer_ip);
+    log().debug("Relay handle_data: decrypted {} bytes from {}", plaintext->size(), peer_ip);
 
     if (callbacks_.on_data) {
         callbacks_.on_data(data->src_node, *plaintext);

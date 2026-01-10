@@ -1,8 +1,12 @@
 #include "client/peer_manager.hpp"
-#include <spdlog/spdlog.h>
+#include "common/logger.hpp"
 #include <chrono>
 
 namespace edgelink::client {
+
+namespace {
+auto& log() { return Logger::get("client.peer_manager"); }
+}
 
 PeerManager::PeerManager(CryptoEngine& crypto) : crypto_(crypto) {}
 
@@ -28,12 +32,12 @@ void PeerManager::update_from_config(const std::vector<PeerInfo>& peers) {
         peers_[info.node_id] = peer;
         ip_to_node_[info.virtual_ip.to_u32()] = info.node_id;
 
-        spdlog::debug("Added peer {} ({}) - {}",
+        log().debug("Added peer {} ({}) - {}",
                       info.node_id, info.virtual_ip.to_string(),
                       info.online ? "online" : "offline");
     }
 
-    spdlog::info("Updated {} peers from config", peers.size());
+    log().info("Updated {} peers from config", peers.size());
 }
 
 void PeerManager::add_peer(const PeerInfo& info) {
@@ -56,7 +60,7 @@ void PeerManager::add_peer(const PeerInfo& info) {
             ip_to_node_[info.virtual_ip.to_u32()] = info.node_id;
             was_new = true;
 
-            spdlog::info("New peer {} ({}) - {}",
+            log().info("New peer {} ({}) - {}",
                          info.node_id, info.virtual_ip.to_string(),
                          info.online ? "online" : "offline");
         } else {
@@ -68,7 +72,7 @@ void PeerManager::add_peer(const PeerInfo& info) {
             if (it->second.info.node_key != info.node_key) {
                 crypto_.remove_session_key(info.node_id);
                 it->second.session_key_derived = false;
-                spdlog::info("Peer {} node_key changed, cleared session key", info.node_id);
+                log().info("Peer {} node_key changed, cleared session key", info.node_id);
             }
 
             it->second.info = info;
@@ -77,7 +81,7 @@ void PeerManager::add_peer(const PeerInfo& info) {
             }
 
             if (status_changed) {
-                spdlog::info("Peer {} ({}) is now {}",
+                log().info("Peer {} ({}) is now {}",
                              info.node_id, info.virtual_ip.to_string(),
                              info.online ? "online" : "offline");
             }
@@ -102,7 +106,7 @@ void PeerManager::remove_peer(NodeId peer_id) {
             peers_.erase(it);
             removed = true;
 
-            spdlog::info("Removed peer {}", peer_id);
+            log().info("Removed peer {}", peer_id);
         }
     }
 
@@ -126,7 +130,7 @@ void PeerManager::update_peer_online(NodeId peer_id, bool online) {
             it->second.connection_status = online ? P2PStatus::RELAY_ONLY : P2PStatus::DISCONNECTED;
             changed = true;
 
-            spdlog::info("Peer {} is now {}", peer_id, online ? "online" : "offline");
+            log().info("Peer {} is now {}", peer_id, online ? "online" : "offline");
         }
     }
 
@@ -210,7 +214,7 @@ bool PeerManager::ensure_session_key(NodeId peer_id) {
         std::shared_lock lock(mutex_);
         auto it = peers_.find(peer_id);
         if (it == peers_.end()) {
-            spdlog::warn("Cannot derive session key: peer {} not found", peer_id);
+            log().warn("Cannot derive session key: peer {} not found", peer_id);
             return false;
         }
         node_key = it->second.info.node_key;
@@ -219,7 +223,7 @@ bool PeerManager::ensure_session_key(NodeId peer_id) {
     // Derive session key
     auto result = crypto_.derive_session_key(peer_id, node_key);
     if (!result) {
-        spdlog::error("Failed to derive session key for peer {}: {}",
+        log().error("Failed to derive session key for peer {}: {}",
                       peer_id, crypto_engine_error_message(result.error()));
         return false;
     }

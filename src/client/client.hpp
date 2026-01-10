@@ -4,6 +4,7 @@
 #include "client/peer_manager.hpp"
 #include "client/channel.hpp"
 #include "client/tun_device.hpp"
+#include "client/ipc_server.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -38,6 +39,10 @@ struct ClientConfig {
     bool enable_tun = false;       // Enable TUN device for IP-level routing
     std::string tun_name = "";     // TUN device name (empty = auto)
     uint32_t tun_mtu = 1420;       // MTU for TUN device
+
+    // IPC server settings
+    bool enable_ipc = true;        // Enable IPC control interface
+    std::string ipc_socket_path;   // IPC socket path (empty = platform default)
 };
 
 // Client state
@@ -99,6 +104,10 @@ public:
     TunDevice* tun_device() { return tun_.get(); }
     bool is_tun_enabled() const { return config_.enable_tun && tun_ && tun_->is_open(); }
 
+    // IPC server (if enabled)
+    IpcServer* ipc_server() { return ipc_.get(); }
+    bool is_ipc_enabled() const { return config_.enable_ipc && ipc_ && ipc_->is_running(); }
+
 private:
     void setup_callbacks();
 
@@ -106,6 +115,10 @@ private:
     bool setup_tun();
     void teardown_tun();
     void on_tun_packet(std::span<const uint8_t> packet);
+
+    // IPC server management
+    bool setup_ipc();
+    void teardown_ipc();
 
     // Keepalive timer
     asio::awaitable<void> keepalive_loop();
@@ -136,6 +149,9 @@ private:
 
     // TUN device (optional)
     std::unique_ptr<TunDevice> tun_;
+
+    // IPC server (optional)
+    std::shared_ptr<IpcServer> ipc_;
 
     ClientCallbacks callbacks_;
 };

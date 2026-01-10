@@ -3,9 +3,13 @@
 #include "controller/session.hpp"
 #include "controller/session_manager.hpp"
 #include "common/crypto.hpp"
-#include <spdlog/spdlog.h>
+#include "common/logger.hpp"
 
 namespace edgelink::controller {
+
+namespace {
+auto& log() { return Logger::get("controller.session"); }
+}
 
 // ============================================================================
 // SessionBase implementation
@@ -33,7 +37,7 @@ asio::awaitable<void> SessionBase<StreamType>::send_raw(std::span<const uint8_t>
     // Try non-blocking send first (fast path)
     if (!write_channel_.try_send(boost::system::error_code{}, std::move(copy))) {
         // Channel full, this shouldn't happen often with 1024 buffer
-        spdlog::warn("Write channel full for node {}", node_id_);
+        log().warn("Write channel full for node {}", node_id_);
     }
     co_return;
 }
@@ -62,7 +66,7 @@ asio::awaitable<void> SessionBase<StreamType>::read_loop() {
             // Decode frame
             auto result = FrameCodec::decode(buffer);
             if (!result) {
-                spdlog::warn("Failed to decode frame: {}", frame_error_message(result.error()));
+                log().warn("Failed to decode frame: {}", frame_error_message(result.error()));
                 continue;
             }
 
@@ -70,7 +74,7 @@ asio::awaitable<void> SessionBase<StreamType>::read_loop() {
         }
     } catch (const boost::system::system_error& e) {
         if (e.code() != websocket::error::closed) {
-            spdlog::debug("Session read error: {}", e.what());
+            log().debug("Session read error: {}", e.what());
         }
     }
 }
@@ -85,18 +89,18 @@ asio::awaitable<void> SessionBase<StreamType>::write_loop() {
                 if (ec == asio::experimental::channel_errc::channel_closed) {
                     break;  // Normal shutdown
                 }
-                spdlog::debug("Write channel error: {}", ec.message());
+                log().debug("Write channel error: {}", ec.message());
                 break;
             }
 
-            spdlog::debug("Session write_loop: sending {} bytes to node {}", data.size(), node_id_);
+            log().debug("Session write_loop: sending {} bytes to node {}", data.size(), node_id_);
             co_await ws_.async_write(asio::buffer(data), asio::use_awaitable);
-            spdlog::debug("Session write_loop: sent {} bytes to node {}", data.size(), node_id_);
+            log().debug("Session write_loop: sent {} bytes to node {}", data.size(), node_id_);
         }
     } catch (const boost::system::system_error& e) {
         if (e.code() != asio::error::operation_aborted &&
             e.code() != websocket::error::closed) {
-            spdlog::debug("Session write error: {}", e.what());
+            log().debug("Session write error: {}", e.what());
         }
     }
 
@@ -134,13 +138,13 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::start(StreamType ws, Sessi
 
 template<typename StreamType>
 asio::awaitable<void> ControlSessionImpl<StreamType>::run() {
-    spdlog::info("Control session started");
+    log().info("Control session started");
 
     try {
         // Run read and write loops concurrently
         co_await (this->read_loop() || this->write_loop());
     } catch (const std::exception& e) {
-        spdlog::debug("Control session ended: {}", e.what());
+        log().debug("Control session ended: {}", e.what());
     }
 
     // Cleanup
@@ -150,13 +154,13 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::run() {
 
         // Notify other nodes
         co_await this->manager_.broadcast_config_update(this->network_id_, this->node_id_);
-        spdlog::info("Node {} disconnected from control channel", this->node_id_);
+        log().info("Node {} disconnected from control channel", this->node_id_);
     }
 }
 
 template<typename StreamType>
 asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& frame) {
-    spdlog::debug("Control: received {} frame", frame_type_name(frame.header.type));
+    log().debug("Control: received {} frame", frame_type_name(frame.header.type));
 
     switch (frame.header.type) {
         case FrameType::AUTH_REQUEST:
@@ -175,7 +179,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& 
             if (!this->authenticated_) {
                 co_await this->send_error(1001, "Not authenticated", frame.header.type);
             } else {
-                spdlog::warn("Control: unhandled frame type 0x{:02X}",
+                log().warn("Control: unhandled frame type 0x{:02X}",
                              static_cast<uint8_t>(frame.header.type));
             }
             break;
@@ -190,7 +194,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
         co_return;
     }
 
-    spdlog::info("Auth request from {} (auth_type={})",
+    log().info("Auth request from {} (auth_type={})",
                  request->hostname, static_cast<int>(request->auth_type));
 
     // Verify signature
@@ -283,7 +287,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
 
     co_await this->send_frame(FrameType::AUTH_RESPONSE, response.serialize());
 
-    spdlog::info("Node {} authenticated: {} ({})",
+    log().info("Node {} authenticated: {} ({})",
                  this->node_id_, node->hostname, node->virtual_ip.to_string());
 
     // Send CONFIG
@@ -298,14 +302,14 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::send_config() {
     // Get all nodes in network
     auto nodes = this->manager_.database().get_nodes_by_network(this->network_id_);
     if (!nodes) {
-        spdlog::error("Failed to get nodes for network {}", this->network_id_);
+        log().error("Failed to get nodes for network {}", this->network_id_);
         co_return;
     }
 
     // Get network info
     auto network = this->manager_.database().get_network(this->network_id_);
     if (!network) {
-        spdlog::error("Failed to get network {}", this->network_id_);
+        log().error("Failed to get network {}", this->network_id_);
         co_return;
     }
 
@@ -354,7 +358,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::send_config() {
     config_version_ = config.version;
     co_await this->send_frame(FrameType::CONFIG, config.serialize());
 
-    spdlog::debug("Sent CONFIG to node {} with {} peers", this->node_id_, config.peers.size());
+    log().debug("Sent CONFIG to node {} with {} peers", this->node_id_, config.peers.size());
 }
 
 template<typename StreamType>
@@ -364,7 +368,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_config_ack(const Fr
         co_return;
     }
 
-    spdlog::debug("Node {} acknowledged config version {}", this->node_id_, ack->version);
+    log().debug("Node {} acknowledged config version {}", this->node_id_, ack->version);
 }
 
 template<typename StreamType>
@@ -403,24 +407,24 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::start(StreamType ws, Session
 
 template<typename StreamType>
 asio::awaitable<void> RelaySessionImpl<StreamType>::run() {
-    spdlog::info("Relay session started");
+    log().info("Relay session started");
 
     try {
         co_await (this->read_loop() || this->write_loop());
     } catch (const std::exception& e) {
-        spdlog::debug("Relay session ended: {}", e.what());
+        log().debug("Relay session ended: {}", e.what());
     }
 
     // Cleanup
     if (this->authenticated_ && this->node_id_ != 0) {
         this->manager_.unregister_relay_session(this->node_id_);
-        spdlog::info("Node {} disconnected from relay channel", this->node_id_);
+        log().info("Node {} disconnected from relay channel", this->node_id_);
     }
 }
 
 template<typename StreamType>
 asio::awaitable<void> RelaySessionImpl<StreamType>::handle_frame(const Frame& frame) {
-    spdlog::debug("Relay: received {} frame", frame_type_name(frame.header.type));
+    log().debug("Relay: received {} frame", frame_type_name(frame.header.type));
 
     switch (frame.header.type) {
         case FrameType::RELAY_AUTH:
@@ -439,7 +443,7 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_frame(const Frame& fr
             if (!this->authenticated_) {
                 co_await this->send_error(1001, "Not authenticated", frame.header.type);
             } else {
-                spdlog::warn("Relay: unhandled frame type 0x{:02X}",
+                log().warn("Relay: unhandled frame type 0x{:02X}",
                              static_cast<uint8_t>(frame.header.type));
             }
             break;
@@ -486,7 +490,7 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_relay_auth(const Fram
 
     co_await this->send_frame(FrameType::RELAY_AUTH_RESP, response.serialize());
 
-    spdlog::info("Node {} authenticated to relay channel", this->node_id_);
+    log().info("Node {} authenticated to relay channel", this->node_id_);
 }
 
 template<typename StreamType>
@@ -499,18 +503,18 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_data(const Frame& fra
     // Parse DATA payload to get dst_node
     auto data = DataPayload::parse(frame.payload);
     if (!data) {
-        spdlog::warn("Relay: failed to parse DATA payload");
+        log().warn("Relay: failed to parse DATA payload");
         co_return; // Silently drop malformed data
     }
 
     auto src_ip = this->manager_.get_node_ip_str(data->src_node);
     auto dst_ip = this->manager_.get_node_ip_str(data->dst_node);
 
-    spdlog::debug("Relay: DATA from {} to {} ({} bytes)", src_ip, dst_ip, frame.payload.size());
+    log().debug("Relay: DATA from {} to {} ({} bytes)", src_ip, dst_ip, frame.payload.size());
 
     // Verify src_node matches authenticated node
     if (data->src_node != this->node_id_) {
-        spdlog::warn("Node {} attempted to send DATA with src_node={}",
+        log().warn("Node {} attempted to send DATA with src_node={}",
                      this->manager_.get_node_ip_str(this->node_id_), src_ip);
         co_return;
     }
@@ -519,7 +523,7 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_data(const Frame& fra
     auto target = this->manager_.get_relay_session(data->dst_node);
     if (!target) {
         // Target not connected to relay, drop silently
-        spdlog::warn("Relay: DATA from {} to {} dropped: target not on relay", src_ip, dst_ip);
+        log().warn("Relay: DATA from {} to {} dropped: target not on relay", src_ip, dst_ip);
         co_return;
     }
 
@@ -527,7 +531,7 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_data(const Frame& fra
     auto frame_data = FrameCodec::encode(FrameType::DATA, frame.payload);
     co_await target->send_raw(frame_data);
 
-    spdlog::debug("Relay: forwarded DATA from {} to {} ({} bytes)", src_ip, dst_ip, frame.payload.size());
+    log().debug("Relay: forwarded DATA from {} to {} ({} bytes)", src_ip, dst_ip, frame.payload.size());
 }
 
 template<typename StreamType>

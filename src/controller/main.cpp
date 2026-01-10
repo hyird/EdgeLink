@@ -4,10 +4,7 @@
 #include "controller/session_manager.hpp"
 #include "common/crypto.hpp"
 #include "common/config.hpp"
-
-#include <spdlog/spdlog.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/sinks/basic_file_sink.h>
+#include "common/logger.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>
@@ -29,39 +26,25 @@ constexpr const char* VERSION = "1.0.0";
 constexpr const char* BUILD_DATE = __DATE__;
 
 void setup_logging(const std::string& level, const std::string& log_file) {
-    std::vector<spdlog::sink_ptr> sinks;
-
-    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    sinks.push_back(console_sink);
+    LogConfig config;
+    config.global_level = log_level_from_string(level);
+    config.console_enabled = true;
+    config.console_color = true;
 
     if (!log_file.empty()) {
-        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
-        sinks.push_back(file_sink);
+        config.file_enabled = true;
+        config.file_path = log_file;
     }
 
-    auto logger = std::make_shared<spdlog::logger>("console", sinks.begin(), sinks.end());
-    spdlog::set_default_logger(logger);
-
-    if (level == "trace" || level == "verbose") {
-        spdlog::set_level(spdlog::level::trace);
-    } else if (level == "debug") {
-        spdlog::set_level(spdlog::level::debug);
-    } else if (level == "warn" || level == "warning") {
-        spdlog::set_level(spdlog::level::warn);
-    } else if (level == "error") {
-        spdlog::set_level(spdlog::level::err);
-    } else {
-        spdlog::set_level(spdlog::level::info);
-    }
-
-    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v");
+    LogManager::instance().init(config);
 }
 
 void setup_quiet_logging() {
-    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    auto logger = std::make_shared<spdlog::logger>("console", console_sink);
-    spdlog::set_default_logger(logger);
-    spdlog::set_level(spdlog::level::err);
+    LogConfig config;
+    config.global_level = LogLevel::ERROR;
+    config.console_enabled = true;
+    config.console_color = true;
+    LogManager::instance().init(config);
 }
 
 // Generate random authkey
@@ -462,11 +445,11 @@ int cmd_serve(int argc, char* argv[]) {
     // Setup logging
     setup_logging(cfg.log_level, cfg.log_file);
 
-    spdlog::info("EdgeLink Controller {} starting...", VERSION);
+    Logger::get("controller").info("EdgeLink Controller {} starting...", VERSION);
 
     // Initialize crypto
     if (!crypto::init()) {
-        spdlog::critical("Failed to initialize crypto library");
+        Logger::get("controller").fatal("Failed to initialize crypto library");
         return 1;
     }
 
@@ -481,14 +464,14 @@ int cmd_serve(int argc, char* argv[]) {
         Database db;
         auto db_result = db.open(cfg.database_path);
         if (!db_result) {
-            spdlog::critical("Failed to open database: {}", db_error_message(db_result.error()));
+            Logger::get("controller").fatal("Failed to open database: {}", db_error_message(db_result.error()));
             return 1;
         }
 
         // Initialize schema
         auto schema_result = db.init_schema();
         if (!schema_result) {
-            spdlog::critical("Failed to initialize database schema: {}",
+            Logger::get("controller").fatal("Failed to initialize database schema: {}",
                              db_error_message(schema_result.error()));
             return 1;
         }
@@ -498,9 +481,9 @@ int cmd_serve(int argc, char* argv[]) {
         if (jwt_secret.empty()) {
             auto secret_bytes = crypto::random_bytes(32);
             jwt_secret = std::string(secret_bytes.begin(), secret_bytes.end());
-            spdlog::info("JWT secret auto-generated (not persistent)");
+            Logger::get("controller").info("JWT secret auto-generated (not persistent)");
         } else {
-            spdlog::info("JWT secret loaded from config");
+            Logger::get("controller").info("JWT secret loaded from config");
         }
         JwtUtil jwt(jwt_secret);
 
@@ -512,10 +495,10 @@ int cmd_serve(int argc, char* argv[]) {
             if (!cfg.tls) {
                 return ssl_util::create_dummy_context();
             } else if (!cfg.cert_file.empty() && !cfg.key_file.empty()) {
-                spdlog::info("Loading SSL certificates from files");
+                Logger::get("controller").info("Loading SSL certificates from files");
                 return ssl_util::create_ssl_context(cfg.cert_file, cfg.key_file);
             } else {
-                spdlog::warn("Using self-signed certificate (development mode)");
+                Logger::get("controller").warn("Using self-signed certificate (development mode)");
                 return ssl_util::create_self_signed_context();
             }
         }();
@@ -538,7 +521,7 @@ int cmd_serve(int argc, char* argv[]) {
         // Setup signal handler
         asio::signal_set signals(ioc, SIGINT, SIGTERM);
         signals.async_wait([&](const boost::system::error_code&, int sig) {
-            spdlog::info("Received signal {}, shutting down...", sig);
+            Logger::get("controller").info("Received signal {}, shutting down...", sig);
             server.stop();
             ioc.stop();
         });
@@ -547,12 +530,12 @@ int cmd_serve(int argc, char* argv[]) {
         asio::co_spawn(ioc, server.run(), asio::detached);
 
         std::string scheme = cfg.tls ? "wss" : "ws";
-        spdlog::info("Controller ready");
-        spdlog::info("  Control endpoint: {}://{}:{}/api/v1/control", scheme, cfg.bind_address, cfg.port);
-        spdlog::info("  Relay endpoint:   {}://{}:{}/api/v1/relay", scheme, cfg.bind_address, cfg.port);
-        spdlog::info("  Database: {}", cfg.database_path);
-        spdlog::info("  TLS: {}", cfg.tls ? "enabled" : "disabled");
-        spdlog::info("  IO threads: {}", cfg.num_threads);
+        Logger::get("controller").info("Controller ready");
+        Logger::get("controller").info("  Control endpoint: {}://{}:{}/api/v1/control", scheme, cfg.bind_address, cfg.port);
+        Logger::get("controller").info("  Relay endpoint:   {}://{}:{}/api/v1/relay", scheme, cfg.bind_address, cfg.port);
+        Logger::get("controller").info("  Database: {}", cfg.database_path);
+        Logger::get("controller").info("  TLS: {}", cfg.tls ? "enabled" : "disabled");
+        Logger::get("controller").info("  IO threads: {}", cfg.num_threads);
 
         // Run IO threads
         std::vector<std::thread> threads;
@@ -572,10 +555,10 @@ int cmd_serve(int argc, char* argv[]) {
             t.join();
         }
 
-        spdlog::info("Controller stopped");
+        Logger::get("controller").info("Controller stopped");
 
     } catch (const std::exception& e) {
-        spdlog::critical("Fatal error: {}", e.what());
+        Logger::get("controller").fatal("Fatal error: {}", e.what());
         return 1;
     }
 

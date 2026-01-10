@@ -1,16 +1,16 @@
 #include "client/client.hpp"
+#include "client/ipc_server.hpp"
 #include "common/crypto.hpp"
 #include "common/config.hpp"
-
-#include <spdlog/spdlog.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/sinks/basic_file_sink.h>
+#include "common/logger.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>
+#include <boost/json.hpp>
 
 #include <filesystem>
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <thread>
 
@@ -24,35 +24,17 @@ constexpr const char* VERSION = "1.0.0";
 constexpr const char* BUILD_DATE = __DATE__;
 
 void setup_logging(const std::string& level, const std::string& log_file) {
-    std::vector<spdlog::sink_ptr> sinks;
+    LogConfig config;
+    config.global_level = log_level_from_string(level);
+    config.console_enabled = true;
+    config.console_color = true;
 
-    // Console sink
-    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    sinks.push_back(console_sink);
-
-    // File sink (if specified)
     if (!log_file.empty()) {
-        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
-        sinks.push_back(file_sink);
+        config.file_enabled = true;
+        config.file_path = log_file;
     }
 
-    auto logger = std::make_shared<spdlog::logger>("console", sinks.begin(), sinks.end());
-    spdlog::set_default_logger(logger);
-
-    // Set log level
-    if (level == "trace" || level == "verbose") {
-        spdlog::set_level(spdlog::level::trace);
-    } else if (level == "debug") {
-        spdlog::set_level(spdlog::level::debug);
-    } else if (level == "warn" || level == "warning") {
-        spdlog::set_level(spdlog::level::warn);
-    } else if (level == "error") {
-        spdlog::set_level(spdlog::level::err);
-    } else {
-        spdlog::set_level(spdlog::level::info);
-    }
-
-    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v");
+    LogManager::instance().init(config);
 }
 
 void print_usage() {
@@ -61,6 +43,8 @@ void print_usage() {
               << "  edgelink-client <command> [options]\n\n"
               << "Commands:\n"
               << "  up          Start client and connect to network\n"
+              << "  status      Show connection status\n"
+              << "  peers       List all peer nodes\n"
               << "  version     Show version information\n"
               << "  help        Show this help message\n\n"
               << "Run 'edgelink-client <command> --help' for more information on a command.\n";
@@ -94,6 +78,27 @@ void print_up_help() {
               << "  edgelink-client up -a tskey-dev-test123 --tls --ssl-allow-self-signed\n";
 }
 
+void print_status_help() {
+    std::cout << "EdgeLink Client - Show connection status\n\n"
+              << "Usage: edgelink-client status [options]\n\n"
+              << "Options:\n"
+              << "  --json        Output in JSON format\n"
+              << "  -h, --help    Show this help\n\n"
+              << "Note: This command requires the client daemon to be running.\n"
+              << "      Currently shows simulated status for testing.\n";
+}
+
+void print_peers_help() {
+    std::cout << "EdgeLink Client - List peer nodes\n\n"
+              << "Usage: edgelink-client peers [options]\n\n"
+              << "Options:\n"
+              << "  --json        Output in JSON format\n"
+              << "  --online      Only show online peers\n"
+              << "  -h, --help    Show this help\n\n"
+              << "Note: This command requires the client daemon to be running.\n"
+              << "      Currently shows simulated peer list for testing.\n";
+}
+
 // ============================================================================
 // Command: version
 // ============================================================================
@@ -116,6 +121,160 @@ int cmd_version() {
 #else
               << "unknown\n";
 #endif
+    return 0;
+}
+
+// ============================================================================
+// Command: status
+// ============================================================================
+
+int cmd_status(int argc, char* argv[]) {
+    bool json_output = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--json") {
+            json_output = true;
+        } else if (arg == "-h" || arg == "--help") {
+            print_status_help();
+            return 0;
+        }
+    }
+
+    // Connect to IPC server
+    IpcClient ipc;
+    if (!ipc.connect()) {
+        if (json_output) {
+            std::cout << "{\n"
+                      << "  \"status\": \"not_connected\",\n"
+                      << "  \"error\": \"Cannot connect to daemon - it may not be running\"\n"
+                      << "}\n";
+        } else {
+            std::cout << "Status: Not Connected\n\n"
+                      << "Cannot connect to the client daemon.\n"
+                      << "Use 'edgelink-client up' to start the client.\n";
+        }
+        return 1;
+    }
+
+    std::string response = ipc.get_status();
+
+    if (json_output) {
+        std::cout << response << "\n";
+    } else {
+        // Parse and display human-readable output
+        try {
+            auto jv = boost::json::parse(response);
+            auto& obj = jv.as_object();
+
+            if (obj.at("status").as_string() == "ok") {
+                auto& data = obj.at("data").as_object();
+                std::cout << "Status: " << data.at("state").as_string() << "\n\n"
+                          << "  Node ID:      " << data.at("node_id").as_string() << "\n"
+                          << "  Virtual IP:   " << data.at("virtual_ip").as_string() << "\n"
+                          << "  Network ID:   " << data.at("network_id").as_int64() << "\n"
+                          << "  Peers:        " << data.at("peer_count").as_int64()
+                          << " (" << data.at("online_peer_count").as_int64() << " online)\n"
+                          << "  TUN enabled:  " << (data.at("tun_enabled").as_bool() ? "yes" : "no") << "\n";
+            } else {
+                std::cerr << "Error: " << obj.at("message").as_string() << "\n";
+                return 1;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error parsing response: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+// ============================================================================
+// Command: peers
+// ============================================================================
+
+int cmd_peers(int argc, char* argv[]) {
+    bool json_output = false;
+    bool online_only = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--json") {
+            json_output = true;
+        } else if (arg == "--online") {
+            online_only = true;
+        } else if (arg == "-h" || arg == "--help") {
+            print_peers_help();
+            return 0;
+        }
+    }
+
+    // Connect to IPC server
+    IpcClient ipc;
+    if (!ipc.connect()) {
+        if (json_output) {
+            std::cout << "{\n"
+                      << "  \"peers\": [],\n"
+                      << "  \"error\": \"Cannot connect to daemon - it may not be running\"\n"
+                      << "}\n";
+        } else {
+            std::cout << "Peers: None\n\n"
+                      << "Cannot connect to the client daemon.\n"
+                      << "Use 'edgelink-client up' to start the client.\n";
+        }
+        return 1;
+    }
+
+    std::string response = ipc.get_peers(online_only);
+
+    if (json_output) {
+        std::cout << response << "\n";
+    } else {
+        // Parse and display human-readable output
+        try {
+            auto jv = boost::json::parse(response);
+            auto& obj = jv.as_object();
+
+            if (obj.at("status").as_string() == "ok") {
+                auto& peers = obj.at("peers").as_array();
+
+                if (peers.empty()) {
+                    std::cout << "No peers found.\n";
+                } else {
+                    std::cout << std::left
+                              << std::setw(16) << "VIRTUAL_IP"
+                              << std::setw(20) << "NAME"
+                              << std::setw(10) << "STATUS"
+                              << std::setw(12) << "CONNECTION"
+                              << "LATENCY\n";
+                    std::cout << std::string(70, '-') << "\n";
+
+                    for (const auto& p : peers) {
+                        auto& peer = p.as_object();
+                        std::string status = peer.at("online").as_bool() ? "online" : "offline";
+                        std::string latency = std::to_string(peer.at("latency_ms").as_int64()) + "ms";
+                        if (peer.at("latency_ms").as_int64() == 0) {
+                            latency = "-";
+                        }
+
+                        std::cout << std::left
+                                  << std::setw(16) << peer.at("virtual_ip").as_string()
+                                  << std::setw(20) << peer.at("name").as_string()
+                                  << std::setw(10) << status
+                                  << std::setw(12) << peer.at("connection_status").as_string()
+                                  << latency << "\n";
+                    }
+                }
+            } else {
+                std::cerr << "Error: " << obj.at("message").as_string() << "\n";
+                return 1;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error parsing response: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
     return 0;
 }
 
@@ -198,19 +357,20 @@ int cmd_up(int argc, char* argv[]) {
         }
     }
 
-    // Setup logging
+    // Setup logging with new system
     setup_logging(cfg.log_level, cfg.log_file);
 
-    spdlog::info("EdgeLink Client {} starting...", VERSION);
+    auto& log = Logger::get("client");
+    log.info("EdgeLink Client {} starting...", VERSION);
 
     // Initialize crypto
     if (!crypto::init()) {
-        spdlog::critical("Failed to initialize crypto library");
+        log.fatal("Failed to initialize crypto library");
         return 1;
     }
 
     if (cfg.authkey.empty()) {
-        spdlog::error("AuthKey required. Use -a or --authkey option, or specify in config file.");
+        log.error("AuthKey required. Use -a or --authkey option, or specify in config file.");
         print_up_help();
         return 1;
     }
@@ -241,9 +401,9 @@ int cmd_up(int argc, char* argv[]) {
         ClientCallbacks callbacks;
 
         callbacks.on_connected = [&]() {
-            spdlog::info("Client connected and ready");
-            spdlog::info("  Virtual IP: {}", client->virtual_ip().to_string());
-            spdlog::info("  Peers online: {}", client->peers().online_peer_count());
+            log.info("Client connected and ready");
+            log.info("  Virtual IP: {}", client->virtual_ip().to_string());
+            log.info("  Peers online: {}", client->peers().online_peer_count());
 
             // Send test message if requested
             if (!test_peer_ip.empty() && !test_message.empty()) {
@@ -257,26 +417,27 @@ int cmd_up(int argc, char* argv[]) {
                     co_await timer.async_wait(asio::use_awaitable);
 
                     bool sent = co_await client->send_to_ip(peer_ip, data);
+                    auto& log = Logger::get("client");
                     if (sent) {
-                        spdlog::info("Test message sent to {}", peer_ip.to_string());
+                        log.info("Test message sent to {}", peer_ip.to_string());
                     } else {
-                        spdlog::error("Failed to send test message");
+                        log.error("Failed to send test message");
                     }
                 }, asio::detached);
             }
         };
 
         callbacks.on_disconnected = []() {
-            spdlog::warn("Client disconnected");
+            Logger::get("client").warn("Client disconnected");
         };
 
         callbacks.on_data_received = [&client](NodeId src, std::span<const uint8_t> data) {
             auto src_ip = client->peers().get_peer_ip_str(src);
-            spdlog::info("Data from {}: {} bytes", src_ip, data.size());
+            Logger::get("client").info("Data from {}: {} bytes", src_ip, data.size());
         };
 
         callbacks.on_error = [](uint16_t code, const std::string& msg) {
-            spdlog::error("Error {}: {}", code, msg);
+            Logger::get("client").error("Error {}: {}", code, msg);
         };
 
         client->set_callbacks(std::move(callbacks));
@@ -284,32 +445,32 @@ int cmd_up(int argc, char* argv[]) {
         // Setup signal handler
         asio::signal_set signals(ioc, SIGINT, SIGTERM);
         signals.async_wait([&](const boost::system::error_code&, int sig) {
-            spdlog::info("Received signal {}, shutting down...", sig);
+            log.info("Received signal {}, shutting down...", sig);
             asio::co_spawn(ioc, client->stop(), asio::detached);
             ioc.stop();
         });
 
         // Start client
-        asio::co_spawn(ioc, [client]() -> asio::awaitable<void> {
+        asio::co_spawn(ioc, [client, &log]() -> asio::awaitable<void> {
             bool success = co_await client->start();
             if (!success) {
-                spdlog::error("Failed to start client");
+                log.error("Failed to start client");
             }
         }, asio::detached);
 
-        spdlog::info("Client running, press Ctrl+C to stop");
-        spdlog::info("  Controller: {}", cfg.controller_url);
+        log.info("Client running, press Ctrl+C to stop");
+        log.info("  Controller: {}", cfg.controller_url);
         if (cfg.enable_tun) {
-            spdlog::info("  TUN mode: enabled (MTU={})", cfg.tun_mtu);
+            log.info("  TUN mode: enabled (MTU={})", cfg.tun_mtu);
         }
 
         // Run IO context
         ioc.run();
 
-        spdlog::info("Client stopped");
+        log.info("Client stopped");
 
     } catch (const std::exception& e) {
-        spdlog::critical("Fatal error: {}", e.what());
+        log.fatal("Fatal error: {}", e.what());
         return 1;
     }
 
@@ -344,6 +505,16 @@ int main(int argc, char* argv[]) {
     if (command == "up") {
         // Pass remaining arguments (skip program name and 'up')
         return cmd_up(argc - 2, argv + 2);
+    }
+
+    // Handle 'status' command
+    if (command == "status") {
+        return cmd_status(argc - 2, argv + 2);
+    }
+
+    // Handle 'peers' command
+    if (command == "peers") {
+        return cmd_peers(argc - 2, argv + 2);
     }
 
     // Legacy mode: if first arg starts with '-', treat as 'up' command

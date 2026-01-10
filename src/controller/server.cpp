@@ -1,6 +1,6 @@
 #include "controller/server.hpp"
 #include "controller/session.hpp"
-#include <spdlog/spdlog.h>
+#include "common/logger.hpp"
 #include <fstream>
 #include <sstream>
 #include <openssl/evp.h>
@@ -9,6 +9,26 @@
 #include <openssl/rsa.h>
 
 namespace edgelink::controller {
+
+namespace {
+    auto& log() { return Logger::get("controller.server"); }
+
+    // Health check response helper
+    template<typename Stream>
+    asio::awaitable<void> send_health_response(
+        Stream& stream,
+        http::request<http::string_body>& req,
+        http::status status,
+        const std::string& body)
+    {
+        http::response<http::string_body> res{status, req.version()};
+        res.set(http::field::server, "EdgeLink Controller");
+        res.set(http::field::content_type, "application/json");
+        res.body() = body;
+        res.prepare_payload();
+        co_await http::async_write(stream, res, asio::use_awaitable);
+    }
+}
 
 // ============================================================================
 // Server implementation
@@ -32,7 +52,7 @@ asio::awaitable<void> Server::run() {
     acceptor_.listen(asio::socket_base::max_listen_connections);
 
     running_ = true;
-    spdlog::info("Server listening on {}:{} (TLS: {})",
+    log().info("Server listening on {}:{} (TLS: {})",
                  config_.bind_address, config_.port, config_.tls ? "enabled" : "disabled");
 
     co_await accept_loop();
@@ -53,7 +73,7 @@ asio::awaitable<void> Server::accept_loop() {
 
         } catch (const boost::system::system_error& e) {
             if (e.code() != asio::error::operation_aborted) {
-                spdlog::error("Accept error: {}", e.what());
+                log().error("Accept error: {}", e.what());
             }
         }
     }
@@ -80,7 +100,7 @@ asio::awaitable<void> Server::handle_tls_connection(tcp::socket socket) {
         co_await session->run();
 
     } catch (const boost::system::system_error& e) {
-        spdlog::debug("TLS connection error: {}", e.what());
+        log().debug("TLS connection error: {}", e.what());
     }
 }
 
@@ -94,7 +114,7 @@ asio::awaitable<void> Server::handle_plain_connection(tcp::socket socket) {
         co_await session->run();
 
     } catch (const boost::system::system_error& e) {
-        spdlog::debug("Plain connection error: {}", e.what());
+        log().debug("Plain connection error: {}", e.what());
     }
 }
 
@@ -115,6 +135,27 @@ asio::awaitable<void> HttpSession::run() {
     http::request<http::string_body> req;
     co_await http::async_read(stream_, buffer_, req, asio::use_awaitable);
 
+    // Get target path for routing
+    std::string target(req.target());
+
+    // Health check endpoints (non-WebSocket HTTP)
+    if (target == "/health" || target == "/health/") {
+        co_await send_health_response(stream_, req, http::status::ok,
+            R"({"status":"healthy","service":"edgelink-controller"})");
+        co_return;
+    }
+    if (target == "/health/live" || target == "/health/live/") {
+        co_await send_health_response(stream_, req, http::status::ok,
+            R"({"status":"live"})");
+        co_return;
+    }
+    if (target == "/health/ready" || target == "/health/ready/") {
+        // TODO: Check database connectivity and other dependencies
+        co_await send_health_response(stream_, req, http::status::ok,
+            R"({"status":"ready"})");
+        co_return;
+    }
+
     // Check if this is a WebSocket upgrade
     if (!websocket::is_upgrade(req)) {
         // Return 400 Bad Request for non-WebSocket requests
@@ -128,9 +169,7 @@ asio::awaitable<void> HttpSession::run() {
         co_return;
     }
 
-    // Get target path
-    std::string target(req.target());
-    spdlog::debug("WebSocket upgrade request for: {}", target);
+    log().debug("WebSocket upgrade request for: {}", target);
 
     // Create WebSocket stream
     WsStream ws(std::move(stream_));
@@ -154,17 +193,17 @@ asio::awaitable<void> HttpSession::run() {
     // Route based on target path
     if (target == "/api/v1/control" || target == "/api/v1/control/") {
         // Control channel
-        spdlog::info("New control channel connection (TLS)");
+        log().info("New control channel connection (TLS)");
         co_await ControlSession::start(std::move(ws), manager_);
 
     } else if (target == "/api/v1/relay" || target == "/api/v1/relay/") {
         // Relay channel (built-in relay)
-        spdlog::info("New relay channel connection (TLS)");
+        log().info("New relay channel connection (TLS)");
         co_await RelaySession::start(std::move(ws), manager_);
 
     } else {
         // Unknown endpoint
-        spdlog::warn("Unknown WebSocket endpoint: {}", target);
+        log().warn("Unknown WebSocket endpoint: {}", target);
         co_await ws.async_close(websocket::close_code::policy_error, asio::use_awaitable);
     }
 }
@@ -186,6 +225,27 @@ asio::awaitable<void> PlainHttpSession::run() {
     http::request<http::string_body> req;
     co_await http::async_read(stream_, buffer_, req, asio::use_awaitable);
 
+    // Get target path for routing
+    std::string target(req.target());
+
+    // Health check endpoints (non-WebSocket HTTP)
+    if (target == "/health" || target == "/health/") {
+        co_await send_health_response(stream_, req, http::status::ok,
+            R"({"status":"healthy","service":"edgelink-controller"})");
+        co_return;
+    }
+    if (target == "/health/live" || target == "/health/live/") {
+        co_await send_health_response(stream_, req, http::status::ok,
+            R"({"status":"live"})");
+        co_return;
+    }
+    if (target == "/health/ready" || target == "/health/ready/") {
+        // TODO: Check database connectivity and other dependencies
+        co_await send_health_response(stream_, req, http::status::ok,
+            R"({"status":"ready"})");
+        co_return;
+    }
+
     // Check if this is a WebSocket upgrade
     if (!websocket::is_upgrade(req)) {
         // Return 400 Bad Request for non-WebSocket requests
@@ -199,9 +259,7 @@ asio::awaitable<void> PlainHttpSession::run() {
         co_return;
     }
 
-    // Get target path
-    std::string target(req.target());
-    spdlog::debug("WebSocket upgrade request for: {}", target);
+    log().debug("WebSocket upgrade request for: {}", target);
 
     // Create WebSocket stream (plain)
     PlainWsStream ws(std::move(stream_));
@@ -225,17 +283,17 @@ asio::awaitable<void> PlainHttpSession::run() {
     // Route based on target path
     if (target == "/api/v1/control" || target == "/api/v1/control/") {
         // Control channel
-        spdlog::info("New control channel connection (plain)");
+        log().info("New control channel connection (plain)");
         co_await PlainControlSession::start(std::move(ws), manager_);
 
     } else if (target == "/api/v1/relay" || target == "/api/v1/relay/") {
         // Relay channel (built-in relay)
-        spdlog::info("New relay channel connection (plain)");
+        log().info("New relay channel connection (plain)");
         co_await PlainRelaySession::start(std::move(ws), manager_);
 
     } else {
         // Unknown endpoint
-        spdlog::warn("Unknown WebSocket endpoint: {}", target);
+        log().warn("Unknown WebSocket endpoint: {}", target);
         co_await ws.async_close(websocket::close_code::policy_error, asio::use_awaitable);
     }
 }
@@ -339,7 +397,7 @@ ssl::context create_self_signed_context() {
     X509_free(x509);
     EVP_PKEY_free(pkey);
 
-    spdlog::info("Generated self-signed certificate for development");
+    log().info("Generated self-signed certificate for development");
     return ctx;
 }
 
@@ -347,7 +405,7 @@ ssl::context create_dummy_context() {
     // Create a minimal SSL context for non-TLS mode
     // This context won't be used but is needed to satisfy the Server constructor
     ssl::context ctx(ssl::context::tlsv12);
-    spdlog::debug("Created dummy SSL context (TLS disabled)");
+    log().debug("Created dummy SSL context (TLS disabled)");
     return ctx;
 }
 

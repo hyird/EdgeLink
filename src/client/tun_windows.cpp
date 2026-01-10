@@ -2,9 +2,13 @@
 // Uses WinTun driver (https://www.wintun.net/)
 
 #include "client/tun_device.hpp"
-#include <spdlog/spdlog.h>
+#include "common/logger.hpp"
 
 #ifdef _WIN32
+
+namespace {
+auto& log() { return edgelink::Logger::get("client.tun"); }
+}
 
 #include <winsock2.h>
 #include <windows.h>
@@ -83,7 +87,7 @@ public:
         adapter_ = wintun_create_adapter_(wname.c_str(), L"EdgeLink", &guid);
 
         if (!adapter_) {
-            spdlog::error("Failed to create WinTun adapter: {}", GetLastError());
+            log().error("Failed to create WinTun adapter: {}", GetLastError());
             return std::unexpected(TunError::OPEN_FAILED);
         }
 
@@ -93,7 +97,7 @@ public:
         // Start session with 4MB ring buffer
         session_ = wintun_start_session_(adapter_, 0x400000);
         if (!session_) {
-            spdlog::error("Failed to start WinTun session: {}", GetLastError());
+            log().error("Failed to start WinTun session: {}", GetLastError());
             wintun_close_adapter_(adapter_);
             adapter_ = nullptr;
             return std::unexpected(TunError::OPEN_FAILED);
@@ -102,7 +106,7 @@ public:
         // Get read event
         read_event_ = wintun_get_read_wait_event_(session_);
 
-        spdlog::info("WinTun adapter opened: {}", name_);
+        log().info("WinTun adapter opened: {}", name_);
         return {};
     }
 
@@ -129,7 +133,7 @@ public:
 
         int result = system(cmd.c_str());
         if (result != 0) {
-            spdlog::warn("netsh command returned {}", result);
+            log().warn("netsh command returned {}", result);
         }
 
         // Set MTU
@@ -146,7 +150,7 @@ public:
         netmask_ = netmask;
         mtu_ = mtu;
 
-        spdlog::info("WinTun {} configured: {}/{} MTU={}", name_, ip.to_string(),
+        log().info("WinTun {} configured: {}/{} MTU={}", name_, ip.to_string(),
                      netmask.to_string(), mtu);
         return {};
     }
@@ -165,7 +169,7 @@ public:
         }
 
         read_event_ = nullptr;
-        spdlog::info("WinTun adapter closed");
+        log().info("WinTun adapter closed");
     }
 
     bool is_open() const override {
@@ -236,7 +240,7 @@ private:
         }
 
         if (!wintun_dll_) {
-            spdlog::error("Failed to load wintun.dll. Please download from https://www.wintun.net/");
+            log().error("Failed to load wintun.dll. Please download from https://www.wintun.net/");
             return false;
         }
 
@@ -267,13 +271,13 @@ private:
             !wintun_receive_packet_ || !wintun_release_receive_packet_ ||
             !wintun_allocate_send_packet_ || !wintun_send_packet_ ||
             !wintun_get_read_wait_event_ || !wintun_get_adapter_luid_) {
-            spdlog::error("Failed to load WinTun functions");
+            log().error("Failed to load WinTun functions");
             FreeLibrary(wintun_dll_);
             wintun_dll_ = nullptr;
             return false;
         }
 
-        spdlog::debug("WinTun library loaded successfully");
+        log().debug("WinTun library loaded successfully");
         return true;
     }
 

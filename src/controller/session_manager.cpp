@@ -1,8 +1,12 @@
 #include "controller/session_manager.hpp"
 #include "controller/session.hpp"
-#include <spdlog/spdlog.h>
+#include "common/logger.hpp"
 
 namespace edgelink::controller {
+
+namespace {
+auto& log() { return Logger::get("controller.session_manager"); }
+}
 
 SessionManager::SessionManager(asio::io_context& ioc, Database& db, JwtUtil& jwt)
     : ioc_(ioc), db_(db), jwt_(jwt) {}
@@ -18,7 +22,7 @@ void SessionManager::register_control_session(NodeId node_id, std::shared_ptr<IS
         // Unregister existing session if any
         auto it = control_sessions_.find(node_id);
         if (it != control_sessions_.end()) {
-            spdlog::info("Replacing existing control session for node {}", node_id);
+            log().info("Replacing existing control session for node {}", node_id);
         }
 
         control_sessions_[node_id] = session;
@@ -31,7 +35,7 @@ void SessionManager::register_control_session(NodeId node_id, std::shared_ptr<IS
         node_ip_cache_[node_id] = node->virtual_ip.to_string();
     }
 
-    spdlog::debug("Registered control session for node {}", node_id);
+    log().debug("Registered control session for node {}", node_id);
 }
 
 void SessionManager::unregister_control_session(NodeId node_id) {
@@ -49,7 +53,7 @@ void SessionManager::unregister_control_session(NodeId node_id) {
         node_ip_cache_.erase(node_id);
     }
 
-    spdlog::debug("Unregistered control session for node {}", node_id);
+    log().debug("Unregistered control session for node {}", node_id);
 }
 
 std::shared_ptr<ISession> SessionManager::get_control_session(NodeId node_id) {
@@ -88,11 +92,11 @@ void SessionManager::register_relay_session(NodeId node_id, std::shared_ptr<ISes
 
     auto it = relay_sessions_.find(node_id);
     if (it != relay_sessions_.end()) {
-        spdlog::info("Replacing existing relay session for node {}", node_id);
+        log().info("Replacing existing relay session for node {}", node_id);
     }
 
     relay_sessions_[node_id] = session;
-    spdlog::debug("Registered relay session for node {}", node_id);
+    log().debug("Registered relay session for node {}", node_id);
 }
 
 void SessionManager::unregister_relay_session(NodeId node_id) {
@@ -100,7 +104,7 @@ void SessionManager::unregister_relay_session(NodeId node_id) {
     auto it = relay_sessions_.find(node_id);
     if (it != relay_sessions_.end()) {
         relay_sessions_.erase(it);
-        spdlog::debug("Unregistered relay session for node {}", node_id);
+        log().debug("Unregistered relay session for node {}", node_id);
     }
 }
 
@@ -148,7 +152,7 @@ asio::awaitable<void> SessionManager::broadcast_config_update(NetworkId network_
         }
     }
 
-    spdlog::debug("Broadcast CONFIG_UPDATE to {} sessions in network {}",
+    log().debug("Broadcast CONFIG_UPDATE to {} sessions in network {}",
                   sessions.size() - (except_node ? 1 : 0), network_id);
 }
 

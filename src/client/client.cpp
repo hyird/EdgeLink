@@ -1,7 +1,11 @@
 #include "client/client.hpp"
-#include <spdlog/spdlog.h>
+#include "common/logger.hpp"
 
 namespace edgelink::client {
+
+namespace {
+    auto& log() { return Logger::get("client"); }
+}
 
 const char* client_state_name(ClientState state) {
     switch (state) {
@@ -37,9 +41,9 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
             boost::system::error_code ec;
             ssl_ctx_.load_verify_file(config_.ssl_ca_file, ec);
             if (ec) {
-                spdlog::warn("Failed to load CA file '{}': {}", config_.ssl_ca_file, ec.message());
+                log().warn("Failed to load CA file '{}': {}", config_.ssl_ca_file, ec.message());
             } else {
-                spdlog::info("Loaded custom CA certificate: {}", config_.ssl_ca_file);
+                log().info("Loaded custom CA certificate: {}", config_.ssl_ca_file);
             }
         }
 
@@ -52,25 +56,26 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
                 // Allow self-signed certificates
                 if (err == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT ||
                     err == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN) {
-                    spdlog::debug("Accepting self-signed certificate");
+                    log().debug("Accepting self-signed certificate");
                     return true;
                 }
 
                 // For other errors, use default verification result
                 return preverified;
             });
-            spdlog::info("SSL: allowing self-signed certificates");
+            log().info("SSL: allowing self-signed certificates");
         }
         // Note: hostname verification is done per-connection in channel.cpp
-        spdlog::info("SSL: certificate verification enabled");
+        log().info("SSL: certificate verification enabled");
     } else {
         // Disable certificate verification (insecure, for testing only)
         ssl_ctx_.set_verify_mode(ssl::verify_none);
-        spdlog::warn("SSL: certificate verification DISABLED (insecure)");
+        log().warn("SSL: certificate verification DISABLED (insecure)");
     }
 }
 
 Client::~Client() {
+    teardown_ipc();
     teardown_tun();
 }
 
@@ -83,12 +88,12 @@ void Client::setup_callbacks() {
     ControlChannelCallbacks control_cbs;
 
     control_cbs.on_auth_response = [this](const AuthResponse& resp) {
-        spdlog::info("Authenticated: node_id={}, ip={}", resp.node_id, resp.virtual_ip.to_string());
+        log().info("Authenticated: node_id={}, ip={}", resp.node_id, resp.virtual_ip.to_string());
     };
 
     control_cbs.on_config = [this](const Config& config) {
         peers_.update_from_config(config.peers);
-        spdlog::info("Config received: {} peers", config.peers.size());
+        log().info("Config received: {} peers", config.peers.size());
     };
 
     control_cbs.on_config_update = [this](const ConfigUpdate& update) {
@@ -103,14 +108,14 @@ void Client::setup_callbacks() {
     };
 
     control_cbs.on_error = [this](uint16_t code, const std::string& msg) {
-        spdlog::error("Control error {}: {}", code, msg);
+        log().error("Control error {}: {}", code, msg);
         if (callbacks_.on_error) {
             callbacks_.on_error(code, msg);
         }
     };
 
     control_cbs.on_disconnected = [this]() {
-        spdlog::warn("Control channel disconnected");
+        log().warn("Control channel disconnected");
         // Reconnect if we were running or in the middle of connecting
         if (config_.auto_reconnect && state_ != ClientState::STOPPED &&
             state_ != ClientState::RECONNECTING) {
@@ -125,20 +130,20 @@ void Client::setup_callbacks() {
 
     relay_cbs.on_data = [this](NodeId src, std::span<const uint8_t> data) {
         auto src_peer_ip = peers_.get_peer_ip_str(src);
-        spdlog::debug("Received {} bytes from {}", data.size(), src_peer_ip);
+        log().debug("Received {} bytes from {}", data.size(), src_peer_ip);
 
         // If TUN mode is enabled, write IP packets to TUN device
         if (is_tun_enabled() && ip_packet::version(data) == 4) {
             auto src_ip = ip_packet::src_ipv4(data);
             auto dst_ip = ip_packet::dst_ipv4(data);
-            spdlog::debug("Writing to TUN: {} -> {} ({} bytes)",
+            log().debug("Writing to TUN: {} -> {} ({} bytes)",
                           src_ip.to_string(), dst_ip.to_string(), data.size());
 
             auto result = tun_->write(data);
             if (!result) {
-                spdlog::warn("Failed to write to TUN: {}", tun_error_message(result.error()));
+                log().warn("Failed to write to TUN: {}", tun_error_message(result.error()));
             } else {
-                spdlog::debug("TUN write successful: {} bytes", data.size());
+                log().debug("TUN write successful: {} bytes", data.size());
             }
         }
 
@@ -149,13 +154,13 @@ void Client::setup_callbacks() {
     };
 
     relay_cbs.on_connected = [this]() {
-        spdlog::info("Relay channel connected");
+        log().info("Relay channel connected");
         state_ = ClientState::RUNNING;
 
         // Setup TUN if enabled
         if (config_.enable_tun) {
             if (!setup_tun()) {
-                spdlog::warn("TUN mode requested but failed to setup TUN device");
+                log().warn("TUN mode requested but failed to setup TUN device");
             }
         }
 
@@ -171,7 +176,7 @@ void Client::setup_callbacks() {
     };
 
     relay_cbs.on_disconnected = [this]() {
-        spdlog::warn("Relay channel disconnected");
+        log().warn("Relay channel disconnected");
         // Reconnect if we were running or in the middle of connecting
         if (config_.auto_reconnect && state_ != ClientState::STOPPED &&
             state_ != ClientState::RECONNECTING) {
@@ -184,21 +189,21 @@ void Client::setup_callbacks() {
 
 bool Client::setup_tun() {
     if (!control_ || !control_->is_connected()) {
-        spdlog::error("Cannot setup TUN: not connected");
+        log().error("Cannot setup TUN: not connected");
         return false;
     }
 
     // Create TUN device
     tun_ = TunDevice::create(ioc_);
     if (!tun_) {
-        spdlog::error("Failed to create TUN device");
+        log().error("Failed to create TUN device");
         return false;
     }
 
     // Open TUN device
     auto result = tun_->open(config_.tun_name);
     if (!result) {
-        spdlog::error("Failed to open TUN device: {}", tun_error_message(result.error()));
+        log().error("Failed to open TUN device: {}", tun_error_message(result.error()));
         tun_.reset();
         return false;
     }
@@ -213,7 +218,7 @@ bool Client::setup_tun() {
 
     result = tun_->configure(vip, netmask, config_.tun_mtu);
     if (!result) {
-        spdlog::error("Failed to configure TUN device: {}", tun_error_message(result.error()));
+        log().error("Failed to configure TUN device: {}", tun_error_message(result.error()));
         tun_->close();
         tun_.reset();
         return false;
@@ -224,7 +229,7 @@ bool Client::setup_tun() {
         on_tun_packet(packet);
     });
 
-    spdlog::info("TUN device enabled: {} with IP {}", tun_->name(), vip.to_string());
+    log().info("TUN device enabled: {} with IP {}", tun_->name(), vip.to_string());
     return true;
 }
 
@@ -233,7 +238,7 @@ void Client::teardown_tun() {
         tun_->stop_read();
         tun_->close();
         tun_.reset();
-        spdlog::info("TUN device closed");
+        log().info("TUN device closed");
     }
 }
 
@@ -266,18 +271,18 @@ void Client::on_tun_packet(std::span<const uint8_t> packet) {
         }
     }
 
-    spdlog::debug("TUN packet: {} -> {} ({} bytes)",
+    log().debug("TUN packet: {} -> {} ({} bytes)",
                   src_ip.to_string(), dst_ip.to_string(), packet.size());
 
     // Find peer by destination IP
     auto peer = peers_.get_peer_by_ip(dst_ip);
     if (!peer) {
-        spdlog::warn("TUN packet to unknown IP {}, dropping (known peers: {})",
+        log().warn("TUN packet to unknown IP {}, dropping (known peers: {})",
                      dst_ip.to_string(), peers_.peer_count());
         return;
     }
 
-    spdlog::debug("Forwarding to {} ({})", peer->info.virtual_ip.to_string(),
+    log().debug("Forwarding to {} ({})", peer->info.virtual_ip.to_string(),
                   peer->info.online ? "online" : "offline");
 
     // Send via relay
@@ -290,16 +295,16 @@ void Client::on_tun_packet(std::span<const uint8_t> packet) {
 
 asio::awaitable<bool> Client::start() {
     if (state_ != ClientState::STOPPED) {
-        spdlog::warn("Client already started");
+        log().warn("Client already started");
         co_return false;
     }
 
     state_ = ClientState::STARTING;
-    spdlog::info("Starting client...");
+    log().info("Starting client...");
 
     // State directory (should be set by main, fallback to current directory)
     std::string state_dir = config_.state_dir.empty() ? "." : config_.state_dir;
-    spdlog::info("State directory: {}", state_dir);
+    log().info("State directory: {}", state_dir);
 
     // Key file is always stored in state_dir
     std::string key_file = state_dir + "/keys";
@@ -310,14 +315,14 @@ asio::awaitable<bool> Client::start() {
         // Generate new keys
         auto init_result = crypto_.init();
         if (!init_result) {
-            spdlog::error("Failed to initialize crypto engine");
+            log().error("Failed to initialize crypto engine");
             state_ = ClientState::STOPPED;
             co_return false;
         }
         // Save new keys for future sessions
         auto save_result = crypto_.save_keys_to_file(key_file);
         if (!save_result) {
-            spdlog::warn("Failed to save keys (will regenerate on next startup)");
+            log().warn("Failed to save keys (will regenerate on next startup)");
         }
     }
 
@@ -354,9 +359,9 @@ asio::awaitable<bool> Client::start() {
     std::string control_url = base_url + "/api/v1/control";
     std::string relay_url = base_url + "/api/v1/relay";
 
-    spdlog::info("TLS: {}", config_.tls ? "enabled" : "disabled");
-    spdlog::debug("Control URL: {}", control_url);
-    spdlog::debug("Relay URL: {}", relay_url);
+    log().info("TLS: {}", config_.tls ? "enabled" : "disabled");
+    log().debug("Control URL: {}", control_url);
+    log().debug("Relay URL: {}", relay_url);
 
     // Create channels
     control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, config_.tls);
@@ -367,13 +372,13 @@ asio::awaitable<bool> Client::start() {
 
     // Connect to control channel
     state_ = ClientState::AUTHENTICATING;
-    spdlog::info("Connecting to controller...");
+    log().info("Connecting to controller...");
 
     bool connected = co_await control_->connect(config_.authkey);
     if (!connected) {
-        spdlog::error("Failed to connect to controller");
+        log().error("Failed to connect to controller");
         if (config_.auto_reconnect) {
-            spdlog::info("Will retry in {}s...", config_.reconnect_interval.count());
+            log().info("Will retry in {}s...", config_.reconnect_interval.count());
             state_ = ClientState::STOPPED;
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         } else {
@@ -390,9 +395,9 @@ asio::awaitable<bool> Client::start() {
         auto result = co_await (timer.async_wait(asio::use_awaitable) ||
                                 asio::post(ioc_, asio::use_awaitable));
         if (timer.expiry() <= std::chrono::steady_clock::now()) {
-            spdlog::error("Authentication timeout");
+            log().error("Authentication timeout");
             if (config_.auto_reconnect) {
-                spdlog::info("Will retry in {}s...", config_.reconnect_interval.count());
+                log().info("Will retry in {}s...", config_.reconnect_interval.count());
                 state_ = ClientState::STOPPED;
                 asio::co_spawn(ioc_, reconnect(), asio::detached);
             } else {
@@ -405,14 +410,14 @@ asio::awaitable<bool> Client::start() {
 
     // Connect to relay channel
     state_ = ClientState::CONNECTING_RELAY;
-    spdlog::info("Connecting to relay...");
+    log().info("Connecting to relay...");
 
     connected = co_await relay_->connect(control_->relay_token());
     if (!connected) {
-        spdlog::error("Failed to connect to relay");
+        log().error("Failed to connect to relay");
         co_await control_->close();
         if (config_.auto_reconnect) {
-            spdlog::info("Will retry in {}s...", config_.reconnect_interval.count());
+            log().info("Will retry in {}s...", config_.reconnect_interval.count());
             state_ = ClientState::STOPPED;
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         } else {
@@ -427,10 +432,10 @@ asio::awaitable<bool> Client::start() {
         auto result = co_await (timer.async_wait(asio::use_awaitable) ||
                                 asio::post(ioc_, asio::use_awaitable));
         if (timer.expiry() <= std::chrono::steady_clock::now()) {
-            spdlog::error("Relay authentication timeout");
+            log().error("Relay authentication timeout");
             co_await control_->close();
             if (config_.auto_reconnect) {
-                spdlog::info("Will retry in {}s...", config_.reconnect_interval.count());
+                log().info("Will retry in {}s...", config_.reconnect_interval.count());
                 state_ = ClientState::STOPPED;
                 asio::co_spawn(ioc_, reconnect(), asio::detached);
             } else {
@@ -441,19 +446,27 @@ asio::awaitable<bool> Client::start() {
         co_await asio::post(ioc_, asio::use_awaitable);
     }
 
-    spdlog::info("Client started successfully");
-    spdlog::info("  Node ID: {}", crypto_.node_id());
-    spdlog::info("  Virtual IP: {}", control_->virtual_ip().to_string());
-    spdlog::info("  Peers: {}", peers_.peer_count());
+    // Start IPC server for CLI control
+    if (config_.enable_ipc) {
+        setup_ipc();
+    }
+
+    log().info("Client started successfully");
+    log().info("  Node ID: {}", crypto_.node_id());
+    log().info("  Virtual IP: {}", control_->virtual_ip().to_string());
+    log().info("  Peers: {}", peers_.peer_count());
     if (is_tun_enabled()) {
-        spdlog::info("  TUN device: {}", tun_->name());
+        log().info("  TUN device: {}", tun_->name());
+    }
+    if (is_ipc_enabled()) {
+        log().info("  IPC socket: {}", ipc_->socket_path());
     }
 
     co_return true;
 }
 
 asio::awaitable<void> Client::stop() {
-    spdlog::info("Stopping client...");
+    log().info("Stopping client...");
 
     keepalive_timer_.cancel();
     reconnect_timer_.cancel();
@@ -471,7 +484,7 @@ asio::awaitable<void> Client::stop() {
     }
 
     state_ = ClientState::STOPPED;
-    spdlog::info("Client stopped");
+    log().info("Client stopped");
 
     if (callbacks_.on_disconnected) {
         callbacks_.on_disconnected();
@@ -480,7 +493,7 @@ asio::awaitable<void> Client::stop() {
 
 asio::awaitable<bool> Client::send_to_peer(NodeId peer_id, std::span<const uint8_t> data) {
     if (!relay_ || !relay_->is_connected()) {
-        spdlog::warn("Cannot send: relay not connected");
+        log().warn("Cannot send: relay not connected");
         co_return false;
     }
 
@@ -490,7 +503,7 @@ asio::awaitable<bool> Client::send_to_peer(NodeId peer_id, std::span<const uint8
 asio::awaitable<bool> Client::send_to_ip(const IPv4Address& ip, std::span<const uint8_t> data) {
     auto peer = peers_.get_peer_by_ip(ip);
     if (!peer) {
-        spdlog::warn("Cannot send: no peer with IP {}", ip.to_string());
+        log().warn("Cannot send: no peer with IP {}", ip.to_string());
         co_return false;
     }
 
@@ -500,7 +513,7 @@ asio::awaitable<bool> Client::send_to_ip(const IPv4Address& ip, std::span<const 
 asio::awaitable<bool> Client::send_ip_packet(std::span<const uint8_t> packet) {
     // Validate IPv4 packet
     if (packet.size() < 20 || ip_packet::version(packet) != 4) {
-        spdlog::warn("Invalid IP packet");
+        log().warn("Invalid IP packet");
         co_return false;
     }
 
@@ -522,7 +535,7 @@ asio::awaitable<void> Client::keepalive_loop() {
             }
         } catch (const boost::system::system_error& e) {
             if (e.code() != asio::error::operation_aborted) {
-                spdlog::debug("Keepalive error: {}", e.what());
+                log().debug("Keepalive error: {}", e.what());
             }
             break;
         }
@@ -535,7 +548,7 @@ asio::awaitable<void> Client::reconnect() {
     }
 
     state_ = ClientState::RECONNECTING;
-    spdlog::info("Attempting to reconnect...");
+    log().info("Attempting to reconnect...");
 
     // Clear DNS cache so it will be re-initialized after reconnect
     cached_controller_endpoints_.clear();
@@ -563,14 +576,14 @@ asio::awaitable<void> Client::reconnect() {
 
         if (!success && config_.auto_reconnect) {
             // start() failed, schedule another attempt
-            spdlog::warn("Reconnect failed, will retry in {}s",
+            log().warn("Reconnect failed, will retry in {}s",
                          config_.reconnect_interval.count());
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         }
 
     } catch (const boost::system::system_error& e) {
         if (e.code() != asio::error::operation_aborted) {
-            spdlog::debug("Reconnect error: {}", e.what());
+            log().debug("Reconnect error: {}", e.what());
             // Schedule another reconnect attempt
             if (config_.auto_reconnect) {
                 asio::co_spawn(ioc_, reconnect(), asio::detached);
@@ -642,7 +655,7 @@ asio::awaitable<void> Client::dns_refresh_loop() {
             // Check if DNS resolution changed
             if (!cached_controller_endpoints_.empty() &&
                 cached_controller_endpoints_ != new_endpoints) {
-                spdlog::info("DNS resolution changed: {} -> {}", cached_controller_endpoints_, new_endpoints);
+                log().info("DNS resolution changed: {} -> {}", cached_controller_endpoints_, new_endpoints);
                 // Trigger reconnect to use new endpoints
                 if (config_.auto_reconnect) {
                     asio::co_spawn(ioc_, reconnect(), asio::detached);
@@ -653,15 +666,50 @@ asio::awaitable<void> Client::dns_refresh_loop() {
             // Update cache (first time or unchanged)
             if (cached_controller_endpoints_.empty()) {
                 cached_controller_endpoints_ = new_endpoints;
-                spdlog::debug("DNS cache initialized: {}", new_endpoints);
+                log().debug("DNS cache initialized: {}", new_endpoints);
             }
 
         } catch (const boost::system::system_error& e) {
             if (e.code() != asio::error::operation_aborted) {
-                spdlog::debug("DNS refresh error: {}", e.what());
+                log().debug("DNS refresh error: {}", e.what());
             }
             break;
         }
+    }
+}
+
+// ============================================================================
+// IPC Server Management
+// ============================================================================
+
+bool Client::setup_ipc() {
+    if (!config_.enable_ipc) {
+        return false;
+    }
+
+    if (ipc_ && ipc_->is_running()) {
+        return true;
+    }
+
+    ipc_ = std::make_shared<IpcServer>(ioc_, *this);
+
+    IpcServerConfig ipc_config;
+    ipc_config.socket_path = config_.ipc_socket_path;
+    ipc_config.enabled = true;
+
+    if (!ipc_->start(ipc_config)) {
+        log().warn("Failed to start IPC server");
+        ipc_.reset();
+        return false;
+    }
+
+    return true;
+}
+
+void Client::teardown_ipc() {
+    if (ipc_) {
+        ipc_->stop();
+        ipc_.reset();
     }
 }
 

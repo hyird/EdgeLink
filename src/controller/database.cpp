@@ -1,10 +1,14 @@
 #include "controller/database.hpp"
+#include "common/logger.hpp"
 #include <sqlite3.h>
 #include <chrono>
 #include <cstring>
-#include <spdlog/spdlog.h>
 
 namespace edgelink::controller {
+
+namespace {
+auto& log() { return Logger::get("controller.database"); }
+}
 
 std::string db_error_message(DbError error) {
     switch (error) {
@@ -113,7 +117,7 @@ std::expected<void, DbError> Database::open(const std::string& path) {
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
         nullptr);
     if (rc != SQLITE_OK) {
-        spdlog::error("Failed to open database: {}", sqlite3_errmsg(db_));
+        log().error("Failed to open database: {}", sqlite3_errmsg(db_));
         sqlite3_close(db_);
         db_ = nullptr;
         return std::unexpected(DbError::OPEN_FAILED);
@@ -125,7 +129,7 @@ std::expected<void, DbError> Database::open(const std::string& path) {
     execute("PRAGMA foreign_keys=ON");
     execute("PRAGMA busy_timeout=5000");
 
-    spdlog::info("Database opened: {}", path);
+    log().info("Database opened: {}", path);
     return {};
 }
 
@@ -140,7 +144,7 @@ std::expected<Statement, DbError> Database::prepare(const std::string& sql) {
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        spdlog::error("Failed to prepare statement: {}", sqlite3_errmsg(db_));
+        log().error("Failed to prepare statement: {}", sqlite3_errmsg(db_));
         return std::unexpected(DbError::QUERY_FAILED);
     }
     return Statement(stmt);
@@ -152,7 +156,7 @@ std::expected<void, DbError> Database::execute(const std::string& sql) {
     if (rc != SQLITE_OK) {
         std::string error = errmsg ? errmsg : "Unknown error";
         sqlite3_free(errmsg);
-        spdlog::error("Failed to execute SQL: {}", error);
+        log().error("Failed to execute SQL: {}", error);
         return std::unexpected(DbError::QUERY_FAILED);
     }
     return {};
@@ -211,12 +215,12 @@ std::expected<void, DbError> Database::init_schema() {
         if (!created) {
             return std::unexpected(created.error());
         }
-        spdlog::info("Created default network: {}", created->cidr);
+        log().info("Created default network: {}", created->cidr);
 
         // Create default authkey for development
         auto authkey = create_authkey("tskey-dev-test123", created->id);
         if (authkey) {
-            spdlog::info("Created development authkey: tskey-dev-test123");
+            log().info("Created development authkey: tskey-dev-test123");
         }
     }
 

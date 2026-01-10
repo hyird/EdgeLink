@@ -2,9 +2,13 @@
 // Uses /dev/net/tun interface
 
 #include "client/tun_device.hpp"
-#include <spdlog/spdlog.h>
+#include "common/logger.hpp"
 
 #ifdef __linux__
+
+namespace {
+auto& log() { return edgelink::Logger::get("client.tun"); }
+}
 
 #include <linux/if.h>
 #include <linux/if_tun.h>
@@ -41,7 +45,7 @@ public:
         // Open /dev/net/tun
         int fd = ::open("/dev/net/tun", O_RDWR);
         if (fd < 0) {
-            spdlog::error("Cannot open /dev/net/tun: {}", strerror(errno));
+            log().error("Cannot open /dev/net/tun: {}", strerror(errno));
             return std::unexpected(TunError::OPEN_FAILED);
         }
 
@@ -54,7 +58,7 @@ public:
         }
 
         if (ioctl(fd, TUNSETIFF, &ifr) < 0) {
-            spdlog::error("ioctl TUNSETIFF failed: {}", strerror(errno));
+            log().error("ioctl TUNSETIFF failed: {}", strerror(errno));
             ::close(fd);
             return std::unexpected(TunError::OPEN_FAILED);
         }
@@ -69,7 +73,7 @@ public:
         // Assign to ASIO stream
         stream_.assign(fd_);
 
-        spdlog::info("TUN device opened: {}", name_);
+        log().info("TUN device opened: {}", name_);
         return {};
     }
 
@@ -96,7 +100,7 @@ public:
         addr->sin_addr.s_addr = htonl(ip.to_u32());
 
         if (ioctl(sock, SIOCSIFADDR, &ifr) < 0) {
-            spdlog::error("Failed to set IP address: {}", strerror(errno));
+            log().error("Failed to set IP address: {}", strerror(errno));
             ::close(sock);
             return std::unexpected(TunError::CONFIGURE_FAILED);
         }
@@ -104,7 +108,7 @@ public:
         // Set netmask
         addr->sin_addr.s_addr = htonl(netmask.to_u32());
         if (ioctl(sock, SIOCSIFNETMASK, &ifr) < 0) {
-            spdlog::error("Failed to set netmask: {}", strerror(errno));
+            log().error("Failed to set netmask: {}", strerror(errno));
             ::close(sock);
             return std::unexpected(TunError::CONFIGURE_FAILED);
         }
@@ -112,7 +116,7 @@ public:
         // Set MTU
         ifr.ifr_mtu = static_cast<int>(mtu);
         if (ioctl(sock, SIOCSIFMTU, &ifr) < 0) {
-            spdlog::error("Failed to set MTU: {}", strerror(errno));
+            log().error("Failed to set MTU: {}", strerror(errno));
             // Non-fatal, continue
         }
 
@@ -124,7 +128,7 @@ public:
 
         ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
         if (ioctl(sock, SIOCSIFFLAGS, &ifr) < 0) {
-            spdlog::error("Failed to bring interface up: {}", strerror(errno));
+            log().error("Failed to bring interface up: {}", strerror(errno));
             ::close(sock);
             return std::unexpected(TunError::CONFIGURE_FAILED);
         }
@@ -135,7 +139,7 @@ public:
         netmask_ = netmask;
         mtu_ = mtu;
 
-        spdlog::info("TUN {} configured: {}/{} MTU={}", name_, ip.to_string(),
+        log().info("TUN {} configured: {}/{} MTU={}", name_, ip.to_string(),
                      netmask.to_string(), mtu);
         return {};
     }
@@ -162,7 +166,7 @@ public:
             }
 
             fd_ = -1;
-            spdlog::info("TUN device {} closed", name_);
+            log().info("TUN device {} closed", name_);
         }
     }
 
@@ -190,7 +194,7 @@ public:
 
     std::expected<void, TunError> write(std::span<const uint8_t> packet) override {
         if (!is_open()) {
-            spdlog::warn("TUN write failed: device not open");
+            log().warn("TUN write failed: device not open");
             return std::unexpected(TunError::WRITE_FAILED);
         }
 
@@ -198,16 +202,16 @@ public:
         size_t bytes_written = asio::write(stream_, asio::buffer(packet.data(), packet.size()), ec);
 
         if (ec) {
-            spdlog::warn("TUN write error: {} (wrote {} of {} bytes)", ec.message(), bytes_written, packet.size());
+            log().warn("TUN write error: {} (wrote {} of {} bytes)", ec.message(), bytes_written, packet.size());
             return std::unexpected(TunError::WRITE_FAILED);
         }
 
         if (bytes_written != packet.size()) {
-            spdlog::warn("TUN write incomplete: {} of {} bytes", bytes_written, packet.size());
+            log().warn("TUN write incomplete: {} of {} bytes", bytes_written, packet.size());
             return std::unexpected(TunError::WRITE_FAILED);
         }
 
-        spdlog::trace("TUN write: {} bytes to fd {}", bytes_written, fd_);
+        log().trace("TUN write: {} bytes to fd {}", bytes_written, fd_);
         return {};
     }
 
@@ -224,7 +228,7 @@ public:
                 asio::use_awaitable);
             co_return std::expected<void, TunError>{};
         } catch (const boost::system::system_error& e) {
-            spdlog::debug("TUN async write error: {}", e.what());
+            log().debug("TUN async write error: {}", e.what());
             co_return std::unexpected(TunError::WRITE_FAILED);
         }
     }
@@ -238,7 +242,7 @@ private:
             [this](const boost::system::error_code& ec, size_t bytes) {
                 if (ec) {
                     if (ec != asio::error::operation_aborted) {
-                        spdlog::debug("TUN read error: {}", ec.message());
+                        log().debug("TUN read error: {}", ec.message());
                     }
                     return;
                 }

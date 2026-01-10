@@ -1,9 +1,13 @@
 #include "client/crypto_engine.hpp"
-#include <spdlog/spdlog.h>
+#include "common/logger.hpp"
 #include <fstream>
 #include <filesystem>
 
 namespace edgelink::client {
+
+namespace {
+auto& log() { return Logger::get("client.crypto"); }
+}
 
 std::string crypto_engine_error_message(CryptoEngineError error) {
     switch (error) {
@@ -22,7 +26,7 @@ std::expected<void, CryptoEngineError> CryptoEngine::init() {
     // Generate machine key (Ed25519)
     auto mk = crypto::generate_machine_key();
     if (!mk) {
-        spdlog::error("Failed to generate machine key");
+        log().error("Failed to generate machine key");
         return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
     }
     machine_key_ = *mk;
@@ -30,15 +34,15 @@ std::expected<void, CryptoEngineError> CryptoEngine::init() {
     // Generate node key (X25519)
     auto nk = crypto::generate_node_key();
     if (!nk) {
-        spdlog::error("Failed to generate node key");
+        log().error("Failed to generate node key");
         return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
     }
     node_key_ = *nk;
 
     initialized_ = true;
-    spdlog::info("Crypto engine initialized with new keys");
-    spdlog::debug("Machine key: {}...", crypto::key_to_hex(machine_key_.public_key).substr(0, 16));
-    spdlog::debug("Node key: {}...", crypto::key_to_hex(node_key_.public_key).substr(0, 16));
+    log().info("Crypto engine initialized with new keys");
+    log().debug("Machine key: {}...", crypto::key_to_hex(machine_key_.public_key).substr(0, 16));
+    log().debug("Node key: {}...", crypto::key_to_hex(node_key_.public_key).substr(0, 16));
 
     return {};
 }
@@ -55,7 +59,7 @@ std::expected<void, CryptoEngineError> CryptoEngine::load_keys(
     std::copy(node_priv.begin(), node_priv.end(), node_key_.private_key.begin());
 
     initialized_ = true;
-    spdlog::info("Crypto engine initialized with loaded keys");
+    log().info("Crypto engine initialized with loaded keys");
 
     return {};
 }
@@ -84,14 +88,14 @@ std::expected<void, CryptoEngineError> CryptoEngine::derive_session_key(
     // Perform X25519 key exchange
     auto shared_secret = crypto::x25519_exchange(node_key_.private_key, peer_node_key);
     if (!shared_secret) {
-        spdlog::error("X25519 key exchange failed for peer {}", peer_id);
+        log().error("X25519 key exchange failed for peer {}", peer_id);
         return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
     }
 
     // Derive session key using HKDF
     auto session_key = crypto::derive_session_key(*shared_secret, node_id_, peer_id);
     if (!session_key) {
-        spdlog::error("Session key derivation failed for peer {}", peer_id);
+        log().error("Session key derivation failed for peer {}", peer_id);
         return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
     }
 
@@ -106,7 +110,7 @@ std::expected<void, CryptoEngineError> CryptoEngine::derive_session_key(
         peer_sessions_[peer_id] = session;
     }
 
-    spdlog::debug("Derived session key for peer {}", peer_id);
+    log().debug("Derived session key for peer {}", peer_id);
     return {};
 }
 
@@ -119,13 +123,13 @@ bool CryptoEngine::has_session_key(NodeId peer_id) const {
 void CryptoEngine::remove_session_key(NodeId peer_id) {
     std::unique_lock lock(sessions_mutex_);
     peer_sessions_.erase(peer_id);
-    spdlog::debug("Removed session key for peer {}", peer_id);
+    log().debug("Removed session key for peer {}", peer_id);
 }
 
 void CryptoEngine::clear_all_session_keys() {
     std::unique_lock lock(sessions_mutex_);
     peer_sessions_.clear();
-    spdlog::debug("Cleared all session keys");
+    log().debug("Cleared all session keys");
 }
 
 uint64_t CryptoEngine::next_send_counter(NodeId peer_id) {
@@ -294,7 +298,7 @@ std::expected<void, CryptoEngineError> CryptoEngine::save_keys_to_file(const std
         std::error_code ec;
         std::filesystem::create_directories(file_path.parent_path(), ec);
         if (ec) {
-            spdlog::error("Failed to create key directory: {}", ec.message());
+            log().error("Failed to create key directory: {}", ec.message());
             return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
         }
     }
@@ -302,7 +306,7 @@ std::expected<void, CryptoEngineError> CryptoEngine::save_keys_to_file(const std
     // Write keys to file in base64 format (one key per line)
     std::ofstream file(path);
     if (!file) {
-        spdlog::error("Failed to open key file for writing: {}", path);
+        log().error("Failed to open key file for writing: {}", path);
         return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
     }
 
@@ -313,11 +317,11 @@ std::expected<void, CryptoEngineError> CryptoEngine::save_keys_to_file(const std
     file << "node_private=" << to_base64(node_key_.private_key.data(), node_key_.private_key.size()) << "\n";
 
     if (!file) {
-        spdlog::error("Failed to write keys to file: {}", path);
+        log().error("Failed to write keys to file: {}", path);
         return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
     }
 
-    spdlog::info("Keys saved to: {}", path);
+    log().info("Keys saved to: {}", path);
     return {};
 }
 
@@ -356,14 +360,14 @@ std::expected<void, CryptoEngineError> CryptoEngine::load_keys_from_file(const s
             !from_base64(keys["machine_private"], machine_key_.private_key.data(), machine_key_.private_key.size()) ||
             !from_base64(keys["node_public"], node_key_.public_key.data(), node_key_.public_key.size()) ||
             !from_base64(keys["node_private"], node_key_.private_key.data(), node_key_.private_key.size())) {
-            spdlog::warn("Invalid base64 in key file, will generate new keys");
+            log().warn("Invalid base64 in key file, will generate new keys");
             return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
         }
 
         initialized_ = true;
-        spdlog::info("Keys loaded from: {}", path);
-        spdlog::debug("Machine key: {}...", crypto::key_to_hex(machine_key_.public_key).substr(0, 16));
-        spdlog::debug("Node key: {}...", crypto::key_to_hex(node_key_.public_key).substr(0, 16));
+        log().info("Keys loaded from: {}", path);
+        log().debug("Machine key: {}...", crypto::key_to_hex(machine_key_.public_key).substr(0, 16));
+        log().debug("Node key: {}...", crypto::key_to_hex(node_key_.public_key).substr(0, 16));
         return {};
     }
 
@@ -389,13 +393,13 @@ std::expected<void, CryptoEngineError> CryptoEngine::load_keys_from_file(const s
         std::copy_n(buffer.begin() + offset, X25519_KEY_SIZE, node_key_.private_key.begin());
 
         initialized_ = true;
-        spdlog::info("Keys loaded from: {} (legacy binary format)", path);
-        spdlog::debug("Machine key: {}...", crypto::key_to_hex(machine_key_.public_key).substr(0, 16));
-        spdlog::debug("Node key: {}...", crypto::key_to_hex(node_key_.public_key).substr(0, 16));
+        log().info("Keys loaded from: {} (legacy binary format)", path);
+        log().debug("Machine key: {}...", crypto::key_to_hex(machine_key_.public_key).substr(0, 16));
+        log().debug("Node key: {}...", crypto::key_to_hex(node_key_.public_key).substr(0, 16));
         return {};
     }
 
-    spdlog::warn("Invalid key file format, will generate new keys");
+    log().warn("Invalid key file format, will generate new keys");
     return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
 }
 

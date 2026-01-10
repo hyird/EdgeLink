@@ -1,10 +1,14 @@
 #include "common/config.hpp"
+#include "common/logger.hpp"
 #include <toml++/toml.hpp>
 #include <fstream>
 #include <sstream>
-#include <spdlog/spdlog.h>
 
 namespace edgelink {
+
+namespace {
+auto& log() { return Logger::get("common.config"); }
+}
 
 std::string config_error_message(ConfigError error) {
     switch (error) {
@@ -95,7 +99,7 @@ std::expected<ControllerConfig, ConfigError> ControllerConfig::parse(const std::
         return config;
 
     } catch (const toml::parse_error& e) {
-        spdlog::error("TOML parse error: {}", e.what());
+        log().error("TOML parse error: {}", e.what());
         return std::unexpected(ConfigError::PARSE_ERROR);
     }
 }
@@ -192,7 +196,7 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
         return config;
 
     } catch (const toml::parse_error& e) {
-        spdlog::error("TOML parse error: {}", e.what());
+        log().error("TOML parse error: {}", e.what());
         return std::unexpected(ConfigError::PARSE_ERROR);
     }
 }

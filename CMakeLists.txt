@@ -89,6 +89,7 @@ add_library(edgelink-common STATIC
     src/common/message.cpp
     src/common/crypto.cpp
     src/common/config.cpp
+    src/common/logger.cpp
 )
 
 target_include_directories(edgelink-common PUBLIC
@@ -171,6 +172,7 @@ if(BUILD_CLIENT)
         src/client/crypto_engine.cpp
         src/client/peer_manager.cpp
         src/client/channel.cpp
+        src/client/ipc_server.cpp
     )
 
     # Platform-specific TUN source
