@@ -4033,7 +4033,7 @@ level = "info"  # 全局默认等级
 | log.modules.<name>       | string   | 继承全局  | 指定模块的日志等级         |
 | worker_threads           | uint32   | 0         | 工作线程数 (0=CPU核心数)   |
 | control_heartbeat.interval | uint32 | 5         | 控制通道心跳发送间隔 (秒)  |
-| control_heartbeat.timeout  | uint32 | 90        | 控制通道心跳超时时间 (秒)  |
+| control_heartbeat.timeout  | uint32 | 10        | 控制通道心跳超时时间 (秒)  |
 | reconnect.initial_delay  | uint32   | 1000      | 重连初始延迟 (毫秒)        |
 | reconnect.max_delay      | uint32   | 60000     | 重连最大延迟 (毫秒)        |
 | reconnect.multiplier     | float    | 2.0       | 重连延迟倍数               |
