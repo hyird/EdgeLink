@@ -145,6 +145,12 @@ asio::awaitable<void> HttpSession::run() {
     // Accept WebSocket handshake
     co_await ws.async_accept(req, asio::use_awaitable);
 
+    // Disable the HTTP timeout on the underlying stream - WebSocket has its own timeout
+    beast::get_lowest_layer(ws).expires_never();
+
+    // Set binary mode for our binary protocol
+    ws.binary(true);
+
     // Route based on target path
     if (target == "/api/v1/control" || target == "/api/v1/control/") {
         // Control channel
@@ -209,6 +215,12 @@ asio::awaitable<void> PlainHttpSession::run() {
 
     // Accept WebSocket handshake
     co_await ws.async_accept(req, asio::use_awaitable);
+
+    // Disable the HTTP timeout on the underlying stream - WebSocket has its own timeout
+    beast::get_lowest_layer(ws).expires_never();
+
+    // Set binary mode for our binary protocol
+    ws.binary(true);
 
     // Route based on target path
     if (target == "/api/v1/control" || target == "/api/v1/control/") {

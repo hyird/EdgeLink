@@ -96,6 +96,10 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
 
             co_await tls_ws_->async_handshake(host, target, asio::use_awaitable);
 
+            // Disable TCP timeout - WebSocket has its own timeout
+            beast::get_lowest_layer(*tls_ws_).expires_never();
+            tls_ws_->binary(true);
+
         } else {
             // Create plain stream
             plain_ws_ = std::make_unique<PlainWsStream>(ioc_);
@@ -113,6 +117,10 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
                 }));
 
             co_await plain_ws_->async_handshake(host, target, asio::use_awaitable);
+
+            // Disable TCP timeout - WebSocket has its own timeout
+            beast::get_lowest_layer(*plain_ws_).expires_never();
+            plain_ws_->binary(true);
         }
 
         spdlog::info("WebSocket connected, authenticating...");
@@ -482,6 +490,10 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
             co_await tls_ws_->async_handshake(host, target, asio::use_awaitable);
 
+            // Disable TCP timeout - WebSocket has its own timeout
+            beast::get_lowest_layer(*tls_ws_).expires_never();
+            tls_ws_->binary(true);
+
         } else {
             // Create plain stream
             plain_ws_ = std::make_unique<PlainWsStream>(ioc_);
@@ -494,6 +506,10 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             // WebSocket handshake
             plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
             co_await plain_ws_->async_handshake(host, target, asio::use_awaitable);
+
+            // Disable TCP timeout - WebSocket has its own timeout
+            beast::get_lowest_layer(*plain_ws_).expires_never();
+            plain_ws_->binary(true);
         }
 
         spdlog::info("Relay WebSocket connected, authenticating...");

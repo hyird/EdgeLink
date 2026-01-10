@@ -219,33 +219,34 @@ asio::awaitable<bool> Client::start() {
     }
 
     // Build control and relay URLs from server address
+    // The URL can be just host:port - we add the scheme based on tls config
     std::string base_url = config_.controller_url;
+
     // Remove trailing slash if present
     if (!base_url.empty() && base_url.back() == '/') {
         base_url.pop_back();
     }
+
+    // Remove any existing scheme (we'll add based on tls config)
+    if (base_url.substr(0, 6) == "wss://") {
+        base_url = base_url.substr(6);
+    } else if (base_url.substr(0, 5) == "ws://") {
+        base_url = base_url.substr(5);
+    } else if (base_url.substr(0, 8) == "https://") {
+        base_url = base_url.substr(8);
+    } else if (base_url.substr(0, 7) == "http://") {
+        base_url = base_url.substr(7);
+    }
+
     // Remove path if user accidentally included it
     auto path_pos = base_url.find("/api/");
     if (path_pos != std::string::npos) {
         base_url = base_url.substr(0, path_pos);
     }
 
-    // Handle TLS scheme based on config
-    if (config_.tls) {
-        // Ensure wss:// scheme
-        if (base_url.substr(0, 5) == "ws://") {
-            base_url = "wss://" + base_url.substr(5);
-        } else if (base_url.substr(0, 6) != "wss://") {
-            base_url = "wss://" + base_url;
-        }
-    } else {
-        // Ensure ws:// scheme
-        if (base_url.substr(0, 6) == "wss://") {
-            base_url = "ws://" + base_url.substr(6);
-        } else if (base_url.substr(0, 5) != "ws://") {
-            base_url = "ws://" + base_url;
-        }
-    }
+    // Add the correct scheme based on TLS config
+    std::string scheme = config_.tls ? "wss://" : "ws://";
+    base_url = scheme + base_url;
 
     std::string control_url = base_url + "/api/v1/control";
     std::string relay_url = base_url + "/api/v1/relay";
