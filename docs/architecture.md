@@ -82,9 +82,9 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | 通道                | 协议            | 端点路径          | 用途     | 消息格式 |
 | ------------------- | --------------- | ----------------- | -------- | -------- |
 | Client ↔ Controller | WebSocket (WSS) | `/api/v1/control` | 控制面   | 二进制   |
-| Client ↔ Relay      | WebSocket (WSS) | `/relay`          | 数据面   | 二进制   |
+| Client ↔ Relay      | WebSocket (WSS) | `/api/v1/relay`   | 数据面   | 二进制   |
 | Relay ↔ Controller  | WebSocket (WSS) | `/api/v1/server`  | 服务面   | 二进制   |
-| Relay ↔ Relay       | WebSocket (WSS) | `/mesh`           | Mesh 面  | 二进制   |
+| Relay ↔ Relay       | WebSocket (WSS) | `/api/v1/mesh`    | Mesh 面  | 二进制   |
 | Client ↔ Client     | UDP             | N/A               | P2P 直连 | 二进制   |
 
 ### 2.2 二进制消息帧格式
@@ -2503,8 +2503,8 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | ------------------- | -------------------------------- | -------------------------------------------- |
 | Client → Controller | `wss://ctrl.example.com:8080`    | `wss://ctrl.example.com:8080/api/v1/control` |
 | Relay → Controller  | `wss://ctrl.example.com:8080`    | `wss://ctrl.example.com:8080/api/v1/server`  |
-| Client → Relay      | `wss://relay.example.com:8081`   | `wss://relay.example.com:8081/relay`         |
-| Relay → Relay       | `wss://relay-b.example.com:8081` | `wss://relay-b.example.com:8081/mesh`        |
+| Client → Relay      | `wss://relay.example.com:8081`   | `wss://relay.example.com:8081/api/v1/relay`  |
+| Relay → Relay       | `wss://relay-b.example.com:8081` | `wss://relay-b.example.com:8081/api/v1/mesh` |
 
 **设计理由**：
 - 避免用户配置错误（如遗漏或拼写错误路径）
@@ -2950,14 +2950,14 @@ edgelink-controller authkey create --reusable --description "公司设备"
 
 # 3. 启动 Relay
 edgelink-relay serve \
-    --controller wss://localhost:8080/api/v1/server \
+    --controller wss://localhost:8080 \
     --token "relay-token" \
     --name relay-tokyo \
     --region ap-northeast &
 
 # 4. 在客户端设备上连接 (首次注册)
 edgelink-client up \
-    --controller wss://controller.example.com/api/v1/control \
+    --controller wss://controller.example.com:8080 \
     --auth-key tskey-reusable-a7Bn4Kp9zQwX2mLj8RvC6
 
 # 5. 后续重连 (无需 auth-key)
@@ -3292,7 +3292,7 @@ listen_port = 3478
 ip = "203.0.113.10"
 
 [controller]
-url = "wss://controller.example.com/api/v1/server"
+url = "wss://controller.example.com:8080"
 token = "your-server-token"
 
 [server]
@@ -3318,7 +3318,7 @@ max_files = 10
 #### Client 配置 (config.toml)
 
 ```toml
-controller_url = "wss://controller.example.com/api/v1/control"
+controller_url = "wss://controller.example.com:8080"
 data_dir = "~/.local/share/edgelink"
 
 # AuthKey 仅用于首次注册，注册成功后可移除
