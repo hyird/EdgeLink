@@ -251,6 +251,38 @@ failover_timeout = 5000  # 切换超时 (毫秒)
 | 节点快速迁移   | 使用版本号，拒绝旧版本更新             |
 | 网络分区恢复   | 全量同步，覆盖本地缓存                 |
 
+#### 快速迁移优化
+
+为减少节点迁移 (切换 Relay) 时的路由不一致窗口：
+
+**主动通知机制**：
+
+```
+节点迁移时:
+1. 新 Relay 接受连接后，立即通知 Controller 位置变更
+2. Controller 增加位置版本号 (location_version++)
+3. Controller 向所有相关 Peer 推送 NODE_LOCATION_UPDATE
+4. Peer 收到后立即更新本地缓存 (无需等待 TTL)
+```
+
+**版本号比对**：
+
+| 字段             | 说明                                      |
+| ---------------- | ----------------------------------------- |
+| location_version | 每次迁移递增，拒绝旧版本更新              |
+| relay_id         | 当前所在 Relay 的 server_id               |
+| timestamp        | 位置更新时间戳                            |
+
+**配置项**：
+
+| 配置项                    | 类型   | 默认值 | 说明                        |
+| ------------------------- | ------ | ------ | --------------------------- |
+| cache.location_ttl        | uint32 | 60     | 位置缓存 TTL (秒)           |
+| cache.location_pull_interval | uint32 | 30  | 增量拉取间隔 (秒)           |
+| cache.fast_migration      | bool   | true   | 启用快速迁移通知            |
+
+> **最坏情况**: 快速迁移通知丢失时，仍依赖 TTL (60s) 或转发失败触发更新。
+
 ### 2.8 协程使用规范
 
 - 所有 IO 操作必须使用 co_await
@@ -478,6 +510,14 @@ failover_timeout = 5000  # 切换超时 (毫秒)
 | ----- | ------------- | ------------------- | ------------- |
 | 0x90  | NODE_REVOKE   | Controller → All    | NodeRevoke    |
 | 0x91  | NODE_REVOKE_ACK | All → Controller  | NodeRevokeAck |
+| 0x92  | NODE_REVOKE_BATCH | Controller → All | NodeRevokeBatch |
+
+#### 生命周期类 (0xA0-0xAF)
+
+| Type  | 名称             | 方向                | Payload 格式     |
+| ----- | ---------------- | ------------------- | ---------------- |
+| 0xA0  | SHUTDOWN_NOTIFY  | Any → Any           | ShutdownNotify   |
+| 0xA1  | SHUTDOWN_ACK     | Any → Any           | ShutdownAck      |
 
 #### 通用类 (0xF0-0xFF)
 
@@ -668,12 +708,19 @@ password_verifier = HMAC-SHA256(derived_key, client_nonce || server_nonce)
 | ----------- | ---- | ------------------------------ |
 | success     | 1 B  | 0x00=失败, 0x01=成功           |
 | node_id     | 4 B  | 分配的节点 ID (成功时有效)     |
-| virtual_ip  | 4 B  | 分配的虚拟 IP (成功时有效)     |
+| virtual_ip  | 4 B  | 分配的虚拟 IPv4 地址 (成功时有效) |
 | network_id  | 4 B  | 网络 ID                        |
+
 | auth_token  | 变长 | JWT Auth Token (成功时有效)    |
 | relay_token | 变长 | JWT Relay Token (成功时有效)   |
 | error_code  | 2 B  | 错误码 (失败时有效)            |
 | error_msg   | 变长 | 错误消息 (失败时有效)          |
+
+> **设计说明**: 虚拟网络 IP 地址固定为 IPv4 (4 字节)。这是有意设计：
+> - VPN 虚拟网络使用 100.64.0.0/10 (CGNAT) 或 10.0.0.0/8 私有地址空间
+> - IPv4 地址空间对于虚拟网络足够使用 (单网络最大 1600 万地址)
+> - 简化地址分配和路由表管理
+> - SubnetInfo/RouteInfo 中的 IPv6 支持用于通告**物理网络**的子网路由
 
 #### 3.4.3.1 AUTH_CHALLENGE Payload (Type=0x03)
 
@@ -1170,6 +1217,63 @@ P2P 连接保活消息，双向发送。
 
 每个 revoke_node 条目包含: node_id (4B) + reason (1B) + expires_at (8B) = 13 bytes
 
+#### 3.4.17.3 SHUTDOWN_NOTIFY Payload (Type=0xA0)
+
+用于节点优雅关闭时通知对端，允许对端提前切换路径：
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│  node_id   │   reason   │ drain_time │ timestamp  │
+│   (4 B)    │   (1 B)    │   (2 B)    │   (8 B)    │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段       | 大小 | 说明                                   |
+| ---------- | ---- | -------------------------------------- |
+| node_id    | 4 B  | 即将关闭的节点 ID                      |
+| reason     | 1 B  | 关闭原因 (见下表)                      |
+| drain_time | 2 B  | 建议迁移时间 (秒)，对端应在此时间内切换 |
+| timestamp  | 8 B  | 发送时间戳 (毫秒)                      |
+
+**reason 枚举值**：
+
+| 值   | 名称        | 说明                          |
+| ---- | ----------- | ----------------------------- |
+| 0x01 | ADMIN       | 管理员主动关闭                |
+| 0x02 | UPGRADE     | 软件升级                      |
+| 0x03 | MAINTENANCE | 计划维护                      |
+| 0x04 | RESOURCE    | 资源不足 (内存/连接数)        |
+| 0x05 | FATAL       | 致命错误，即将崩溃            |
+
+**处理流程**：
+
+1. 节点计划关闭时发送 SHUTDOWN_NOTIFY 给所有活跃对端和 Controller
+2. 对端收到后在 drain_time 内切换到备用路径 (其他 Relay 或重新打洞)
+3. 等待 drain_time 后，发送方可安全关闭连接
+4. Controller 收到后标记节点为 draining 状态，不再分配新连接
+
+**配置项**：
+
+| 配置项                    | 类型   | 默认值 | 说明                    |
+| ------------------------- | ------ | ------ | ----------------------- |
+| shutdown.drain_time       | uint16 | 30     | 默认 drain 时间 (秒)    |
+| shutdown.notify_enabled   | bool   | true   | 启用关闭通知            |
+| shutdown.wait_for_ack     | bool   | false  | 等待对端 ACK 后再关闭   |
+
+#### 3.4.17.4 SHUTDOWN_ACK Payload (Type=0xA1)
+
+```
+┌────────────┬────────────┐
+│  node_id   │   status   │
+│   (4 B)    │   (1 B)    │
+└────────────┴────────────┘
+```
+
+| 字段    | 大小 | 说明                              |
+| ------- | ---- | --------------------------------- |
+| node_id | 4 B  | 响应方节点 ID                     |
+| status  | 1 B  | 0x00=收到, 0x01=已切换备用路径    |
+
 #### 3.4.18 RouteInfo 结构 (统一定义)
 
 ```
@@ -1661,6 +1765,26 @@ CONFIG 中使用的 STUN 服务器信息。
 | 收到大量分片首包但无后续       | 30 秒超时后自动清理                   |
 | 同一 message_id 分片索引重复   | 丢弃重复分片，记录警告日志            |
 
+**首片预检 (Early Reject)**：
+
+收到首片 (frag_index=0) 时进行预检，防止恶意大 frag_total 导致资源耗尽：
+
+```
+on_first_fragment(frag_total, first_payload_len):
+    estimated_size = frag_total * 65526  # 最大估算
+
+    if estimated_size > max_fragment_buffer_size_per_conn:
+        reject(FRAGMENT_LIMIT, 2007)
+        return
+
+    if global_fragment_buffer_used + estimated_size > max_fragment_buffer_size_global:
+        reject(RATE_LIMITED, 4003)
+        return
+
+    # 预留空间 (实际按需分配)
+    reserve_buffer(message_id, min(estimated_size, first_payload_len * frag_total))
+```
+
 **解析流程**：
 1. 读取 Frame Header (5B)，获取 Length 和 Flags
 2. 按 Length 读取 Payload 区
@@ -1801,6 +1925,33 @@ CONFIG 中使用的 STUN 服务器信息。
 | PUNCHING   | 正在进行 NAT 穿透    | 10s        |
 | CONNECTED  | P2P 直连已建立       | 见下文     |
 | RELAY_ONLY | 穿透失败，仅用 Relay | 60s 后重试 |
+
+#### P2P 发起方决策规则
+
+当双方同时需要通信时，需要确定唯一的打洞发起方，避免重复请求和资源浪费：
+
+```
+发起方决策算法:
+
+if self.node_id < peer.node_id:
+    role = INITIATOR
+    initiate_p2p()
+else:
+    role = RESPONDER
+    wait_for_peer_init(timeout=5s)
+    if timeout:
+        initiate_p2p()  # 降级为主动发起 (对端可能离线)
+```
+
+| 角色        | 行为                                    |
+| ----------- | --------------------------------------- |
+| INITIATOR   | 主动向 Controller 请求端点，发起打洞   |
+| RESPONDER   | 等待对端发起，收到 P2P_PING 后响应     |
+| 超时降级    | RESPONDER 等待 5s 无响应则升级为发起方 |
+
+**并发安全**：
+- 使用 `min(self.node_id, peer.node_id)` 作为连接锁的 key
+- 避免双方同时进入 RESOLVING 状态
 
 #### P2P CONNECTED 状态维持与超时
 
@@ -2325,6 +2476,53 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 | crypto.key_rotation_interval | uint32 | 86400  | 密钥轮换间隔 (秒)       |
 | crypto.key_overlap_period  | uint32 | 60     | 新旧密钥并存时间 (秒)   |
 | crypto.key_grace_period    | uint32 | 30     | 旧密钥宽限期 (秒)       |
+| crypto.session_key_ttl     | uint32 | 7200   | Session Key 有效期 (秒，默认 2h) |
+| crypto.session_rekey_margin | uint32 | 300   | 提前多久开始协商新 Session Key (秒) |
+
+#### 6.3.5 Session Key 独立轮换
+
+除了跟随 Node Key 轮换外，Session Key 还支持独立轮换以增强前向保密：
+
+**触发条件**：
+
+| 条件                   | 说明                                           |
+| ---------------------- | ---------------------------------------------- |
+| 时间到期               | 超过 session_key_ttl (默认 2h)                 |
+| 数据量阈值             | 单 Session 加密超过 1TB 数据                   |
+| 提前协商               | 到期前 session_rekey_margin (默认 5min) 开始   |
+| 手动触发               | API 调用强制重协商                             |
+
+**轮换流程**：
+
+```
+Session Key 轮换 (无需更换 Node Key):
+
+1. 发起方生成新的 Ephemeral X25519 密钥对
+2. 发送 REKEY_REQUEST (ephemeral_pub, timestamp, signature)
+3. 响应方验证签名，生成响应 Ephemeral Key
+4. 双方使用新 Ephemeral Key 执行 ECDH，派生新 Session Key
+5. 新旧 Session Key 并存 60s，之后废弃旧密钥
+```
+
+**REKEY_REQUEST Payload (Type=0x28)**：
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│ephemeral_pk│ timestamp  │  old_nonce │ signature  │
+│   (32 B)   │   (8 B)    │   (12 B)   │   (64 B)   │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段         | 说明                                      |
+| ------------ | ----------------------------------------- |
+| ephemeral_pk | 新的临时 X25519 公钥                      |
+| timestamp    | 请求时间戳 (毫秒)                         |
+| old_nonce    | 当前会话最后使用的 nonce (防止重放)       |
+| signature    | Ed25519 签名 (使用 Machine Key)           |
+
+**前向保密保证**：
+- 每次 Rekey 使用全新 Ephemeral Key，泄露旧 Session Key 不影响新会话
+- 参考 WireGuard: 每 2 分钟或 2^60 消息后自动 Rekey
 
 ### 6.4 加密数据包格式
 
@@ -2491,6 +2689,45 @@ Client 需在 Token 过期前主动刷新，避免断连：
 3. Controller 验证后签发新 Token 通过 CONFIG_UPDATE 推送
 4. Client 使用新 Token 重新连接 Relay (如需要)
 
+**刷新失败处理策略**：
+
+```
+Relay Token 刷新状态机:
+
+[NORMAL] ──过期前10min──► [REFRESHING]
+    ▲                          │
+    │                    成功   │ 失败
+    │◄─────────────────────────┘   │
+    │                              ▼
+    │                      [RETRY_BACKOFF]
+    │                          │
+    │   成功                    │ 重试 (1s, 2s, 4s, 8s...)
+    │◄─────────────────────────┤
+    │                          │ 距过期 < 2min
+    │                          ▼
+    │                   [RECONNECTING]
+    │                          │
+    │                          │ 使用 Auth Token 重新认证
+    │                          ▼
+    │                   [FULL_REAUTH]
+    │◄─────────────────────────┘
+```
+
+| 状态          | 触发条件            | 处理方式                         |
+| ------------- | ------------------- | -------------------------------- |
+| REFRESHING    | 过期前 10 分钟      | 发送刷新请求                     |
+| RETRY_BACKOFF | 刷新失败            | 指数退避重试 (1s, 2s, 4s, 8s...) |
+| RECONNECTING  | 距过期 < 2 分钟     | 断开 Relay，准备重新认证         |
+| FULL_REAUTH   | Relay Token 已过期  | 使用 Auth Token 重新完整认证     |
+
+**配置项**：
+
+| 配置项                       | 类型   | 默认值 | 说明                      |
+| ---------------------------- | ------ | ------ | ------------------------- |
+| token.relay_refresh_margin   | uint32 | 600    | 提前刷新时间 (秒)         |
+| token.refresh_retry_max      | uint32 | 5      | 最大重试次数              |
+| token.refresh_critical_margin| uint32 | 120    | 紧急重连阈值 (秒)         |
+
 #### 6.7.5 Token 黑名单机制
 
 用于主动吊销尚未过期的 Token (如设备丢失、权限变更)。
@@ -2633,6 +2870,46 @@ Client A               Controller               Client B
 | 使用 Exit Node     | Client 选择并安装默认路由    |
 | 排除地址           | 排除 Controller/Relay 和本地子网 |
 
+#### Exit Node 智能选择
+
+当网络中存在多个 Exit Node 时，客户端使用以下算法选择最优出口：
+
+**选择算法**：
+
+```
+计算每个 Exit Node 的加权分数:
+
+score = latency * 0.6 + load * 0.3 + distance * 0.1
+
+其中:
+- latency: 归一化延迟 (0-100), 基于 LATENCY_REPORT 数据
+- load: 归一化负载 (0-100), 基于当前连接数/最大容量
+- distance: 归一化地理距离 (0-100), 基于 region 计算
+
+选择 score 最低的 Exit Node
+```
+
+**选择模式**：
+
+| 模式          | 说明                                         |
+| ------------- | -------------------------------------------- |
+| auto          | 自动选择最优 Exit Node (默认)                |
+| manual        | 用户手动指定 Exit Node                       |
+| nearest       | 仅按延迟选择最近的                           |
+| load_balance  | 轮询使用所有可用 Exit Node                   |
+
+**配置项**：
+
+| 配置项                     | 类型   | 默认值 | 说明                       |
+| -------------------------- | ------ | ------ | -------------------------- |
+| exit_node.selection_mode   | string | "auto" | 选择模式                   |
+| exit_node.preferred_region | string | ""     | 优先选择的区域             |
+| exit_node.reselect_interval| uint32 | 300    | 重新评估间隔 (秒)          |
+
+**切换策略**：
+- 当前 Exit Node 离线时立即切换到次优
+- 定期重新评估，避免抖动 (需分数差 > 20% 才切换)
+
 ### 7.7 路由冲突处理
 
 | 场景             | 处理策略                     |
@@ -2641,6 +2918,44 @@ Client A               Controller               Client B
 | 相同子网不同网关 | 允许，用于冗余/负载均衡      |
 | 更具体路由       | 允许，最长前缀匹配           |
 | 节点离线         | 自动故障转移到备用路由       |
+
+**路由通告处理 (Controller 端)**：
+
+检测发生在 Controller 端，使用数据库事务保证原子性：
+
+```sql
+-- 原子性检查与插入
+BEGIN TRANSACTION;
+
+SELECT gateway_node, enabled FROM routes
+WHERE network_id = :network_id
+  AND prefix = :prefix
+  AND prefix_len = :prefix_len
+FOR UPDATE;
+
+-- 根据查询结果决策
+-- 若存在且 gateway_node 在线: 拒绝 (ROUTE_CONFLICT 3004)
+-- 若存在但离线超过 grace_period: 允许接管
+-- 若不存在: 直接插入
+
+COMMIT;
+```
+
+**竞争处理规则**：
+
+| 场景                        | 处理方式                                     |
+| --------------------------- | -------------------------------------------- |
+| 两节点同时通告相同子网      | 先到者获胜 (数据库锁保证)                    |
+| 原持有者在线                | 拒绝新通告，返回 ROUTE_CONFLICT (3004)       |
+| 原持有者离线 < grace_period | 拒绝新通告，等待原节点可能恢复               |
+| 原持有者离线 > grace_period | 允许接管，标记旧路由为 pending_removal       |
+
+**配置项**：
+
+| 配置项                      | 类型   | 默认值 | 说明                        |
+| --------------------------- | ------ | ------ | --------------------------- |
+| route.conflict_grace_period | uint32 | 60     | 节点离线后路由保留时间 (秒) |
+| route.takeover_enabled      | bool   | true   | 是否允许路由接管            |
 
 ---
 
