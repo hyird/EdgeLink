@@ -1,19 +1,19 @@
 # EdgeLink 架构设计文档
 
-> **版本**: 2.8
+> **版本**: 2.9
 > **更新日期**: 2026-01-10
 > **协议版本**: 0x02
 
 ## 目录
 
 - [1. 系统概述](#1-系统概述)
-- [2. 通信协议](#2-通信协议)
-- [3. 状态机设计](#3-状态机设计)
-- [4. 核心业务流程](#4-核心业务流程)
-- [5. 数据安全设计](#5-数据安全设计)
-- [6. 子网路由设计](#6-子网路由设计)
-- [7. 组件详细设计](#7-组件详细设计)
-- [8. 高并发设计要求](#8-高并发设计要求)
+- [2. 高并发设计要求](#2-高并发设计要求)
+- [3. 通信协议](#3-通信协议)
+- [4. 状态机设计](#4-状态机设计)
+- [5. 核心业务流程](#5-核心业务流程)
+- [6. 数据安全设计](#6-数据安全设计)
+- [7. 子网路由设计](#7-子网路由设计)
+- [8. 组件详细设计](#8-组件详细设计)
 - [9. 日志系统设计](#9-日志系统设计)
 - [10. 开发约束](#10-开发约束)
 - [11. 错误码定义](#11-错误码定义)
@@ -75,9 +75,164 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 
 ---
 
-## 2. 通信协议
+## 2. 高并发设计要求
 
-### 2.1 传输层
+### 2.1 并发模型
+
+- 使用 Boost.Asio + Boost.Coroutine (awaitable)
+- 每个线程独立 io_context (thread-per-core 模型)
+- 连接通过 round-robin 分配到各线程
+- 每个 WebSocket 连接对应一个协程
+- 连接生命周期内所有操作在同一线程完成
+
+### 2.2 Listener 设计
+
+#### Linux 平台
+
+| 方案        | 说明                                    |
+| ----------- | --------------------------------------- |
+| SO_REUSEPORT | 每个 IO 线程独立 acceptor              |
+| 负载分发    | 内核自动在多个 acceptor 间分发连接     |
+| 无锁设计    | 连接在 accept 时即绑定到目标线程       |
+
+#### Windows 平台
+
+| 方案        | 说明                                    |
+| ----------- | --------------------------------------- |
+| 单 Acceptor | 主线程单个 acceptor                    |
+| IOCP 分发   | Accept 后将 socket move 到目标 io_context |
+| Strand      | 使用 strand 确保线程安全               |
+
+#### 分发算法
+
+| 算法        | 说明                                    |
+| ----------- | --------------------------------------- |
+| Round-Robin | 默认，简单均匀                         |
+| 最少连接    | 可选，适合长连接场景                   |
+| 连接亲和性  | 基于 client IP hash，保持会话粘性       |
+
+### 2.3 线程亲和性设计
+
+| 原则       | 说明                                     |
+| ---------- | ---------------------------------------- |
+| 连接绑定   | 每个连接固定在一个线程，不迁移           |
+| 数据本地化 | 会话状态、缓冲区等数据存储在连接所属线程 |
+| 避免跨线程 | 同线程内的连接间通信直接调用，无需加锁   |
+| 必要跨线程 | 仅在跨线程转发数据时使用无锁队列         |
+
+### 2.4 跨线程通信场景
+
+| 场景              | 方案                                  |
+| ----------------- | ------------------------------------- |
+| 数据转发 (同线程) | 直接调用目标 Session 的发送方法       |
+| 数据转发 (跨线程) | 通过 MPSC 无锁队列投递到目标线程      |
+| 广播消息          | 每个线程维护本地会话列表，各自广播    |
+| 全局统计          | 各线程本地统计，定期汇总或使用 atomic |
+
+### 2.4.1 背压机制
+
+**MPSC 队列背压策略**：
+
+| 参数                   | 默认值 | 说明                                |
+| ---------------------- | ------ | ----------------------------------- |
+| queue_capacity         | 65536  | 队列最大容量 (条消息)               |
+| high_watermark         | 80%    | 高水位线，触发背压                  |
+| low_watermark          | 50%    | 低水位线，恢复正常                  |
+| drop_policy            | oldest | 满时丢弃策略: oldest/newest/reject  |
+
+**背压处理流程**：
+
+```
+队列状态:
+    if queue.size() >= high_watermark:
+        enter_backpressure_mode()
+        log_warn("Queue high watermark reached")
+
+    if in_backpressure_mode && queue.size() <= low_watermark:
+        exit_backpressure_mode()
+
+消息入队:
+    if queue.full():
+        if drop_policy == "oldest":
+            queue.pop_front()  # 丢弃最旧
+            dropped_counter++
+        elif drop_policy == "newest":
+            return false       # 丢弃新消息
+            dropped_counter++
+        else:  # reject
+            return false       # 拒绝，由调用方处理
+
+        log_warn("Queue overflow, dropped: {}", dropped_counter)
+
+    queue.push(msg)
+```
+
+**监控指标**：
+
+| 指标                          | 类型      | 说明                |
+| ----------------------------- | --------- | ------------------- |
+| `queue_size`                  | Gauge     | 当前队列大小        |
+| `queue_capacity`              | Gauge     | 队列容量            |
+| `queue_dropped_total`         | Counter   | 累计丢弃消息数      |
+| `backpressure_active`         | Gauge     | 是否处于背压状态    |
+| `backpressure_duration_sec`   | Histogram | 背压持续时间        |
+
+### 2.5 无锁设计要求
+
+| 数据结构       | 无锁方案                           |
+| -------------- | ---------------------------------- |
+| 跨线程消息队列 | MPSC 无锁队列 (每线程一个入口队列) |
+| 线程本地会话表 | 无需加锁 (单线程访问)              |
+| 全局统计计数   | std::atomic                        |
+| 节点位置缓存   | 每线程本地副本 + 定期同步          |
+
+### 2.6 NodeLocationCache 设计
+
+#### 缓存策略
+
+| 项目         | 规格                                    |
+| ------------ | --------------------------------------- |
+| 存储结构     | 每线程本地 HashMap<node_id, relay_id>  |
+| TTL          | 60 秒，过期后需重新查询                 |
+| 最大条目     | 100,000 条/线程                         |
+| 淘汰策略     | LRU                                     |
+
+#### 同步机制
+
+| 触发条件       | 动作                                    |
+| -------------- | --------------------------------------- |
+| Controller 推送 | SERVER_NODE_LOC 消息更新所有线程缓存   |
+| 定期拉取       | 每 30 秒从 Controller 拉取增量更新     |
+| 缓存未命中     | 向 Controller 查询，结果广播到所有线程 |
+| 节点迁移       | Controller 推送位置变更通知            |
+| 节点断开       | Controller 推送删除通知，立即失效      |
+
+#### 一致性保证
+
+| 场景           | 处理方式                                |
+| -------------- | --------------------------------------- |
+| 陈旧数据       | 允许短暂不一致，转发失败后触发更新     |
+| 节点快速迁移   | 使用版本号，拒绝旧版本更新             |
+| 网络分区恢复   | 全量同步，覆盖本地缓存                 |
+
+### 2.7 协程使用规范
+
+- 所有 IO 操作必须使用 co_await
+- 禁止在协程中进行阻塞调用
+- 使用 use_awaitable 作为 completion token
+- 使用 co_spawn 启动协程
+
+### 2.8 内存管理
+
+- Session 使用 shared_ptr 管理
+- SessionManager 持有 weak_ptr 避免循环引用
+- 大缓冲区使用对象池复用
+
+---
+
+## 3. 通信协议
+
+### 3.1 传输层
 
 | 通道                | 协议            | 端点路径          | 用途     | 消息格式 |
 | ------------------- | --------------- | ----------------- | -------- | -------- |
@@ -87,11 +242,11 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | Relay ↔ Relay       | WebSocket (WSS) | `/api/v1/mesh`    | Mesh 面  | 二进制   |
 | Client ↔ Client     | UDP             | N/A               | P2P 直连 | 二进制   |
 
-### 2.2 二进制消息帧格式
+### 3.2 二进制消息帧格式
 
 所有 WebSocket 消息使用 Binary 模式传输，采用以下紧凑格式：
 
-#### 2.2.1 帧头格式 (5 字节)
+#### 3.2.1 帧头格式 (5 字节)
 
 ```
 ┌──────────┬──────────┬──────────┬─────────────────┐
@@ -103,7 +258,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | 字段    | 大小   | 说明                                     |
 | ------- | ------ | ---------------------------------------- |
 | Version | 1 字节 | 协议版本，当前 `0x02`                    |
-| Type    | 1 字节 | **消息类型** (Frame Type)，见 2.3 节     |
+| Type    | 1 字节 | **消息类型** (Frame Type)，见 3.3 节     |
 | Flags   | 1 字节 | 标志位                                   |
 | Length  | 2 字节 | Payload 长度 (大端序)，最大 **65535**    |
 
@@ -114,14 +269,14 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 > - **auth_type (认证方式)**：AUTH_REQUEST Payload 中的字段，标识认证方式（如 authkey=0x02）
 > - 两者不可混用
 
-#### 2.2.2 Flags 标志位
+#### 3.2.2 Flags 标志位
 
 | 位   | 名称       | 说明                                |
 | ---- | ---------- | ----------------------------------- |
-| 0x01 | NEED_ACK   | 需要确认，见 2.5.2 节               |
-| 0x02 | COMPRESSED | Payload 已压缩 (LZ4)，见 2.5.3 节   |
+| 0x01 | NEED_ACK   | 需要确认，见 3.5.2 节               |
+| 0x02 | COMPRESSED | Payload 已压缩 (LZ4)，见 3.5.3 节   |
 | 0x04 | ENCRYPTED  | Payload 帧级加密（保留位，见下文）  |
-| 0x08 | FRAGMENTED | 分片消息，见 2.5.1 节               |
+| 0x08 | FRAGMENTED | 分片消息，见 3.5.1 节               |
 
 **ENCRYPTED 标志位说明**：
 
@@ -130,7 +285,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | 层级         | 加密方式                         | 说明                              |
 | ------------ | -------------------------------- | --------------------------------- |
 | 传输层       | TLS (WSS)                        | 所有 WebSocket 通道均强制使用 TLS |
-| 应用层 DATA  | ChaCha20-Poly1305 端到端加密     | DATA (0x20) 类型消息，见 5.3 节   |
+| 应用层 DATA  | ChaCha20-Poly1305 端到端加密     | DATA (0x20) 类型消息，见 6.3 节   |
 | 帧级 Payload | 保留 (ENCRYPTED flag)            | 用于未来控制面消息加密扩展        |
 
 当前控制面消息 (AUTH/CONFIG/P2P 等) 依赖 TLS 传输层加密保护，DATA 消息使用端到端 AEAD 加密（与 ENCRYPTED flag 无关）。
@@ -140,7 +295,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 - 密钥协商与派生方式
 - 与 COMPRESSED flag 的处理顺序
 
-#### 2.2.3 完整帧结构
+#### 3.2.3 完整帧结构
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -153,7 +308,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 └─────────────────────────────────────────────────────┘
 ```
 
-#### 2.2.4 版本兼容性
+#### 3.2.4 版本兼容性
 
 **版本检查规则**：
 
@@ -184,7 +339,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 1. 立即升级重连
 2. 继续使用当前版本 (在兼容期内)
 
-### 2.3 消息类型定义 (Frame Type)
+### 3.3 消息类型定义 (Frame Type)
 
 > **重要**：以下 Type 值是 Frame Header 中的消息类型，与 Payload 内部字段（如 auth_type）无关。
 
@@ -283,11 +438,11 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | 0xFE  | GENERIC_ACK | 双向 | GenericAck |
 | 0xFF  | ERROR     | 双向 | Error        |
 
-### 2.4 二进制 Payload 结构定义
+### 3.4 二进制 Payload 结构定义
 
 所有 Payload 采用固定字段 + 变长字段的紧凑二进制格式。
 
-#### 2.4.1 通用编码规则
+#### 3.4.1 通用编码规则
 
 | 类型           | 编码方式                       |
 | -------------- | ------------------------------ |
@@ -301,7 +456,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 
 **字节对齐规则**：所有字段紧密排列，无填充字节。
 
-#### 2.4.1.1 协议通用常量定义
+#### 3.4.1.1 协议通用常量定义
 
 以下常量在整个协议中统一使用：
 
@@ -337,7 +492,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | 0x01 | P2P        | P2P 直连          |
 | 0x02 | RELAY_ONLY | 仅 Relay 通信     |
 
-#### 2.4.2 AUTH_REQUEST Payload (Type=0x01)
+#### 3.4.2 AUTH_REQUEST Payload (Type=0x01)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -411,7 +566,7 @@ signed_data = auth_type (1B)
   1. 调整本地时钟后重试
   2. 使用服务器返回的时间戳计算偏移量进行补偿
 
-#### 2.4.3 AUTH_RESPONSE Payload (Type=0x02)
+#### 3.4.3 AUTH_RESPONSE Payload (Type=0x02)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -437,7 +592,7 @@ signed_data = auth_type (1B)
 | error_code  | 2 B  | 错误码 (失败时有效)            |
 | error_msg   | 变长 | 错误消息 (失败时有效)          |
 
-#### 2.4.3.1 AUTH_CHALLENGE Payload (Type=0x03)
+#### 3.4.3.1 AUTH_CHALLENGE Payload (Type=0x03)
 
 用于双因素认证或额外验证场景。
 
@@ -455,7 +610,7 @@ signed_data = auth_type (1B)
 | expires      | 8 B  | 过期时间戳 (毫秒)                   |
 | challenge    | 变长 | 挑战数据 (如加密的 nonce)           |
 
-#### 2.4.3.2 AUTH_VERIFY Payload (Type=0x04)
+#### 3.4.3.2 AUTH_VERIFY Payload (Type=0x04)
 
 客户端对挑战的响应。
 
@@ -472,7 +627,7 @@ signed_data = auth_type (1B)
 | response_len | 2 B  | 响应数据长度              |
 | response     | 变长 | 响应数据 (如 TOTP 验证码) |
 
-#### 2.4.4 CONFIG Payload (Type=0x10)
+#### 3.4.4 CONFIG Payload (Type=0x10)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -501,14 +656,14 @@ signed_data = auth_type (1B)
 | stun_count   | 2 B  | STUN 服务器数量                     |
 | peer_count   | 2 B  | Peer 节点数量                       |
 | route_count  | 2 B  | 路由数量                            |
-| relays[]     | 变长 | RelayInfo 数组 (见 2.4.37)          |
-| stuns[]      | 变长 | STUNInfo 数组 (见 2.4.38)           |
-| peers[]      | 变长 | PeerInfo 数组 (见 2.4.20)           |
-| routes[]     | 变长 | RouteInfo 数组 (见 2.4.18)          |
+| relays[]     | 变长 | RelayInfo 数组 (见 3.4.37)          |
+| stuns[]      | 变长 | STUNInfo 数组 (见 3.4.38)           |
+| peers[]      | 变长 | PeerInfo 数组 (见 3.4.20)           |
+| routes[]     | 变长 | RouteInfo 数组 (见 3.4.18)          |
 | relay_token  | 变长 | JWT Relay Token                     |
 | expires      | 8 B  | relay_token 过期时间戳 (毫秒)       |
 
-#### 2.4.4.1 CONFIG_UPDATE Payload (Type=0x11)
+#### 3.4.4.1 CONFIG_UPDATE Payload (Type=0x11)
 
 增量配置更新消息，用于推送配置变更而无需重传完整配置。
 
@@ -565,7 +720,7 @@ signed_data = auth_type (1B)
 | relay_token | 变长 | 新的 Relay 访问令牌 (1B 长度前缀)  |
 | expires     | 8 B  | 令牌过期时间 (毫秒时间戳)          |
 
-#### 2.4.4.2 CONFIG_ACK Payload (Type=0x12)
+#### 3.4.4.2 CONFIG_ACK Payload (Type=0x12)
 
 客户端确认配置已应用。
 
@@ -598,7 +753,7 @@ signed_data = auth_type (1B)
 | 0x02      | Peer 配置   |
 | 0x03      | Route 配置  |
 
-#### 2.4.5 DATA Payload (Type=0x20，端到端加密)
+#### 3.4.5 DATA Payload (Type=0x20，端到端加密)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────────────────┬────────────┐
@@ -611,13 +766,13 @@ signed_data = auth_type (1B)
 | ----------------- | ---- | ------------------------------- |
 | src_node          | 4 B  | 源节点 ID                       |
 | dst_node          | 4 B  | 目标节点 ID                     |
-| nonce             | 12 B | 见 5.3.2 节 Nonce 构造规范      |
+| nonce             | 12 B | 见 6.3.2 节 Nonce 构造规范      |
 | encrypted_payload | 变长 | ChaCha20-Poly1305 加密的 IP 包  |
 | auth_tag          | 16 B | AEAD 认证标签                   |
 
 **最大加密载荷**：65535 (Frame.Length 上限) - 4 - 4 - 12 - 16 = **65499 字节**
 
-#### 2.4.6 DATA_ACK Payload (Type=0x21)
+#### 3.4.6 DATA_ACK Payload (Type=0x21)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -633,7 +788,7 @@ signed_data = auth_type (1B)
 | ack_nonce | 12 B | 被确认的 DATA 包的 nonce                |
 | ack_flags | 1 B  | 0x01=成功接收, 0x02=解密失败, 0x04=重复 |
 
-#### 2.4.7 ERROR Payload (Type=0xFF)
+#### 3.4.7 ERROR Payload (Type=0xFF)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -649,7 +804,7 @@ signed_data = auth_type (1B)
 | request_id   | 4 B  | 请求标识符 (如有)，用于关联    |
 | error_msg    | 变长 | 人类可读的错误消息             |
 
-#### 2.4.8 GENERIC_ACK Payload (Type=0xFE)
+#### 3.4.8 GENERIC_ACK Payload (Type=0xFE)
 
 ```
 ┌────────────┬────────────┬────────────┐
@@ -664,7 +819,7 @@ signed_data = auth_type (1B)
 | request_id   | 4 B  | 请求标识符                     |
 | status       | 1 B  | 0x00=成功, 其他=错误码低 8 位  |
 
-#### 2.4.9 PING/PONG Payload (Type=0x30/0x31)
+#### 3.4.9 PING/PONG Payload (Type=0x30/0x31)
 
 ```
 ┌────────────┬────────────┐
@@ -680,7 +835,7 @@ signed_data = auth_type (1B)
 
 > **时间戳单位约定**：本协议中所有 timestamp 字段统一使用**毫秒**为单位 (Unix epoch 毫秒)，包括但不限于 AUTH_REQUEST、PING/PONG、P2P_PING/PONG 等消息。
 
-#### 2.4.9.1 LATENCY_REPORT Payload (Type=0x32)
+#### 3.4.9.1 LATENCY_REPORT Payload (Type=0x32)
 
 客户端向 Controller 报告到各 Relay 的延迟。
 
@@ -708,7 +863,7 @@ signed_data = auth_type (1B)
 | jitter_ms   | 2 B  | 延迟抖动 (毫秒)                |
 | packet_loss | 1 B  | 丢包率 (0-100)                 |
 
-#### 2.4.10 P2P_INIT Payload (Type=0x40)
+#### 3.4.10 P2P_INIT Payload (Type=0x40)
 
 ```
 ┌────────────┬────────────┐
@@ -722,7 +877,7 @@ signed_data = auth_type (1B)
 | target_node | 4 B  | 目标节点 ID         |
 | init_seq    | 4 B  | 初始化序列号        |
 
-#### 2.4.11 P2P_ENDPOINT Payload (Type=0x41)
+#### 3.4.11 P2P_ENDPOINT Payload (Type=0x41)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -734,7 +889,7 @@ signed_data = auth_type (1B)
 └───────────────────────────────────────────────────┘
 ```
 
-#### 2.4.12 P2P_PING/PONG Payload (Type=0x42/0x43，UDP)
+#### 3.4.12 P2P_PING/PONG Payload (Type=0x42/0x43，UDP)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -756,7 +911,7 @@ signed_data = auth_type (1B)
 | seq_num   | 4 B  | 序列号                                 |
 | signature | 64 B | Ed25519 签名 (签名范围: magic 到 seq_num) |
 
-#### 2.4.13 P2P_STATUS Payload (Type=0x45)
+#### 3.4.13 P2P_STATUS Payload (Type=0x45)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -772,7 +927,7 @@ signed_data = auth_type (1B)
 | latency   | 2 B  | 延迟 (毫秒)                               |
 | path      | 1 B  | 路径类型: 0x01=LAN, 0x02=STUN, 0x03=Relay |
 
-#### 2.4.13.1 P2P_KEEPALIVE Payload (Type=0x44，UDP)
+#### 3.4.13.1 P2P_KEEPALIVE Payload (Type=0x44，UDP)
 
 P2P 连接保活消息，双向发送。
 
@@ -794,7 +949,7 @@ P2P 连接保活消息，双向发送。
 - 超时判定: 连续 3 次无响应视为断开
 - 收到 flags=0x01 时，应立即发送 flags=0x02 响应
 
-#### 2.4.14 ROUTE_ANNOUNCE Payload (Type=0x80)
+#### 3.4.14 ROUTE_ANNOUNCE Payload (Type=0x80)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -803,7 +958,7 @@ P2P 连接保活消息，双向发送。
 └────────────┴────────────┴────────────┴────────────┘
 ```
 
-#### 2.4.15 ROUTE_UPDATE Payload (Type=0x81)
+#### 3.4.15 ROUTE_UPDATE Payload (Type=0x81)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -815,7 +970,7 @@ P2P 连接保活消息，双向发送。
 └───────────────────────────────────────────────────┘
 ```
 
-#### 2.4.16 ROUTE_WITHDRAW Payload (Type=0x82)
+#### 3.4.16 ROUTE_WITHDRAW Payload (Type=0x82)
 
 ```
 ┌────────────┬────────────┬────────────┐
@@ -824,7 +979,7 @@ P2P 连接保活消息，双向发送。
 └────────────┴────────────┴────────────┘
 ```
 
-#### 2.4.17 ROUTE_ACK Payload (Type=0x83)
+#### 3.4.17 ROUTE_ACK Payload (Type=0x83)
 
 ```
 ┌────────────┬────────────┬────────────┐
@@ -836,7 +991,7 @@ P2P 连接保活消息，双向发送。
 └──────────────────────────────────────┘
 ```
 
-#### 2.4.17.1 NODE_REVOKE Payload (Type=0x90)
+#### 3.4.17.1 NODE_REVOKE Payload (Type=0x90)
 
 节点撤销通知，Controller 广播给所有相关节点。
 
@@ -871,7 +1026,7 @@ P2P 连接保活消息，双向发送。
 3. 将 revoke_node 加入本地黑名单
 4. 发送 NODE_REVOKE_ACK 确认
 
-#### 2.4.17.2 NODE_REVOKE_ACK Payload (Type=0x91)
+#### 3.4.17.2 NODE_REVOKE_ACK Payload (Type=0x91)
 
 ```
 ┌────────────┬────────────┬────────────┐
@@ -886,7 +1041,7 @@ P2P 连接保活消息，双向发送。
 | status      | 1 B  | 0x00=已处理, 0x01=签名无效  |
 | node_id     | 4 B  | 响应方节点 ID               |
 
-#### 2.4.18 RouteInfo 结构 (统一定义)
+#### 3.4.18 RouteInfo 结构 (统一定义)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┬────────────┐
@@ -920,7 +1075,7 @@ P2P 连接保活消息，双向发送。
 | 0x04 | EXIT_NODE | Exit Node 路由          |
 | 0x08 | AUTO      | 自动创建 (节点虚拟 IP)  |
 
-#### 2.4.19 RouteIdentifier 结构
+#### 3.4.19 RouteIdentifier 结构
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -929,7 +1084,7 @@ P2P 连接保活消息，双向发送。
 └────────────┴────────────┴────────────┴────────────┘
 ```
 
-#### 2.4.20 PeerInfo 结构
+#### 3.4.20 PeerInfo 结构
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -944,7 +1099,7 @@ P2P 连接保活消息，双向发送。
 └───────────────────────────────────────────────────┘
 ```
 
-#### 2.4.21 EndpointInfo 结构
+#### 3.4.21 EndpointInfo 结构
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -965,7 +1120,7 @@ P2P 连接保活消息，双向发送。
 | priority   | 1 B    | 优先级 (1=最高)                       |
 | discovered | 8 B    | 发现时间戳 (毫秒)                     |
 
-#### 2.4.22 SubnetInfo 结构
+#### 3.4.22 SubnetInfo 结构
 
 ```
 ┌────────────┬────────────┬────────────┐
@@ -999,7 +1154,7 @@ allowed_subnets 示例: ["192.168.1.0/24", "10.0.0.0/8"]
   08                    # prefix_len = 8
 ```
 
-#### 2.4.23 SERVER_REGISTER Payload (Type=0x50)
+#### 3.4.23 SERVER_REGISTER Payload (Type=0x50)
 
 Relay 向 Controller 注册。
 
@@ -1024,7 +1179,7 @@ Relay 向 Controller 注册。
 | stun_port    | 2 B  | STUN 端口 (0=未启用)              |
 | version      | 变长 | 软件版本                          |
 
-#### 2.4.24 SERVER_REGISTER_RESP Payload (Type=0x51)
+#### 3.4.24 SERVER_REGISTER_RESP Payload (Type=0x51)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -1040,7 +1195,7 @@ Relay 向 Controller 注册。
 | error_code | 2 B  | 错误码 (失败时有效)          |
 | error_msg  | 变长 | 错误消息 (失败时有效)        |
 
-#### 2.4.25 SERVER_NODE_LOC Payload (Type=0x52)
+#### 3.4.25 SERVER_NODE_LOC Payload (Type=0x52)
 
 Controller 通知 Relay 节点位置信息。
 
@@ -1066,7 +1221,7 @@ Controller 通知 Relay 节点位置信息。
 | server_id | 4 B  | 节点连接的 Relay ID (0=未连接)      |
 | flags     | 1 B  | 0x01=在线, 0x02=仅此Relay可达       |
 
-#### 2.4.26 SERVER_BLACKLIST Payload (Type=0x53)
+#### 3.4.26 SERVER_BLACKLIST Payload (Type=0x53)
 
 Controller 推送黑名单更新。
 
@@ -1093,7 +1248,7 @@ Controller 推送黑名单更新。
 | value      | 变长 | 根据 entry_type 变化                  |
 | expires_at | 8 B  | 过期时间戳 (毫秒, 0=永久)             |
 
-#### 2.4.27 SERVER_HEARTBEAT Payload (Type=0x54)
+#### 3.4.27 SERVER_HEARTBEAT Payload (Type=0x54)
 
 Relay 向 Controller 发送心跳。
 
@@ -1116,7 +1271,7 @@ Relay 向 Controller 发送心跳。
 | mem_usage  | 1 B  | 内存使用率 (0-100)       |
 | queue_len  | 4 B  | 消息队列长度             |
 
-#### 2.4.28 SERVER_RELAY_LIST Payload (Type=0x55)
+#### 3.4.28 SERVER_RELAY_LIST Payload (Type=0x55)
 
 Controller 向 Relay 推送其他 Relay 列表。
 
@@ -1127,7 +1282,7 @@ Controller 向 Relay 推送其他 Relay 列表。
 └────────────┴────────────┴────────────────────────────┘
 ```
 
-#### 2.4.29 SERVER_LATENCY_REPORT Payload (Type=0x56)
+#### 3.4.29 SERVER_LATENCY_REPORT Payload (Type=0x56)
 
 Relay 向 Controller 报告到其他 Relay 的延迟。
 
@@ -1153,7 +1308,7 @@ Relay 向 Controller 报告到其他 Relay 的延迟。
 | latency_ms | 2 B  | 平均延迟 (毫秒)                |
 | status     | 1 B  | 0x00=不可达, 0x01=可达         |
 
-#### 2.4.30 RELAY_AUTH Payload (Type=0x60)
+#### 3.4.30 RELAY_AUTH Payload (Type=0x60)
 
 客户端向 Relay 认证。
 
@@ -1170,7 +1325,7 @@ Relay 向 Controller 报告到其他 Relay 的延迟。
 | node_id     | 4 B  | 客户端节点 ID            |
 | node_key    | 32 B | X25519 公钥              |
 
-#### 2.4.31 RELAY_AUTH_RESP Payload (Type=0x61)
+#### 3.4.31 RELAY_AUTH_RESP Payload (Type=0x61)
 
 ```
 ┌────────────┬────────────┬────────────┐
@@ -1185,7 +1340,7 @@ Relay 向 Controller 报告到其他 Relay 的延迟。
 | error_code | 2 B  | 错误码 (失败时有效)   |
 | error_msg  | 变长 | 错误消息 (失败时有效) |
 
-#### 2.4.32 MESH_HELLO Payload (Type=0x70)
+#### 3.4.32 MESH_HELLO Payload (Type=0x70)
 
 Relay 之间建立 Mesh 连接。
 
@@ -1203,7 +1358,7 @@ Relay 之间建立 Mesh 连接。
 | capabilities | 2 B  | 能力标志                |
 | version      | 变长 | 协议版本                |
 
-#### 2.4.33 MESH_HELLO_ACK Payload (Type=0x71)
+#### 3.4.33 MESH_HELLO_ACK Payload (Type=0x71)
 
 ```
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -1219,7 +1374,7 @@ Relay 之间建立 Mesh 连接。
 | capabilities | 2 B  | 能力标志                 |
 | error_msg    | 变长 | 错误消息 (失败时有效)    |
 
-#### 2.4.34 MESH_FORWARD Payload (Type=0x72)
+#### 3.4.34 MESH_FORWARD Payload (Type=0x72)
 
 Relay 之间转发数据。
 
@@ -1237,7 +1392,7 @@ Relay 之间转发数据。
 | hop_count | 1 B  | 跳数 (防环路，最大 3)       |
 | payload   | 变长 | 原始 DATA Payload (加密后)  |
 
-#### 2.4.35 MESH_PING Payload (Type=0x73)
+#### 3.4.35 MESH_PING Payload (Type=0x73)
 
 ```
 ┌────────────┬────────────┐
@@ -1246,7 +1401,7 @@ Relay 之间转发数据。
 └────────────┴────────────┘
 ```
 
-#### 2.4.36 MESH_PONG Payload (Type=0x74)
+#### 3.4.36 MESH_PONG Payload (Type=0x74)
 
 ```
 ┌────────────┬────────────┐
@@ -1260,7 +1415,7 @@ Relay 之间转发数据。
 | timestamp | 8 B  | 发送时间戳 (毫秒)     |
 | seq_num   | 4 B  | 序列号，PONG 原样返回 |
 
-#### 2.4.37 RelayInfo 结构
+#### 3.4.37 RelayInfo 结构
 
 CONFIG 和 CONFIG_UPDATE 中使用的 Relay 信息结构。
 
@@ -1285,7 +1440,7 @@ CONFIG 和 CONFIG_UPDATE 中使用的 Relay 信息结构。
 | stun_port    | 2 B  | STUN 端口 (0=未启用)              |
 | priority     | 1 B  | 优先级 (1=最高)                   |
 
-#### 2.4.38 STUNInfo 结构
+#### 3.4.38 STUNInfo 结构
 
 CONFIG 中使用的 STUN 服务器信息。
 
@@ -1302,9 +1457,9 @@ CONFIG 中使用的 STUN 服务器信息。
 | ip      | 4/16 B | STUN 服务器 IP         |
 | port    | 2 B    | STUN 端口 (默认 3478)  |
 
-### 2.5 协议子规范
+### 3.5 协议子规范
 
-#### 2.5.1 分片规范 (FRAGMENTED)
+#### 3.5.1 分片规范 (FRAGMENTED)
 
 当消息 Payload 超过单帧承载能力时，启用分片传输。
 
@@ -1363,7 +1518,7 @@ CONFIG 中使用的 STUN 服务器信息。
 3. 若 Flags & FRAGMENTED，则 Payload[0..9] 为 Fragment Header，Payload[9..] 为本片业务数据
 4. 收齐所有分片后，按 frag_index 顺序拼接业务数据，按 orig_type 解析
 
-#### 2.5.2 确认机制 (NEED_ACK)
+#### 3.5.2 确认机制 (NEED_ACK)
 
 当消息需要可靠传输确认时，设置 NEED_ACK 标志。
 
@@ -1385,7 +1540,7 @@ CONFIG 中使用的 STUN 服务器信息。
 | 范围       | 32 位无符号整数，溢出后回绕              |
 | 保留值     | 0 表示无需确认                           |
 
-#### 2.5.3 压缩规范 (COMPRESSED)
+#### 3.5.3 压缩规范 (COMPRESSED)
 
 **处理顺序**：**先压缩，后加密**（如同时启用）
 
@@ -1416,9 +1571,9 @@ CONFIG 中使用的 STUN 服务器信息。
 
 ---
 
-## 3. 状态机设计
+## 4. 状态机设计
 
-### 3.1 Client 连接状态机
+### 4.1 Client 连接状态机
 
 ```
                           ┌─────────────────────────────────────────┐
@@ -1472,7 +1627,7 @@ CONFIG 中使用的 STUN 服务器信息。
 | RECONNECTING | max_retries  | DISABLED     | 通知用户                 |
 | DISABLED     | enable()     | INIT         | 重置重试计数             |
 
-### 3.2 P2P 连接状态机 (每个对端)
+### 4.2 P2P 连接状态机 (每个对端)
 
 ```
     ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
@@ -1546,7 +1701,7 @@ PUNCHING 子状态:
     └──────────────────────────────────────────┘
 ```
 
-#### 3.2.1 NAT 类型检测与穿透策略
+#### 4.2.1 NAT 类型检测与穿透策略
 
 **NAT 类型检测流程**：
 
@@ -1607,7 +1762,7 @@ PUNCHING 子状态:
 4. 使用首个成功响应的端点建立连接
 ```
 
-### 3.3 Relay 会话状态机
+### 4.3 Relay 会话状态机
 
 ```
     ┌──────────┐    ┌──────────┐    ┌──────────┐
@@ -1624,7 +1779,7 @@ PUNCHING 子状态:
                     └──────────────────────────┘
 ```
 
-### 3.4 Relay 注册状态机
+### 4.4 Relay 注册状态机
 
 ```
     ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
@@ -1641,7 +1796,7 @@ PUNCHING 子状态:
                     └──────────────────────────────────────────┘
 ```
 
-### 3.5 Mesh 连接状态机 (Relay 间)
+### 4.5 Mesh 连接状态机 (Relay 间)
 
 ```
     ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
@@ -1658,9 +1813,9 @@ PUNCHING 子状态:
 
 ---
 
-## 4. 核心业务流程
+## 5. 核心业务流程
 
-### 4.1 客户端首次认证流程 (AuthKey)
+### 5.1 客户端首次认证流程 (AuthKey)
 
 ```
 Client                          Controller
@@ -1715,7 +1870,7 @@ Client                          Controller
 > - `auth_type=0x02` 是 Payload 中的认证方式字段 (authkey)
 > - 两者是不同层级的概念，不可混用
 
-### 4.2 数据传输流程 (通过 Relay)
+### 5.2 数据传输流程 (通过 Relay)
 
 ```
 Client A         Relay           Client B
@@ -1736,7 +1891,7 @@ Client A         Relay           Client B
     │              │                 │
 ```
 
-### 4.3 P2P 直连建立流程
+### 5.3 P2P 直连建立流程
 
 ```
 Client A              Controller              Client B
@@ -1769,7 +1924,7 @@ Client A              Controller              Client B
     │   status=0x01]      │                      │
 ```
 
-### 4.4 Relay 注册流程
+### 5.4 Relay 注册流程
 
 ```
 Relay                          Controller
@@ -1811,7 +1966,7 @@ Relay                          Controller
   │                                │
 ```
 
-### 4.5 Relay Mesh 建立流程
+### 5.5 Relay Mesh 建立流程
 
 ```
 Relay A              Controller              Relay B
@@ -1842,9 +1997,9 @@ Relay A              Controller              Relay B
 
 ---
 
-## 5. 数据安全设计
+## 6. 数据安全设计
 
-### 5.1 端到端加密架构
+### 6.1 端到端加密架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -1868,7 +2023,7 @@ Relay A              Controller              Relay B
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.2 密钥体系
+### 6.2 密钥体系
 
 | 密钥类型      | 算法      | 大小    | 用途            | 生命周期          |
 | ------------- | --------- | ------- | --------------- | ----------------- |
@@ -1877,9 +2032,9 @@ Relay A              Controller              Relay B
 | Session Key   | HKDF 派生 | 256 bit | 数据加密        | 每对节点独立      |
 | Ephemeral Key | X25519    | 256 bit | 前向保密 (可选) | 每次会话          |
 
-### 5.3 密钥交换与派生
+### 6.3 密钥交换与派生
 
-#### 5.3.1 Session Key 派生
+#### 6.3.1 Session Key 派生
 
 ```
 1. ECDH 密钥交换:
@@ -1897,7 +2052,7 @@ Relay A              Controller              Relay B
      - Recv Nonce Base (12 bytes)
 ```
 
-#### 5.3.2 Nonce 构造规范
+#### 6.3.2 Nonce 构造规范
 
 **采用方案**：Nonce Base XOR Counter
 
@@ -1941,7 +2096,7 @@ counter = padded_counter 的低 8 字节 (大端序解析为 uint64)
 - 恢复的 counter 用于滑动窗口算法判断是否为重放包
 - 若 `padded_counter` 的高 4 字节非零，说明 nonce 异常或被篡改，应拒绝该包
 
-#### 5.3.3 会话重建安全规则
+#### 6.3.3 会话重建安全规则
 
 **核心原则**：每次会话重建必须产生不同的密钥材料，防止 Nonce 重用。
 
@@ -1969,7 +2124,7 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 | Counter 不持久化         | Counter 不保存到磁盘，重启后从 0 开始         |
 | 会话状态隔离             | 每个 (src_node, dst_node) 对独立维护会话状态  |
 
-#### 5.3.4 密钥轮换机制
+#### 6.3.4 密钥轮换机制
 
 **Node Key 主动轮换**：
 
@@ -2022,7 +2177,7 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 | crypto.key_overlap_period  | uint32 | 60     | 新旧密钥并存时间 (秒)   |
 | crypto.key_grace_period    | uint32 | 30     | 旧密钥宽限期 (秒)       |
 
-### 5.4 加密数据包格式
+### 6.4 加密数据包格式
 
 ```
 ┌───────────┬───────────┬──────────┬─────────────────────┬──────────┐
@@ -2043,7 +2198,7 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 
 **AEAD 附加认证数据 (AAD)**：Src Node (4B) + Dst Node (4B) = 8 bytes
 
-### 5.5 加密规格
+### 6.5 加密规格
 
 | 项目       | 规格                                            |
 | ---------- | ----------------------------------------------- |
@@ -2054,7 +2209,7 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 | 重放保护   | 2048 位滑动窗口                                 |
 | 最大加密载荷 | 65535 - 4 - 4 - 12 - 16 = **65499 bytes**     |
 
-### 5.6 重放攻击防护
+### 6.6 重放攻击防护
 
 ```
 滑动窗口算法:
@@ -2087,9 +2242,9 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 
 > **seq 提取**：从 nonce 中提取 counter 部分 (低 8 字节，大端序转换为 uint64) 作为 seq。
 
-### 5.7 JWT Token 设计
+### 6.7 JWT Token 设计
 
-#### 5.7.1 签名算法
+#### 6.7.1 签名算法
 
 | 算法   | 说明                                          | 推荐场景            |
 | ------ | --------------------------------------------- | ------------------- |
@@ -2102,7 +2257,7 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 
 配置项 `jwt.algorithm` 控制使用的算法，默认 `ES256`。
 
-#### 5.7.2 Auth Token (有效期 24 小时)
+#### 6.7.2 Auth Token (有效期 24 小时)
 
 ```
 Header: { "alg": "ES256", "typ": "JWT" }
@@ -2117,7 +2272,7 @@ Payload:
 }
 ```
 
-#### 5.7.3 Relay Token (有效期 90 分钟)
+#### 6.7.3 Relay Token (有效期 90 分钟)
 
 ```
 Header: { "alg": "ES256", "typ": "JWT" }
@@ -2143,7 +2298,7 @@ Payload:
 
 **示例**：`"jti": "550e8400-e29b-41d4-a716-446655440000"`
 
-#### 5.7.4 Token 刷新机制
+#### 6.7.4 Token 刷新机制
 
 Client 需在 Token 过期前主动刷新，避免断连：
 
@@ -2158,7 +2313,7 @@ Client 需在 Token 过期前主动刷新，避免断连：
 3. Controller 验证后签发新 Token 通过 CONFIG_UPDATE 推送
 4. Client 使用新 Token 重新连接 Relay (如需要)
 
-#### 5.7.5 Token 黑名单机制
+#### 6.7.5 Token 黑名单机制
 
 用于主动吊销尚未过期的 Token (如设备丢失、权限变更)。
 
@@ -2195,9 +2350,9 @@ CREATE INDEX idx_blacklist_expires ON token_blacklist(expires_at);
 
 ---
 
-## 6. 子网路由设计
+## 7. 子网路由设计
 
-### 6.1 概述
+### 7.1 概述
 
 EdgeLink 支持子网路由功能，允许节点将其本地网络暴露给 VPN 网络中的其他节点。
 
@@ -2230,7 +2385,7 @@ EdgeLink 支持子网路由功能，允许节点将其本地网络暴露给 VPN 
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 6.2 路由类型
+### 7.2 路由类型
 
 | 类型         | 说明                   | 使用场景            |
 | ------------ | ---------------------- | ------------------- |
@@ -2239,11 +2394,11 @@ EdgeLink 支持子网路由功能，允许节点将其本地网络暴露给 VPN 
 | **默认路由** | 0.0.0.0/0 全流量       | Exit Node 模式      |
 | **排除路由** | 不走 VPN 的网段        | 本地网络排除        |
 
-### 6.3 路由数据结构
+### 7.3 路由数据结构
 
-RouteInfo 结构定义见 2.4.18 节，全局统一使用该定义。
+RouteInfo 结构定义见 3.4.18 节，全局统一使用该定义。
 
-### 6.4 路由通告流程
+### 7.4 路由通告流程
 
 ```
 Client A               Controller               Client B
@@ -2281,7 +2436,7 @@ Client A               Controller               Client B
     │                      │                       │
 ```
 
-### 6.5 路由接受策略
+### 7.5 路由接受策略
 
 客户端可配置接受哪些子网路由：
 
@@ -2291,7 +2446,7 @@ Client A               Controller               Client B
 | `accept = ["192.168.0.0/16"]`        | 仅接受特定子网     |
 | `accept = ["*", "!172.16.0.0/12"]`   | 接受所有但排除某些 |
 
-### 6.6 Exit Node 模式
+### 7.6 Exit Node 模式
 
 | 步骤               | 说明                         |
 | ------------------ | ---------------------------- |
@@ -2300,7 +2455,7 @@ Client A               Controller               Client B
 | 使用 Exit Node     | Client 选择并安装默认路由    |
 | 排除地址           | 排除 Controller/Relay 和本地子网 |
 
-### 6.7 路由冲突处理
+### 7.7 路由冲突处理
 
 | 场景             | 处理策略                     |
 | ---------------- | ---------------------------- |
@@ -2311,9 +2466,9 @@ Client A               Controller               Client B
 
 ---
 
-## 7. 组件详细设计
+## 8. 组件详细设计
 
-### 7.1 Controller
+### 8.1 Controller
 
 #### 功能模块
 
@@ -2420,7 +2575,7 @@ PRAGMA cache_size = -64000;
 
 > 详细字段定义见 [附录 J: 数据库表定义](#附录-j-数据库表定义) 中的 authkeys 表。
 
-### 7.2 Relay
+### 8.2 Relay
 
 #### 功能模块
 
@@ -2452,7 +2607,7 @@ PRAGMA cache_size = -64000;
        → 或直接丢弃并返回错误
 ```
 
-### 7.3 Client
+### 8.3 Client
 
 #### 功能模块
 
@@ -2475,163 +2630,6 @@ PRAGMA cache_size = -64000;
 | Linux   | /dev/net/tun |
 | Windows | Wintun       |
 | macOS   | utun         |
-
----
-
-## 8. 高并发设计要求
-
-### 8.1 并发模型
-
-- 使用 Boost.Asio + Boost.Coroutine (awaitable)
-- 每个线程独立 io_context (thread-per-core 模型)
-- 连接通过 round-robin 分配到各线程
-- 每个 WebSocket 连接对应一个协程
-- 连接生命周期内所有操作在同一线程完成
-
-### 8.2 Listener 设计
-
-#### Linux 平台
-
-| 方案        | 说明                                    |
-| ----------- | --------------------------------------- |
-| SO_REUSEPORT | 每个 IO 线程独立 acceptor              |
-| 负载分发    | 内核自动在多个 acceptor 间分发连接     |
-| 无锁设计    | 连接在 accept 时即绑定到目标线程       |
-
-#### Windows 平台
-
-| 方案        | 说明                                    |
-| ----------- | --------------------------------------- |
-| 单 Acceptor | 主线程单个 acceptor                    |
-| IOCP 分发   | Accept 后将 socket move 到目标 io_context |
-| Strand      | 使用 strand 确保线程安全               |
-
-#### 分发算法
-
-| 算法        | 说明                                    |
-| ----------- | --------------------------------------- |
-| Round-Robin | 默认，简单均匀                         |
-| 最少连接    | 可选，适合长连接场景                   |
-| 连接亲和性  | 基于 client IP hash，保持会话粘性       |
-
-### 8.3 线程亲和性设计
-
-| 原则       | 说明                                     |
-| ---------- | ---------------------------------------- |
-| 连接绑定   | 每个连接固定在一个线程，不迁移           |
-| 数据本地化 | 会话状态、缓冲区等数据存储在连接所属线程 |
-| 避免跨线程 | 同线程内的连接间通信直接调用，无需加锁   |
-| 必要跨线程 | 仅在跨线程转发数据时使用无锁队列         |
-
-### 8.4 跨线程通信场景
-
-| 场景              | 方案                                  |
-| ----------------- | ------------------------------------- |
-| 数据转发 (同线程) | 直接调用目标 Session 的发送方法       |
-| 数据转发 (跨线程) | 通过 MPSC 无锁队列投递到目标线程      |
-| 广播消息          | 每个线程维护本地会话列表，各自广播    |
-| 全局统计          | 各线程本地统计，定期汇总或使用 atomic |
-
-### 8.4.1 背压机制
-
-**MPSC 队列背压策略**：
-
-| 参数                   | 默认值 | 说明                                |
-| ---------------------- | ------ | ----------------------------------- |
-| queue_capacity         | 65536  | 队列最大容量 (条消息)               |
-| high_watermark         | 80%    | 高水位线，触发背压                  |
-| low_watermark          | 50%    | 低水位线，恢复正常                  |
-| drop_policy            | oldest | 满时丢弃策略: oldest/newest/reject  |
-
-**背压处理流程**：
-
-```
-队列状态:
-    if queue.size() >= high_watermark:
-        enter_backpressure_mode()
-        log_warn("Queue high watermark reached")
-
-    if in_backpressure_mode && queue.size() <= low_watermark:
-        exit_backpressure_mode()
-
-消息入队:
-    if queue.full():
-        if drop_policy == "oldest":
-            queue.pop_front()  # 丢弃最旧
-            dropped_counter++
-        elif drop_policy == "newest":
-            return false       # 丢弃新消息
-            dropped_counter++
-        else:  # reject
-            return false       # 拒绝，由调用方处理
-
-        log_warn("Queue overflow, dropped: {}", dropped_counter)
-
-    queue.push(msg)
-```
-
-**监控指标**：
-
-| 指标                          | 类型      | 说明                |
-| ----------------------------- | --------- | ------------------- |
-| `queue_size`                  | Gauge     | 当前队列大小        |
-| `queue_capacity`              | Gauge     | 队列容量            |
-| `queue_dropped_total`         | Counter   | 累计丢弃消息数      |
-| `backpressure_active`         | Gauge     | 是否处于背压状态    |
-| `backpressure_duration_sec`   | Histogram | 背压持续时间        |
-
-### 8.5 无锁设计要求
-
-| 数据结构       | 无锁方案                           |
-| -------------- | ---------------------------------- |
-| 跨线程消息队列 | MPSC 无锁队列 (每线程一个入口队列) |
-| 线程本地会话表 | 无需加锁 (单线程访问)              |
-| 全局统计计数   | std::atomic                        |
-| 节点位置缓存   | 每线程本地副本 + 定期同步          |
-
-### 8.6 NodeLocationCache 设计
-
-#### 缓存策略
-
-| 项目         | 规格                                    |
-| ------------ | --------------------------------------- |
-| 存储结构     | 每线程本地 HashMap<node_id, relay_id>  |
-| TTL          | 60 秒，过期后需重新查询                 |
-| 最大条目     | 100,000 条/线程                         |
-| 淘汰策略     | LRU                                     |
-
-#### 同步机制
-
-| 触发条件       | 动作                                    |
-| -------------- | --------------------------------------- |
-| Controller 推送 | SERVER_NODE_LOC 消息更新所有线程缓存   |
-| 定期拉取       | 每 30 秒从 Controller 拉取增量更新     |
-| 缓存未命中     | 向 Controller 查询，结果广播到所有线程 |
-| 节点迁移       | Controller 推送位置变更通知            |
-| 节点断开       | Controller 推送删除通知，立即失效      |
-
-#### 一致性保证
-
-| 场景           | 处理方式                                |
-| -------------- | --------------------------------------- |
-| 陈旧数据       | 允许短暂不一致，转发失败后触发更新     |
-| 节点快速迁移   | 使用版本号，拒绝旧版本更新             |
-| 网络分区恢复   | 全量同步，覆盖本地缓存                 |
-
-### 8.7 协程使用规范
-
-- 所有 IO 操作必须使用 co_await
-- 禁止在协程中进行阻塞调用
-- 使用 use_awaitable 作为 completion token
-- 使用 co_spawn 启动协程
-
-### 8.8 内存管理
-
-- Session 使用 shared_ptr 管理
-- SessionManager 持有 weak_ptr 避免循环引用
-- 大缓冲区使用对象池复用
-
----
 
 ## 9. 日志系统设计
 
