@@ -1,5 +1,6 @@
 #include "client/client.hpp"
 #include "common/logger.hpp"
+#include <future>
 
 namespace edgelink::client {
 
@@ -131,6 +132,12 @@ void Client::setup_callbacks() {
     relay_cbs.on_data = [this](NodeId src, std::span<const uint8_t> data) {
         auto src_peer_ip = peers_.get_peer_ip_str(src);
         log().debug("Received {} bytes from {}", data.size(), src_peer_ip);
+
+        // Check for internal ping/pong messages (type byte 0xEE/0xEF)
+        if (data.size() >= 13 && (data[0] == 0xEE || data[0] == 0xEF)) {
+            handle_ping_data(src, data);
+            return;
+        }
 
         // If TUN mode is enabled, write IP packets to TUN device
         if (is_tun_enabled() && ip_packet::version(data) == 4) {
@@ -716,6 +723,187 @@ void Client::teardown_ipc() {
         ipc_->stop();
         ipc_.reset();
     }
+}
+
+// ============================================================================
+// Ping Implementation
+// ============================================================================
+
+// Internal ping message format:
+// Byte 0: 0xEE = ping request, 0xEF = pong response
+// Bytes 1-4: sequence number (big-endian)
+// Bytes 5-12: timestamp in milliseconds (big-endian)
+
+asio::awaitable<uint16_t> Client::ping_peer(NodeId peer_id, std::chrono::milliseconds timeout) {
+    if (!relay_ || !relay_->is_connected()) {
+        log().warn("Cannot ping: relay not connected");
+        co_return 0;
+    }
+
+    auto peer = peers_.get_peer(peer_id);
+    if (!peer) {
+        log().warn("Cannot ping: peer {} not found", peer_id);
+        co_return 0;
+    }
+
+    if (!peer->info.online) {
+        log().warn("Cannot ping: peer {} is offline", peer_id);
+        co_return 0;
+    }
+
+    // Generate ping message
+    uint32_t seq = ++ping_seq_;
+    uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    std::vector<uint8_t> ping_msg(13);
+    ping_msg[0] = 0xEE;  // ping request
+    ping_msg[1] = (seq >> 24) & 0xFF;
+    ping_msg[2] = (seq >> 16) & 0xFF;
+    ping_msg[3] = (seq >> 8) & 0xFF;
+    ping_msg[4] = seq & 0xFF;
+    ping_msg[5] = (now >> 56) & 0xFF;
+    ping_msg[6] = (now >> 48) & 0xFF;
+    ping_msg[7] = (now >> 40) & 0xFF;
+    ping_msg[8] = (now >> 32) & 0xFF;
+    ping_msg[9] = (now >> 24) & 0xFF;
+    ping_msg[10] = (now >> 16) & 0xFF;
+    ping_msg[11] = (now >> 8) & 0xFF;
+    ping_msg[12] = now & 0xFF;
+
+    // Setup pending ping with promise
+    uint64_t key = (static_cast<uint64_t>(peer_id) << 32) | seq;
+    auto promise = std::make_shared<std::promise<uint16_t>>();
+    auto future = promise->get_future();
+
+    {
+        std::lock_guard lock(ping_mutex_);
+        pending_pings_[key] = PendingPing{now, [promise](uint16_t latency) {
+            promise->set_value(latency);
+        }};
+    }
+
+    // Send ping
+    bool sent = co_await relay_->send_data(peer_id, ping_msg);
+    if (!sent) {
+        std::lock_guard lock(ping_mutex_);
+        pending_pings_.erase(key);
+        co_return 0;
+    }
+
+    log().debug("Ping sent to {} (seq={})", peer->info.virtual_ip.to_string(), seq);
+
+    // Wait for response with timeout
+    asio::steady_timer timer(co_await asio::this_coro::executor);
+    timer.expires_after(timeout);
+
+    bool timed_out = false;
+    try {
+        co_await timer.async_wait(asio::use_awaitable);
+        timed_out = true;
+    } catch (const boost::system::system_error& e) {
+        if (e.code() == asio::error::operation_aborted) {
+            // Timer was cancelled, meaning we got a response
+        } else {
+            throw;
+        }
+    }
+
+    // Check if we got a response
+    uint16_t latency = 0;
+    {
+        std::lock_guard lock(ping_mutex_);
+        auto it = pending_pings_.find(key);
+        if (it != pending_pings_.end()) {
+            if (timed_out) {
+                log().debug("Ping timeout to {} (seq={})", peer->info.virtual_ip.to_string(), seq);
+            }
+            pending_pings_.erase(it);
+        }
+    }
+
+    // Try to get the future value (non-blocking)
+    if (future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+        latency = future.get();
+    }
+
+    co_return latency;
+}
+
+asio::awaitable<uint16_t> Client::ping_ip(const IPv4Address& ip, std::chrono::milliseconds timeout) {
+    auto peer = peers_.get_peer_by_ip(ip);
+    if (!peer) {
+        log().warn("Cannot ping: no peer with IP {}", ip.to_string());
+        co_return 0;
+    }
+    co_return co_await ping_peer(peer->info.node_id, timeout);
+}
+
+void Client::handle_ping_data(NodeId src, std::span<const uint8_t> data) {
+    if (data.size() < 13) return;
+
+    uint8_t type = data[0];
+    uint32_t seq = (static_cast<uint32_t>(data[1]) << 24) |
+                   (static_cast<uint32_t>(data[2]) << 16) |
+                   (static_cast<uint32_t>(data[3]) << 8) |
+                   static_cast<uint32_t>(data[4]);
+    uint64_t timestamp = (static_cast<uint64_t>(data[5]) << 56) |
+                         (static_cast<uint64_t>(data[6]) << 48) |
+                         (static_cast<uint64_t>(data[7]) << 40) |
+                         (static_cast<uint64_t>(data[8]) << 32) |
+                         (static_cast<uint64_t>(data[9]) << 24) |
+                         (static_cast<uint64_t>(data[10]) << 16) |
+                         (static_cast<uint64_t>(data[11]) << 8) |
+                         static_cast<uint64_t>(data[12]);
+
+    if (type == 0xEE) {
+        // Ping request - send pong response
+        log().debug("Received ping from {}, seq={}", peers_.get_peer_ip_str(src), seq);
+        send_pong(src, seq, timestamp);
+    } else if (type == 0xEF) {
+        // Pong response - calculate latency
+        uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        uint16_t latency = static_cast<uint16_t>(std::min<uint64_t>(now - timestamp, 65535));
+
+        log().debug("Received pong from {}, seq={}, latency={}ms",
+                    peers_.get_peer_ip_str(src), seq, latency);
+
+        // Update peer latency
+        peers_.set_latency(src, latency);
+
+        // Find and complete pending ping
+        uint64_t key = (static_cast<uint64_t>(src) << 32) | seq;
+        std::lock_guard lock(ping_mutex_);
+        auto it = pending_pings_.find(key);
+        if (it != pending_pings_.end()) {
+            if (it->second.callback) {
+                it->second.callback(latency);
+            }
+            pending_pings_.erase(it);
+        }
+    }
+}
+
+void Client::send_pong(NodeId peer_id, uint32_t seq_num, uint64_t timestamp) {
+    std::vector<uint8_t> pong_msg(13);
+    pong_msg[0] = 0xEF;  // pong response
+    pong_msg[1] = (seq_num >> 24) & 0xFF;
+    pong_msg[2] = (seq_num >> 16) & 0xFF;
+    pong_msg[3] = (seq_num >> 8) & 0xFF;
+    pong_msg[4] = seq_num & 0xFF;
+    pong_msg[5] = (timestamp >> 56) & 0xFF;
+    pong_msg[6] = (timestamp >> 48) & 0xFF;
+    pong_msg[7] = (timestamp >> 40) & 0xFF;
+    pong_msg[8] = (timestamp >> 32) & 0xFF;
+    pong_msg[9] = (timestamp >> 24) & 0xFF;
+    pong_msg[10] = (timestamp >> 16) & 0xFF;
+    pong_msg[11] = (timestamp >> 8) & 0xFF;
+    pong_msg[12] = timestamp & 0xFF;
+
+    asio::co_spawn(ioc_, [this, peer_id, pong_msg = std::move(pong_msg)]() -> asio::awaitable<void> {
+        co_await relay_->send_data(peer_id, pong_msg);
+    }, asio::detached);
 }
 
 } // namespace edgelink::client

@@ -10,7 +10,9 @@
 #include <boost/asio/ssl.hpp>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 namespace asio = boost::asio;
 namespace ssl = asio::ssl;
@@ -87,6 +89,10 @@ public:
     // Send raw IP packet (for TUN mode)
     asio::awaitable<bool> send_ip_packet(std::span<const uint8_t> packet);
 
+    // Ping a peer and return latency in milliseconds (0 = timeout/error)
+    asio::awaitable<uint16_t> ping_peer(NodeId peer_id, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+    asio::awaitable<uint16_t> ping_ip(const IPv4Address& ip, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+
     // Set callbacks
     void set_callbacks(ClientCallbacks callbacks);
 
@@ -121,6 +127,10 @@ private:
     bool setup_ipc();
     void teardown_ipc();
 
+    // Ping management
+    void handle_ping_data(NodeId src, std::span<const uint8_t> data);
+    void send_pong(NodeId peer_id, uint32_t seq_num, uint64_t timestamp);
+
     // Keepalive timer
     asio::awaitable<void> keepalive_loop();
 
@@ -153,6 +163,15 @@ private:
 
     // IPC server (optional)
     std::shared_ptr<IpcServer> ipc_;
+
+    // Pending ping state
+    struct PendingPing {
+        uint64_t send_time = 0;
+        std::function<void(uint16_t)> callback;  // latency_ms or 0 on timeout
+    };
+    std::mutex ping_mutex_;
+    std::unordered_map<uint64_t, PendingPing> pending_pings_;  // key = (node_id << 32) | seq_num
+    uint32_t ping_seq_ = 0;
 
     ClientCallbacks callbacks_;
 };

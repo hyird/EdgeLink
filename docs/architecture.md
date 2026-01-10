@@ -1000,6 +1000,29 @@ password_verifier = HMAC-SHA256(derived_key, client_nonce || server_nonce)
 | jitter_ms   | 2 B  | 延迟抖动 (毫秒)                |
 | packet_loss | 1 B  | 丢包率 (0-100)                 |
 
+#### 3.4.9.2 内部 Relay Ping 协议 (应用层)
+
+用于 `edgelink-client ping` 命令通过 Relay 测量到对端节点的 RTT。该协议封装在 DATA 帧的 payload 中。
+
+```
+┌────────────┬────────────┬────────────┐
+│    type    │  seq_num   │ timestamp  │
+│   (1 B)    │   (4 B)    │   (8 B)    │
+└────────────┴────────────┴────────────┘
+```
+
+| 字段      | 大小 | 说明                                      |
+| --------- | ---- | ----------------------------------------- |
+| type      | 1 B  | 0xEE = Ping 请求, 0xEF = Pong 响应        |
+| seq_num   | 4 B  | 序列号 (大端序)                           |
+| timestamp | 8 B  | 发送时间戳 (steady_clock 毫秒, 大端序)    |
+
+**工作流程**：
+1. 发起方构造 Ping 请求 (type=0xEE)，通过 DATA 帧经 Relay 发送给目标节点
+2. 目标节点收到后，将 type 改为 0xEF，其余字段保持不变，发回响应
+3. 发起方收到响应后，计算 RTT = 当前时间 - timestamp
+4. 更新 PeerManager 中对应节点的 latency_ms
+
 #### 3.4.10 P2P_INIT Payload (Type=0x40)
 
 ```

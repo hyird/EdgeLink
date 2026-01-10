@@ -4,6 +4,7 @@
 
 #include <boost/json.hpp>
 #include <filesystem>
+#include <future>
 #include <sstream>
 
 namespace json = boost::json;
@@ -274,8 +275,50 @@ std::string IpcServer::handle_peers(bool online_only) {
 }
 
 std::string IpcServer::handle_ping(const std::string& target) {
-    // TODO: Implement ping functionality
-    return encode_error(IpcStatus::ERROR, "Ping not implemented yet");
+    if (target.empty()) {
+        return encode_error(IpcStatus::INVALID_REQUEST, "Target IP required");
+    }
+
+    // Parse target IP
+    IPv4Address ip = IPv4Address::from_string(target);
+    if (ip.to_u32() == 0) {
+        return encode_error(IpcStatus::INVALID_REQUEST, "Invalid IP address: " + target);
+    }
+
+    // Find peer by IP
+    auto peer = client_.peers().get_peer_by_ip(ip);
+    if (!peer) {
+        return encode_error(IpcStatus::PEER_NOT_FOUND, "No peer with IP: " + target);
+    }
+
+    if (!peer->info.online) {
+        return encode_error(IpcStatus::PEER_NOT_FOUND, "Peer is offline: " + target);
+    }
+
+    // Execute ping synchronously using a promise
+    auto promise = std::make_shared<std::promise<uint16_t>>();
+    auto future = promise->get_future();
+
+    asio::co_spawn(ioc_, [this, ip, promise]() -> asio::awaitable<void> {
+        uint16_t latency = co_await client_.ping_ip(ip);
+        promise->set_value(latency);
+    }, asio::detached);
+
+    // Wait for result with timeout (6 seconds to allow for 5s ping timeout)
+    if (future.wait_for(std::chrono::seconds(6)) == std::future_status::timeout) {
+        return encode_error(IpcStatus::ERROR, "Ping timeout");
+    }
+
+    uint16_t latency = future.get();
+    if (latency == 0) {
+        return encode_error(IpcStatus::ERROR, "Ping failed or timed out");
+    }
+
+    json::object result;
+    result["status"] = "ok";
+    result["target"] = target;
+    result["latency_ms"] = latency;
+    return json::serialize(result);
 }
 
 std::string IpcServer::handle_log_level(const std::string& module, const std::string& level) {

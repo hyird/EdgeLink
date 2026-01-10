@@ -46,6 +46,7 @@ void print_usage() {
               << "  down        Stop the running client daemon\n"
               << "  status      Show connection status\n"
               << "  peers       List all peer nodes\n"
+              << "  ping        Ping a peer node\n"
               << "  version     Show version information\n"
               << "  help        Show this help message\n\n"
               << "Run 'edgelink-client <command> --help' for more information on a command.\n";
@@ -105,6 +106,17 @@ void print_down_help() {
               << "Options:\n"
               << "  -h, --help    Show this help\n\n"
               << "Sends a shutdown signal to the running client daemon.\n";
+}
+
+void print_ping_help() {
+    std::cout << "EdgeLink Client - Ping a peer\n\n"
+              << "Usage: edgelink-client ping <target> [options]\n\n"
+              << "Arguments:\n"
+              << "  target        Target peer's virtual IP (e.g., 100.64.0.2)\n\n"
+              << "Options:\n"
+              << "  -c, --count N   Number of pings to send (default: 4)\n"
+              << "  -h, --help      Show this help\n\n"
+              << "Note: This command requires the client daemon to be running.\n";
 }
 
 // ============================================================================
@@ -259,17 +271,20 @@ int cmd_peers(int argc, char* argv[]) {
 
                     for (const auto& p : peers) {
                         auto& peer = p.as_object();
+                        std::string virtual_ip(peer.at("virtual_ip").as_string());
+                        std::string name(peer.at("name").as_string());
                         std::string status = peer.at("online").as_bool() ? "online" : "offline";
+                        std::string connection(peer.at("connection_status").as_string());
                         std::string latency = std::to_string(peer.at("latency_ms").as_int64()) + "ms";
                         if (peer.at("latency_ms").as_int64() == 0) {
                             latency = "-";
                         }
 
                         std::cout << std::left
-                                  << std::setw(16) << peer.at("virtual_ip").as_string()
-                                  << std::setw(20) << peer.at("name").as_string()
+                                  << std::setw(16) << virtual_ip
+                                  << std::setw(20) << name
                                   << std::setw(10) << status
-                                  << std::setw(12) << peer.at("connection_status").as_string()
+                                  << std::setw(12) << connection
                                   << latency << "\n";
                     }
                 }
@@ -284,6 +299,90 @@ int cmd_peers(int argc, char* argv[]) {
     }
 
     return 0;
+}
+
+// ============================================================================
+// Command: ping
+// ============================================================================
+
+int cmd_ping(int argc, char* argv[]) {
+    std::string target;
+    int count = 4;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            print_ping_help();
+            return 0;
+        } else if ((arg == "-c" || arg == "--count") && i + 1 < argc) {
+            count = std::stoi(argv[++i]);
+            if (count < 1) count = 1;
+            if (count > 100) count = 100;
+        } else if (target.empty() && arg[0] != '-') {
+            target = arg;
+        }
+    }
+
+    if (target.empty()) {
+        std::cerr << "Error: Target IP is required\n\n";
+        print_ping_help();
+        return 1;
+    }
+
+    // Connect to IPC server
+    IpcClient ipc;
+    if (!ipc.connect()) {
+        std::cerr << "Error: Cannot connect to client daemon. Is it running?\n";
+        std::cerr << "       Start the daemon with: edgelink-client up\n";
+        return 1;
+    }
+
+    std::cout << "PING " << target << "\n";
+
+    int success_count = 0;
+    uint64_t total_latency = 0;
+    uint16_t min_latency = 65535;
+    uint16_t max_latency = 0;
+
+    for (int i = 0; i < count; ++i) {
+        std::string response = ipc.ping_peer(target);
+
+        try {
+            auto jv = boost::json::parse(response);
+            auto& obj = jv.as_object();
+
+            if (obj.at("status").as_string() == "ok") {
+                uint16_t latency = static_cast<uint16_t>(obj.at("latency_ms").as_int64());
+                std::cout << "Reply from " << target << ": time=" << latency << "ms\n";
+                success_count++;
+                total_latency += latency;
+                if (latency < min_latency) min_latency = latency;
+                if (latency > max_latency) max_latency = latency;
+            } else {
+                std::string msg(obj.at("message").as_string());
+                std::cout << "Request timed out: " << msg << "\n";
+            }
+        } catch (const std::exception& e) {
+            std::cout << "Request failed: " << e.what() << "\n";
+        }
+
+        // Sleep between pings (except for the last one)
+        if (i < count - 1) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+
+    // Print statistics
+    std::cout << "\n--- " << target << " ping statistics ---\n";
+    std::cout << count << " packets transmitted, " << success_count << " received, "
+              << ((count - success_count) * 100 / count) << "% packet loss\n";
+
+    if (success_count > 0) {
+        uint64_t avg_latency = total_latency / success_count;
+        std::cout << "rtt min/avg/max = " << min_latency << "/" << avg_latency << "/" << max_latency << " ms\n";
+    }
+
+    return success_count > 0 ? 0 : 1;
 }
 
 // ============================================================================
@@ -480,7 +579,7 @@ int cmd_up(int argc, char* argv[]) {
 
         callbacks.on_data_received = [&client](NodeId src, std::span<const uint8_t> data) {
             auto src_ip = client->peers().get_peer_ip_str(src);
-            Logger::get("client").info("Data from {}: {} bytes", src_ip, data.size());
+            Logger::get("client").debug("Data from {}: {} bytes", src_ip, data.size());
         };
 
         callbacks.on_error = [](uint16_t code, const std::string& msg) {
@@ -573,6 +672,11 @@ int main(int argc, char* argv[]) {
     // Handle 'peers' command
     if (command == "peers") {
         return cmd_peers(argc - 2, argv + 2);
+    }
+
+    // Handle 'ping' command
+    if (command == "ping") {
+        return cmd_ping(argc - 2, argv + 2);
     }
 
     // Legacy mode: if first arg starts with '-', treat as 'up' command
