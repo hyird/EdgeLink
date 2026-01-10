@@ -1,6 +1,6 @@
 # EdgeLink 架构设计文档
 
-> **版本**: 2.6
+> **版本**: 2.7
 > **更新日期**: 2026-01-10
 > **协议版本**: 0x02
 
@@ -152,6 +152,37 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 │              (二进制结构化数据)                      │
 └─────────────────────────────────────────────────────┘
 ```
+
+#### 2.2.4 版本兼容性
+
+**版本检查规则**：
+
+| 场景                 | 处理方式                                      |
+| -------------------- | --------------------------------------------- |
+| Version = 当前版本   | 正常处理                                      |
+| Version > 当前版本   | 返回 `UNSUPPORTED_VERSION (2003)` 并关闭连接  |
+| Version < 当前版本   | 尝试兼容处理 (见下文)                         |
+
+**向后兼容策略**：
+
+服务端 (Controller/Relay) 应尽可能支持低版本协议：
+
+1. **消息类型兼容**：未识别的 Type 返回 `UNKNOWN_TYPE (2002)`，但不断开连接
+2. **Payload 字段兼容**：
+   - 新增字段位于 Payload 末尾，旧版本可忽略
+   - 旧版本发送的短 Payload 使用默认值填充缺失字段
+3. **功能协商**：通过 CONFIG 消息中的 `capabilities` 字段协商可用功能
+
+**客户端行为**：
+
+- 收到 `UNSUPPORTED_VERSION` 时应提示用户升级
+- 不支持版本降级 (客户端不发送低于自身版本的消息)
+
+**版本升级流程**：
+
+新版本发布时，Controller 通过 CONFIG_UPDATE 推送升级建议，客户端可选择：
+1. 立即升级重连
+2. 继续使用当前版本 (在兼容期内)
 
 ### 2.3 消息类型定义 (Frame Type)
 
@@ -491,6 +522,22 @@ signed_data = auth_type (1B)
 | 0x0004 | ROUTE_CHANGED   | Route 列表有变更        |
 | 0x0008 | TOKEN_REFRESH   | 包含新的 relay_token    |
 | 0x0010 | FULL_SYNC       | 需要全量同步 (忽略增量) |
+
+**TOKEN_REFRESH 附加字段**：
+
+当 `update_flags & TOKEN_REFRESH` 时，Payload 末尾追加以下字段：
+
+```
+┌────────────────────────────┬────────────┐
+│        relay_token         │  expires   │
+│      (1B len + bytes)      │   (8 B)    │
+└────────────────────────────┴────────────┘
+```
+
+| 字段        | 大小 | 说明                               |
+| ----------- | ---- | ---------------------------------- |
+| relay_token | 变长 | 新的 Relay 访问令牌 (1B 长度前缀)  |
+| expires     | 8 B  | 令牌过期时间 (毫秒时间戳)          |
 
 #### 2.4.4.2 CONFIG_ACK Payload (Type=0x12)
 
@@ -1891,6 +1938,41 @@ Client 需在 Token 过期前主动刷新，避免断连：
 3. Controller 验证后签发新 Token 通过 CONFIG_UPDATE 推送
 4. Client 使用新 Token 重新连接 Relay (如需要)
 
+#### 5.7.5 Token 黑名单机制
+
+用于主动吊销尚未过期的 Token (如设备丢失、权限变更)。
+
+**存储方式**：
+
+| 方案         | 说明                                              | 适用场景            |
+| ------------ | ------------------------------------------------- | ------------------- |
+| 内存 (LRU)   | 基于 `jti` 的 LRU 缓存，默认容量 10000 条         | 单 Controller       |
+| 数据库       | 持久化存储，支持过期自动清理                      | 多 Controller HA    |
+
+**黑名单表结构** (数据库方案)：
+
+```sql
+CREATE TABLE token_blacklist (
+    jti        TEXT      PRIMARY KEY,     -- Token 唯一标识
+    node_id    INTEGER   NOT NULL,        -- 关联节点
+    reason     TEXT,                       -- 吊销原因
+    expires_at INTEGER   NOT NULL,        -- Token 原过期时间
+    created_at INTEGER   NOT NULL         -- 加入黑名单时间
+);
+CREATE INDEX idx_blacklist_expires ON token_blacklist(expires_at);
+```
+
+**多 Controller 同步**：
+- HA 部署时，黑名单需通过数据库共享
+- 每个 Controller 启动时加载未过期的黑名单到内存缓存
+- 新增黑名单时同步写入数据库和本地缓存
+- 定时任务清理已过期的黑名单条目 (Token.expires_at < now)
+
+**验证流程**：
+1. 验证 JWT 签名和过期时间
+2. 检查 `jti` 是否在黑名单中
+3. 黑名单命中返回错误码 `TOKEN_BLACKLISTED (1003)`
+
 ---
 
 ## 6. 子网路由设计
@@ -2039,7 +2121,7 @@ Client A               Controller               Client B
 | nodes           | 节点信息           |
 | servers         | Relay/STUN 服务器  |
 | routes          | 子网路由           |
-| auth_keys       | AuthKey 认证密钥   |
+| authkeys        | AuthKey 认证密钥   |
 | latency_reports | 延迟数据           |
 | p2p_connections | P2P 连接状态       |
 | endpoints       | 节点端点           |
@@ -2076,7 +2158,7 @@ Client A               Controller               Client B
 | created_at    | timestamp | 创建时间            |
 | last_login    | timestamp | 最后登录时间        |
 
-#### AuthKey 表 (auth_keys) 字段
+#### AuthKey 表 (authkeys) 字段
 
 | 字段        | 类型      | 说明                            |
 | ----------- | --------- | ------------------------------- |
@@ -3377,7 +3459,7 @@ Exit Node 管理。
 EdgeLink Client 1.0.0
   Protocol:   0x02
   Build:      2026-01-10 (abc1234)
-  Go/C++:     C++23
+  Language:   C++23
   Platform:   linux/amd64
 ```
 
@@ -3484,7 +3566,7 @@ EdgeLink 使用 CMake 作为构建系统，所有第三方依赖**必须**通过
 | ------------ | --------------------------------------------- |
 | 版本指定     | 必须使用 `GIT_TAG` 指定 commit hash           |
 | 禁止使用     | master 分支、origin/master-with-bazel         |
-| 示例         | `GIT_TAG ae223d6138807a13006342edfeef32e813f4`|
+| 示例         | `GIT_TAG ae223d6138807a13006342edfeef32e813f4b9`|
 | 更新记录     | 在 cmake 文件中注释更新日期和原因             |
 
 #### 15.3.3 依赖声明位置
@@ -3817,7 +3899,10 @@ Controller 使用 SQLite 持久化存储，以下为核心表结构。
 | id             | INTEGER   | PRIMARY KEY AUTOINCREMENT | 用户 ID                 |
 | username       | TEXT      | UNIQUE NOT NULL           | 用户名                  |
 | password_hash  | TEXT      | NOT NULL                  | 密码哈希 (Argon2id)     |
+| email          | TEXT      |                           | 邮箱地址                |
 | role           | TEXT      | NOT NULL DEFAULT 'user'   | 角色: admin/user        |
+| enabled        | INTEGER   | NOT NULL DEFAULT 1        | 是否启用 (0/1)          |
+| last_login     | INTEGER   |                           | 最后登录时间 (毫秒时间戳) |
 | created_at     | INTEGER   | NOT NULL                  | 创建时间 (毫秒时间戳)   |
 | updated_at     | INTEGER   | NOT NULL                  | 更新时间 (毫秒时间戳)   |
 
@@ -3845,6 +3930,8 @@ Controller 使用 SQLite 持久化存储，以下为核心表结构。
 | os             | TEXT      |                           | 操作系统                |
 | arch           | TEXT      |                           | CPU 架构                |
 | version        | TEXT      |                           | 客户端版本              |
+| is_exit_node   | INTEGER   | NOT NULL DEFAULT 0        | 是否为 Exit Node        |
+| is_gateway     | INTEGER   | NOT NULL DEFAULT 0        | 是否为子网网关          |
 | last_seen      | INTEGER   |                           | 最后在线时间 (毫秒时间戳) |
 | created_at     | INTEGER   | NOT NULL                  | 创建时间 (毫秒时间戳)   |
 
@@ -3950,6 +4037,7 @@ CREATE INDEX idx_routes_network ON routes(network_id);
 CREATE INDEX idx_routes_prefix ON routes(prefix);
 CREATE INDEX idx_authkeys_user ON authkeys(user_id);
 CREATE INDEX idx_authkeys_network ON authkeys(network_id);
+CREATE UNIQUE INDEX idx_authkeys_key ON authkeys(key);
 CREATE INDEX idx_endpoints_node ON endpoints(node_id);
 CREATE INDEX idx_latency_node_server ON latency_reports(node_id, server_id);
 CREATE UNIQUE INDEX idx_user_nodes_unique ON user_nodes(user_id, node_id);
