@@ -1,0 +1,10 @@
+FROM alpine:latest
+
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY edgelink-client /usr/local/bin/edgelink-client
+
+RUN chmod +x /usr/local/bin/edgelink-client
+
+ENTRYPOINT ["/usr/local/bin/edgelink-client"]
+CMD ["-c", "/etc/edgelink/client.json"]

@@ -1,0 +1,12 @@
+FROM alpine:latest
+
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY edgelink-controller /usr/local/bin/edgelink-controller
+
+RUN chmod +x /usr/local/bin/edgelink-controller
+
+EXPOSE 8080 443
+
+ENTRYPOINT ["/usr/local/bin/edgelink-controller"]
+CMD ["-c", "/etc/edgelink/controller.json"]
