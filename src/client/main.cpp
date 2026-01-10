@@ -533,6 +533,8 @@ int cmd_up(int argc, char* argv[]) {
         client_cfg.auto_reconnect = cfg.auto_reconnect;
         client_cfg.reconnect_interval = cfg.reconnect_interval;
         client_cfg.ping_interval = cfg.ping_interval;
+        client_cfg.dns_refresh_interval = cfg.dns_refresh_interval;
+        client_cfg.latency_measure_interval = cfg.latency_measure_interval;
         client_cfg.state_dir = cfg.state_dir;
         client_cfg.enable_tun = cfg.enable_tun;
         client_cfg.tun_name = cfg.tun_name;

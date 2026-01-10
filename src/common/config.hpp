@@ -74,7 +74,9 @@ struct ClientConfig {
     // Auto-reconnect settings
     bool auto_reconnect = true;
     std::chrono::seconds reconnect_interval{5};
-    std::chrono::seconds ping_interval{30};
+    std::chrono::seconds ping_interval{5};
+    std::chrono::seconds dns_refresh_interval{60};
+    std::chrono::seconds latency_measure_interval{30};
 
     // Key storage
     std::string state_dir;  // Directory for storing keys, empty = auto

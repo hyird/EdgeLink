@@ -25,6 +25,9 @@ ping_interval = 5
 # DNS refresh interval in seconds (detect server IP changes, 0 = disabled)
 dns_refresh_interval = 60
 
+# Automatic peer latency measurement interval in seconds (0 = disabled)
+latency_measure_interval = 30
+
 [ssl]
 # Enable SSL certificate verification (default: false for development)
 # Set to true in production environments
