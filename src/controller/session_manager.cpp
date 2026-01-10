@@ -12,25 +12,44 @@ SessionManager::SessionManager(asio::io_context& ioc, Database& db, JwtUtil& jwt
 // ============================================================================
 
 void SessionManager::register_control_session(NodeId node_id, std::shared_ptr<ISession> session) {
-    std::unique_lock lock(control_mutex_);
+    {
+        std::unique_lock lock(control_mutex_);
 
-    // Unregister existing session if any
-    auto it = control_sessions_.find(node_id);
-    if (it != control_sessions_.end()) {
-        spdlog::info("Replacing existing control session for node {}", node_id);
+        // Unregister existing session if any
+        auto it = control_sessions_.find(node_id);
+        if (it != control_sessions_.end()) {
+            spdlog::info("Replacing existing control session for node {}", node_id);
+        }
+
+        control_sessions_[node_id] = session;
     }
 
-    control_sessions_[node_id] = session;
+    // Cache the node IP for fast lookup (avoid DB query on every data forward)
+    auto node = db_.get_node(node_id);
+    if (node) {
+        std::unique_lock lock(ip_cache_mutex_);
+        node_ip_cache_[node_id] = node->virtual_ip.to_string();
+    }
+
     spdlog::debug("Registered control session for node {}", node_id);
 }
 
 void SessionManager::unregister_control_session(NodeId node_id) {
-    std::unique_lock lock(control_mutex_);
-    auto it = control_sessions_.find(node_id);
-    if (it != control_sessions_.end()) {
-        control_sessions_.erase(it);
-        spdlog::debug("Unregistered control session for node {}", node_id);
+    {
+        std::unique_lock lock(control_mutex_);
+        auto it = control_sessions_.find(node_id);
+        if (it != control_sessions_.end()) {
+            control_sessions_.erase(it);
+        }
     }
+
+    // Remove from IP cache
+    {
+        std::unique_lock lock(ip_cache_mutex_);
+        node_ip_cache_.erase(node_id);
+    }
+
+    spdlog::debug("Unregistered control session for node {}", node_id);
 }
 
 std::shared_ptr<ISession> SessionManager::get_control_session(NodeId node_id) {
@@ -176,11 +195,17 @@ size_t SessionManager::relay_session_count() const {
 }
 
 std::string SessionManager::get_node_ip_str(NodeId node_id) {
-    auto node = db_.get_node(node_id);
-    if (!node) {
-        return std::to_string(node_id);  // Fallback to node ID
+    // Try cache first (fast path, no DB access)
+    {
+        std::shared_lock lock(ip_cache_mutex_);
+        auto it = node_ip_cache_.find(node_id);
+        if (it != node_ip_cache_.end()) {
+            return it->second;
+        }
     }
-    return node->virtual_ip.to_string();
+
+    // Fallback to node ID (don't query DB on hot path)
+    return std::to_string(node_id);
 }
 
 } // namespace edgelink::controller

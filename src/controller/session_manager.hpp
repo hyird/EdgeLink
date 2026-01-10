@@ -85,6 +85,10 @@ private:
     mutable std::shared_mutex relay_mutex_;
     std::unordered_map<NodeId, std::shared_ptr<ISession>> relay_sessions_;
 
+    // Node IP cache (populated on control session registration)
+    mutable std::shared_mutex ip_cache_mutex_;
+    std::unordered_map<NodeId, std::string> node_ip_cache_;
+
     // Config version counter
     std::atomic<uint64_t> config_version_{1};
 };
