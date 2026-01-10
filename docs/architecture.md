@@ -115,112 +115,106 @@ failover_timeout = 5000  # 切换超时 (毫秒)
 
 ### 2.1 并发模型
 
-- 使用 Boost.Asio + Boost.Coroutine (awaitable)
-- 每个线程独立 io_context (thread-per-core 模型)
-- 连接通过 round-robin 分配到各线程
-- 每个 WebSocket 连接对应一个协程
-- 连接生命周期内所有操作在同一线程完成
-
-### 2.2 Listener 设计
-
-#### Linux 平台
-
-| 方案        | 说明                                    |
-| ----------- | --------------------------------------- |
-| SO_REUSEPORT | 每个 IO 线程独立 acceptor              |
-| 负载分发    | 内核自动在多个 acceptor 间分发连接     |
-| 无锁设计    | 连接在 accept 时即绑定到目标线程       |
-
-#### Windows 平台
-
-| 方案        | 说明                                    |
-| ----------- | --------------------------------------- |
-| 单 Acceptor | 主线程单个 acceptor                    |
-| IOCP 分发   | Accept 后将 socket move 到目标 io_context |
-| Strand      | 使用 strand 确保线程安全               |
-
-#### 分发算法
-
-| 算法        | 说明                                    |
-| ----------- | --------------------------------------- |
-| Round-Robin | 默认，简单均匀                         |
-| 最少连接    | 可选，适合长连接场景                   |
-| 连接亲和性  | 基于 client IP hash，保持会话粘性       |
-
-### 2.3 线程亲和性设计
-
-| 原则       | 说明                                     |
-| ---------- | ---------------------------------------- |
-| 连接绑定   | 每个连接固定在一个线程，不迁移           |
-| 数据本地化 | 会话状态、缓冲区等数据存储在连接所属线程 |
-| 避免跨线程 | 同线程内的连接间通信直接调用，无需加锁   |
-| 必要跨线程 | 仅在跨线程转发数据时使用无锁队列         |
-
-### 2.4 跨线程通信场景
-
-| 场景              | 方案                                  |
-| ----------------- | ------------------------------------- |
-| 数据转发 (同线程) | 直接调用目标 Session 的发送方法       |
-| 数据转发 (跨线程) | 通过 MPSC 无锁队列投递到目标线程      |
-| 广播消息          | 每个线程维护本地会话列表，各自广播    |
-| 全局统计          | 各线程本地统计，定期汇总或使用 atomic |
-
-### 2.5 背压机制
-
-**MPSC 队列背压策略**：
-
-| 参数                   | 默认值 | 说明                                |
-| ---------------------- | ------ | ----------------------------------- |
-| queue_capacity         | 65536  | 队列最大容量 (条消息)               |
-| high_watermark         | 80%    | 高水位线，触发背压                  |
-| low_watermark          | 50%    | 低水位线，恢复正常                  |
-| drop_policy            | oldest | 满时丢弃策略: oldest/newest/reject  |
-
-**背压处理流程**：
+- 使用 Boost.Asio + C++20 Coroutines (awaitable)
+- **单 io_context + 多线程** 模型
+- 多个线程共同运行同一个 io_context
+- 每个 WebSocket 连接对应独立的 read_loop 和 write_loop 协程
+- Session 的操作可能在任意线程执行
 
 ```
-队列状态:
-    if queue.size() >= high_watermark:
-        enter_backpressure_mode()
-        log_warn("Queue high watermark reached")
-
-    if in_backpressure_mode && queue.size() <= low_watermark:
-        exit_backpressure_mode()
-
-消息入队:
-    if queue.full():
-        if drop_policy == "oldest":
-            queue.pop_front()  # 丢弃最旧
-            dropped_counter++
-        elif drop_policy == "newest":
-            return false       # 丢弃新消息
-            dropped_counter++
-        else:  # reject
-            return false       # 拒绝，由调用方处理
-
-        log_warn("Queue overflow, dropped: {}", dropped_counter)
-
-    queue.push(msg)
+┌─────────────────────────────────────────┐
+│           单个 io_context                │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐   │
+│  │ Thread 1│ │ Thread 2│ │ Thread N│   │
+│  │  run()  │ │  run()  │ │  run()  │   │
+│  └─────────┘ └─────────┘ └─────────┘   │
+│         ↓         ↓         ↓          │
+│  ┌─────────────────────────────────┐   │
+│  │    任意 session 的任意操作       │   │
+│  │    可能在任意线程执行            │   │
+│  └─────────────────────────────────┘   │
+└─────────────────────────────────────────┘
 ```
+
+### 2.2 跨线程通信设计
+
+由于同一 session 的操作可能在不同线程执行，跨 session 通信需要线程安全的机制。
+
+#### concurrent_channel 方案
+
+使用 `boost::asio::experimental::concurrent_channel` 实现无锁线程安全的消息传递：
+
+| 组件         | 说明                                        |
+| ------------ | ------------------------------------------- |
+| WriteChannel | 每个 Session 拥有一个 concurrent_channel    |
+| 生产者       | 任意线程调用 `try_send()` 投递数据          |
+| 消费者       | write_loop 协程调用 `async_receive()` 接收  |
+| 容量         | 默认 1024 条消息缓冲                        |
+
+```cpp
+// Session 写入通道定义
+using WriteChannel = asio::experimental::concurrent_channel<
+    void(boost::system::error_code, std::vector<uint8_t>)>;
+WriteChannel write_channel_;
+
+// 发送数据 (任意线程，无锁)
+void send_raw(std::span<const uint8_t> data) {
+    write_channel_.try_send(ec, std::vector<uint8_t>(data));
+}
+
+// 写入循环 (协程)
+awaitable<void> write_loop() {
+    while (ws_.is_open()) {
+        auto [ec, data] = co_await write_channel_.async_receive();
+        co_await ws_.async_write(asio::buffer(data));
+    }
+}
+```
+
+#### 设计优势
+
+| 特性         | 说明                                        |
+| ------------ | ------------------------------------------- |
+| 无锁         | concurrent_channel 内部使用无锁算法         |
+| 类型安全     | 编译期检查消息类型                          |
+| 协程友好     | 原生支持 awaitable                          |
+| 背压支持     | 通道满时 try_send 返回 false                |
+
+### 2.3 Listener 设计
+
+#### 跨平台方案
+
+| 平台    | 方案                                         |
+| ------- | -------------------------------------------- |
+| Linux   | 单 acceptor，io_context 多线程自动负载均衡   |
+| Windows | 单 acceptor，IOCP 自动分发到工作线程         |
+| macOS   | 单 acceptor，kqueue 自动负载均衡             |
+
+### 2.4 背压机制
+
+**concurrent_channel 背压策略**：
+
+| 参数             | 默认值 | 说明                                |
+| ---------------- | ------ | ----------------------------------- |
+| channel_capacity | 1024   | 通道最大容量 (条消息)               |
+| try_send 失败    | 丢弃   | 通道满时丢弃新消息并记录警告        |
 
 **监控指标**：
 
 | 指标                          | 类型      | 说明                |
 | ----------------------------- | --------- | ------------------- |
-| `queue_size`                  | Gauge     | 当前队列大小        |
-| `queue_capacity`              | Gauge     | 队列容量            |
-| `queue_dropped_total`         | Counter   | 累计丢弃消息数      |
-| `backpressure_active`         | Gauge     | 是否处于背压状态    |
-| `backpressure_duration_sec`   | Histogram | 背压持续时间        |
+| `channel_full_count`          | Counter   | 通道满导致丢弃次数  |
+| `messages_sent_total`         | Counter   | 累计发送消息数      |
+| `messages_received_total`     | Counter   | 累计接收消息数      |
 
-### 2.6 无锁设计要求
+### 2.5 无锁设计要求
 
-| 数据结构       | 无锁方案                           |
-| -------------- | ---------------------------------- |
-| 跨线程消息队列 | MPSC 无锁队列 (每线程一个入口队列) |
-| 线程本地会话表 | 无需加锁 (单线程访问)              |
-| 全局统计计数   | std::atomic                        |
-| 节点位置缓存   | 每线程本地副本 + 定期同步          |
+| 数据结构         | 无锁方案                               |
+| ---------------- | -------------------------------------- |
+| Session 写入队列 | concurrent_channel (无锁线程安全)      |
+| SessionManager   | std::shared_mutex (读多写少场景)       |
+| 全局统计计数     | std::atomic                            |
+| 配置版本号       | std::atomic<uint64_t>                  |
 
 ### 2.7 NodeLocationCache 设计
 
