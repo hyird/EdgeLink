@@ -33,10 +33,13 @@ asio::awaitable<void> SessionBase<StreamType>::send_raw(std::span<const uint8_t>
     std::vector<uint8_t> copy(data.begin(), data.end());
 
     // Dispatch to strand to ensure thread-safe access to write_queue_ and write_timer_
-    asio::dispatch(strand_, [this, d = std::move(copy)]() mutable {
-        write_queue_.push(std::move(d));
-        if (!writing_) {
-            write_timer_.cancel();
+    // Capture shared_ptr to prevent session destruction before dispatch completes
+    auto self = this->shared_from_this();
+    asio::dispatch(strand_, [self, d = std::move(copy)]() mutable {
+        auto* session = static_cast<SessionBase<StreamType>*>(self.get());
+        session->write_queue_.push(std::move(d));
+        if (!session->writing_) {
+            session->write_timer_.cancel();
         }
     });
     co_return;
