@@ -175,4 +175,12 @@ size_t SessionManager::relay_session_count() const {
     return relay_sessions_.size();
 }
 
+std::string SessionManager::get_node_ip_str(NodeId node_id) {
+    auto node = db_.get_node(node_id);
+    if (!node) {
+        return std::to_string(node_id);  // Fallback to node ID
+    }
+    return node->virtual_ip.to_string();
+}
+
 } // namespace edgelink::controller

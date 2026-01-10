@@ -65,6 +65,9 @@ public:
     JwtUtil& jwt() { return jwt_; }
     asio::io_context& io_context() { return ioc_; }
 
+    // Get node IP string for logging (returns node_id as string if not found)
+    std::string get_node_ip_str(NodeId node_id);
+
     // Config version (incremented on any config change)
     uint64_t current_config_version() const { return config_version_.load(); }
     uint64_t next_config_version() { return ++config_version_; }

@@ -509,13 +509,15 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_data(const Frame& fra
         co_return; // Silently drop malformed data
     }
 
-    spdlog::debug("Relay: DATA from {} to {} ({} bytes)",
-                  data->src_node, data->dst_node, frame.payload.size());
+    auto src_ip = this->manager_.get_node_ip_str(data->src_node);
+    auto dst_ip = this->manager_.get_node_ip_str(data->dst_node);
+
+    spdlog::debug("Relay: DATA from {} to {} ({} bytes)", src_ip, dst_ip, frame.payload.size());
 
     // Verify src_node matches authenticated node
     if (data->src_node != this->node_id_) {
         spdlog::warn("Node {} attempted to send DATA with src_node={}",
-                     this->node_id_, data->src_node);
+                     this->manager_.get_node_ip_str(this->node_id_), src_ip);
         co_return;
     }
 
@@ -523,8 +525,7 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_data(const Frame& fra
     auto target = this->manager_.get_relay_session(data->dst_node);
     if (!target) {
         // Target not connected to relay, drop silently
-        spdlog::warn("Relay: DATA from {} to {} dropped: target not on relay",
-                      data->src_node, data->dst_node);
+        spdlog::warn("Relay: DATA from {} to {} dropped: target not on relay", src_ip, dst_ip);
         co_return;
     }
 
@@ -532,8 +533,7 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_data(const Frame& fra
     auto frame_data = FrameCodec::encode(FrameType::DATA, frame.payload);
     co_await target->send_raw(frame_data);
 
-    spdlog::debug("Relay: forwarded DATA from {} to {} ({} bytes)",
-                  data->src_node, data->dst_node, frame.payload.size());
+    spdlog::debug("Relay: forwarded DATA from {} to {} ({} bytes)", src_ip, dst_ip, frame.payload.size());
 }
 
 template<typename StreamType>
