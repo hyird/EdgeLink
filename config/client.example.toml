@@ -24,6 +24,19 @@ ping_interval = 30
 # If not specified, uses platform-specific default
 # state_dir = "/var/lib/edgelink"
 
+[tun]
+# Enable TUN device for IP-level routing (allows ping between virtual IPs)
+# Requires administrator/root privileges
+enable = false
+
+# TUN device name (empty = auto-generate)
+# Linux: e.g., "edgelink0"
+# Windows: e.g., "EdgeLink"
+# name = ""
+
+# MTU for TUN device (default: 1420)
+# mtu = 1420
+
 [log]
 # Log level: trace, debug, info, warn, error
 level = "info"

@@ -72,6 +72,11 @@ struct ClientConfig {
     // Key storage
     std::string state_dir;  // Directory for storing keys, empty = auto
 
+    // TUN device settings
+    bool enable_tun = false;       // Enable TUN device for IP-level routing
+    std::string tun_name;          // TUN device name (empty = auto)
+    uint32_t tun_mtu = 1420;       // MTU for TUN device
+
     // Logging
     std::string log_level = "info";
     std::string log_file;

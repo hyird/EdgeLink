@@ -57,13 +57,17 @@ void print_help() {
               << "  -c, --config FILE     Load configuration from TOML file\n"
               << "  --controller URL      Controller URL (default: wss://localhost:8443/api/v1/control)\n"
               << "  -a, --authkey KEY     AuthKey for authentication\n"
+              << "  --tun                 Enable TUN device for IP-level routing\n"
+              << "  --tun-name NAME       TUN device name (default: auto)\n"
+              << "  --tun-mtu MTU         TUN device MTU (default: 1420)\n"
               << "  -t, --test PEER MSG   Send test message to peer IP after connecting\n"
               << "  -d, --debug           Enable debug logging\n"
               << "  -v, --verbose         Enable verbose (trace) logging\n"
               << "  -h, --help            Show this help\n\n"
               << "Example:\n"
-              << "  edgelink-client -a tskey-dev-test123 -t 10.0.0.2 \"Hello\"\n"
-              << "  edgelink-client -c client.toml\n";
+              << "  edgelink-client -a tskey-dev-test123 --tun\n"
+              << "  edgelink-client -c client.toml\n"
+              << "  edgelink-client -a tskey-dev-test123 -t 10.0.0.2 \"Hello\"\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -106,6 +110,12 @@ int main(int argc, char* argv[]) {
         } else if ((arg == "-t" || arg == "--test") && i + 2 < argc) {
             test_peer_ip = argv[++i];
             test_message = argv[++i];
+        } else if (arg == "--tun") {
+            cfg.enable_tun = true;
+        } else if (arg == "--tun-name" && i + 1 < argc) {
+            cfg.tun_name = argv[++i];
+        } else if (arg == "--tun-mtu" && i + 1 < argc) {
+            cfg.tun_mtu = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "-d" || arg == "--debug") {
             cfg.log_level = "debug";
         } else if (arg == "-v" || arg == "--verbose") {
@@ -143,6 +153,9 @@ int main(int argc, char* argv[]) {
         client_cfg.auto_reconnect = cfg.auto_reconnect;
         client_cfg.reconnect_interval = cfg.reconnect_interval;
         client_cfg.ping_interval = cfg.ping_interval;
+        client_cfg.enable_tun = cfg.enable_tun;
+        client_cfg.tun_name = cfg.tun_name;
+        client_cfg.tun_mtu = cfg.tun_mtu;
 
         // Create client
         auto client = std::make_shared<Client>(ioc, client_cfg);
@@ -209,6 +222,9 @@ int main(int argc, char* argv[]) {
 
         spdlog::info("Client running, press Ctrl+C to stop");
         spdlog::info("  Controller: {}", cfg.controller_url);
+        if (cfg.enable_tun) {
+            spdlog::info("  TUN mode: enabled (MTU={})", cfg.tun_mtu);
+        }
 
         // Run IO context
         ioc.run();

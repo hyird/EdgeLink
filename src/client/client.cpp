@@ -29,7 +29,9 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     ssl_ctx_.set_verify_mode(ssl::verify_none); // TODO: proper verification
 }
 
-Client::~Client() = default;
+Client::~Client() {
+    teardown_tun();
+}
 
 void Client::set_callbacks(ClientCallbacks callbacks) {
     callbacks_ = std::move(callbacks);
@@ -80,6 +82,16 @@ void Client::setup_callbacks() {
 
     relay_cbs.on_data = [this](NodeId src, std::span<const uint8_t> data) {
         spdlog::trace("Received {} bytes from node {}", data.size(), src);
+
+        // If TUN mode is enabled, write IP packets to TUN device
+        if (is_tun_enabled() && ip_packet::version(data) == 4) {
+            auto result = tun_->write(data);
+            if (!result) {
+                spdlog::debug("Failed to write to TUN: {}", tun_error_message(result.error()));
+            }
+        }
+
+        // Call user callback
         if (callbacks_.on_data_received) {
             callbacks_.on_data_received(src, data);
         }
@@ -88,6 +100,13 @@ void Client::setup_callbacks() {
     relay_cbs.on_connected = [this]() {
         spdlog::info("Relay channel connected");
         state_ = ClientState::RUNNING;
+
+        // Setup TUN if enabled
+        if (config_.enable_tun) {
+            if (!setup_tun()) {
+                spdlog::warn("TUN mode requested but failed to setup TUN device");
+            }
+        }
 
         if (callbacks_.on_connected) {
             callbacks_.on_connected();
@@ -105,6 +124,81 @@ void Client::setup_callbacks() {
     };
 
     relay_->set_callbacks(std::move(relay_cbs));
+}
+
+bool Client::setup_tun() {
+    if (!control_ || !control_->is_connected()) {
+        spdlog::error("Cannot setup TUN: not connected");
+        return false;
+    }
+
+    // Create TUN device
+    tun_ = TunDevice::create(ioc_);
+    if (!tun_) {
+        spdlog::error("Failed to create TUN device");
+        return false;
+    }
+
+    // Open TUN device
+    auto result = tun_->open(config_.tun_name);
+    if (!result) {
+        spdlog::error("Failed to open TUN device: {}", tun_error_message(result.error()));
+        tun_.reset();
+        return false;
+    }
+
+    // Configure TUN device with our virtual IP
+    auto vip = control_->virtual_ip();
+    auto netmask = IPv4Address::from_string("255.0.0.0");  // /8 for 10.x.x.x
+
+    result = tun_->configure(vip, netmask, config_.tun_mtu);
+    if (!result) {
+        spdlog::error("Failed to configure TUN device: {}", tun_error_message(result.error()));
+        tun_->close();
+        tun_.reset();
+        return false;
+    }
+
+    // Start reading packets from TUN
+    tun_->start_read([this](std::span<const uint8_t> packet) {
+        on_tun_packet(packet);
+    });
+
+    spdlog::info("TUN device enabled: {} with IP {}", tun_->name(), vip.to_string());
+    return true;
+}
+
+void Client::teardown_tun() {
+    if (tun_) {
+        tun_->stop_read();
+        tun_->close();
+        tun_.reset();
+        spdlog::info("TUN device closed");
+    }
+}
+
+void Client::on_tun_packet(std::span<const uint8_t> packet) {
+    // Validate IPv4 packet
+    if (packet.size() < 20 || ip_packet::version(packet) != 4) {
+        return;
+    }
+
+    // Get destination IP
+    auto dst_ip = ip_packet::dst_ipv4(packet);
+
+    // Find peer by destination IP
+    auto peer = peers_.get_peer_by_ip(dst_ip);
+    if (!peer) {
+        spdlog::trace("TUN packet to unknown IP {}, dropping", dst_ip.to_string());
+        return;
+    }
+
+    // Send via relay
+    asio::co_spawn(ioc_, [this, peer_id = peer->info.node_id,
+                          data = std::vector<uint8_t>(packet.begin(), packet.end())]()
+                          -> asio::awaitable<void> {
+        co_await send_to_peer(peer_id, data);
+    }, asio::detached);
 }
 
 asio::awaitable<bool> Client::start() {
@@ -194,6 +288,9 @@ asio::awaitable<bool> Client::start() {
     spdlog::info("  Node ID: {}", crypto_.node_id());
     spdlog::info("  Virtual IP: {}", control_->virtual_ip().to_string());
     spdlog::info("  Peers: {}", peers_.peer_count());
+    if (is_tun_enabled()) {
+        spdlog::info("  TUN device: {}", tun_->name());
+    }
 
     co_return true;
 }
@@ -203,6 +300,9 @@ asio::awaitable<void> Client::stop() {
 
     keepalive_timer_.cancel();
     reconnect_timer_.cancel();
+
+    // Teardown TUN first
+    teardown_tun();
 
     if (relay_) {
         co_await relay_->close();
@@ -239,6 +339,20 @@ asio::awaitable<bool> Client::send_to_ip(const IPv4Address& ip, std::span<const 
     co_return co_await send_to_peer(peer->info.node_id, data);
 }
 
+asio::awaitable<bool> Client::send_ip_packet(std::span<const uint8_t> packet) {
+    // Validate IPv4 packet
+    if (packet.size() < 20 || ip_packet::version(packet) != 4) {
+        spdlog::warn("Invalid IP packet");
+        co_return false;
+    }
+
+    // Get destination IP from packet
+    auto dst_ip = ip_packet::dst_ipv4(packet);
+
+    // Send to peer with that IP
+    co_return co_await send_to_ip(dst_ip, packet);
+}
+
 asio::awaitable<void> Client::keepalive_loop() {
     while (state_ == ClientState::RUNNING) {
         try {
@@ -264,6 +378,9 @@ asio::awaitable<void> Client::reconnect() {
 
     state_ = ClientState::RECONNECTING;
     spdlog::info("Attempting to reconnect...");
+
+    // Teardown TUN on reconnect
+    teardown_tun();
 
     try {
         reconnect_timer_.expires_after(config_.reconnect_interval);

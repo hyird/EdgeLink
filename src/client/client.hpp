@@ -3,6 +3,7 @@
 #include "client/crypto_engine.hpp"
 #include "client/peer_manager.hpp"
 #include "client/channel.hpp"
+#include "client/tun_device.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -22,6 +23,11 @@ struct ClientConfig {
     bool auto_reconnect = true;
     std::chrono::seconds reconnect_interval{5};
     std::chrono::seconds ping_interval{30};
+
+    // TUN mode settings
+    bool enable_tun = false;       // Enable TUN device for IP-level routing
+    std::string tun_name = "";     // TUN device name (empty = auto)
+    uint32_t tun_mtu = 1420;       // MTU for TUN device
 };
 
 // Client state
@@ -62,6 +68,9 @@ public:
     // Send data to a peer by virtual IP
     asio::awaitable<bool> send_to_ip(const IPv4Address& ip, std::span<const uint8_t> data);
 
+    // Send raw IP packet (for TUN mode)
+    asio::awaitable<bool> send_ip_packet(std::span<const uint8_t> packet);
+
     // Set callbacks
     void set_callbacks(ClientCallbacks callbacks);
 
@@ -76,8 +85,17 @@ public:
     CryptoEngine& crypto() { return crypto_; }
     PeerManager& peers() { return peers_; }
 
+    // TUN device (if enabled)
+    TunDevice* tun_device() { return tun_.get(); }
+    bool is_tun_enabled() const { return config_.enable_tun && tun_ && tun_->is_open(); }
+
 private:
     void setup_callbacks();
+
+    // TUN device management
+    bool setup_tun();
+    void teardown_tun();
+    void on_tun_packet(std::span<const uint8_t> packet);
 
     // Keepalive timer
     asio::awaitable<void> keepalive_loop();
@@ -98,6 +116,9 @@ private:
 
     asio::steady_timer keepalive_timer_;
     asio::steady_timer reconnect_timer_;
+
+    // TUN device (optional)
+    std::unique_ptr<TunDevice> tun_;
 
     ClientCallbacks callbacks_;
 };

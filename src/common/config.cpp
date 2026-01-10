@@ -147,6 +147,19 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             }
         }
 
+        // [tun] section
+        if (auto tun = tbl["tun"].as_table()) {
+            if (auto v = (*tun)["enable"].value<bool>()) {
+                config.enable_tun = *v;
+            }
+            if (auto v = (*tun)["name"].value<std::string>()) {
+                config.tun_name = *v;
+            }
+            if (auto v = (*tun)["mtu"].value<int64_t>()) {
+                config.tun_mtu = static_cast<uint32_t>(*v);
+            }
+        }
+
         // [log] section
         if (auto log = tbl["log"].as_table()) {
             if (auto v = (*log)["level"].value<std::string>()) {
