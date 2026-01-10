@@ -31,13 +31,17 @@ template<typename StreamType>
 asio::awaitable<void> SessionBase<StreamType>::send_raw(std::span<const uint8_t> data) {
     std::vector<uint8_t> copy(data.begin(), data.end());
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        write_queue_.push(std::move(copy));
-        if (!writing_) {
-            write_timer_.cancel();
+    // Post to ws_ executor to serialize queue access (lock-free)
+    std::weak_ptr<SessionBase<StreamType>> weak_self = this->shared_from_this();
+    asio::post(ws_.get_executor(), [weak_self, d = std::move(copy)]() mutable {
+        auto self = weak_self.lock();
+        if (!self) return;  // Session already destroyed
+
+        self->write_queue_.push(std::move(d));
+        if (!self->writing_) {
+            self->write_timer_.cancel();
         }
-    }
+    });
     co_return;
 }
 
@@ -82,17 +86,8 @@ template<typename StreamType>
 asio::awaitable<void> SessionBase<StreamType>::write_loop() {
     try {
         while (ws_.is_open()) {
-            // Check queue under lock
-            bool queue_empty;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                queue_empty = write_queue_.empty();
-                if (queue_empty) {
-                    writing_ = false;
-                }
-            }
-
-            if (queue_empty) {
+            if (write_queue_.empty()) {
+                writing_ = false;
                 // Reset timer for next wait
                 write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
                 boost::system::error_code ec;
@@ -106,22 +101,10 @@ asio::awaitable<void> SessionBase<StreamType>::write_loop() {
                 }
             }
 
-            // Process queue
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                writing_ = true;
-            }
-
-            while (ws_.is_open()) {
-                std::vector<uint8_t> data;
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (write_queue_.empty()) {
-                        break;
-                    }
-                    data = std::move(write_queue_.front());
-                    write_queue_.pop();
-                }
+            writing_ = true;
+            while (!write_queue_.empty() && ws_.is_open()) {
+                auto data = std::move(write_queue_.front());
+                write_queue_.pop();
 
                 spdlog::debug("Session write_loop: sending {} bytes to node {}", data.size(), node_id_);
                 co_await ws_.async_write(asio::buffer(data), asio::use_awaitable);

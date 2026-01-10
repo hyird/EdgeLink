@@ -105,8 +105,7 @@ protected:
     NodeId node_id_ = 0;
     NetworkId network_id_ = 0;
 
-    // Write queue (protected by mutex_)
-    std::mutex mutex_;
+    // Write queue (all access must be on ws_ executor via post)
     std::queue<std::vector<uint8_t>> write_queue_;
     bool writing_ = false;
     asio::steady_timer write_timer_;
