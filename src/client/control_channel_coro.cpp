@@ -156,6 +156,9 @@ net::awaitable<bool> ControlChannelCoro::handle_auth_response(const wire::Frame&
 }
 
 net::awaitable<void> ControlChannelCoro::process_frame(const wire::Frame& frame) {
+    LOG_DEBUG("ControlChannelCoro: Processing {} ({} bytes)",
+              wire::message_type_to_string(frame.header.type), frame.payload.size());
+
     switch (frame.header.type) {
         case wire::MessageType::CONFIG:
             handle_config(frame);
@@ -182,8 +185,9 @@ net::awaitable<void> ControlChannelCoro::process_frame(const wire::Frame& frame)
             break;
 
         default:
-            LOG_DEBUG("ControlChannelCoro: Unhandled message type: {}",
-                      static_cast<int>(frame.header.type));
+            LOG_WARN("ControlChannelCoro: Unhandled message type: {} (0x{:02x})",
+                     wire::message_type_to_string(frame.header.type),
+                     static_cast<int>(frame.header.type));
             break;
     }
     co_return;
@@ -288,6 +292,13 @@ void ControlChannelCoro::handle_p2p_endpoint(const wire::Frame& frame) {
         endpoints.push_back(ep.ip + ":" + std::to_string(ep.port));
     }
 
+    LOG_DEBUG("ControlChannelCoro: Received P2P_ENDPOINT for peer {} with {} endpoints, NAT type={}",
+              payload.peer_node_id, endpoints.size(),
+              wire::nat_type_to_string(static_cast<wire::NATType>(payload.nat_type)));
+    for (size_t i = 0; i < endpoints.size(); ++i) {
+        LOG_TRACE("ControlChannelCoro:   Endpoint[{}]: {}", i, endpoints[i]);
+    }
+
     if (control_callbacks_.on_p2p_endpoints) {
         control_callbacks_.on_p2p_endpoints(payload.peer_node_id, endpoints, payload.nat_type);
     }
@@ -305,6 +316,13 @@ void ControlChannelCoro::handle_p2p_init(const wire::Frame& frame) {
     std::vector<std::string> endpoints;
     for (const auto& ep : payload.endpoints) {
         endpoints.push_back(ep.ip + ":" + std::to_string(ep.port));
+    }
+
+    LOG_INFO("ControlChannelCoro: P2P_INIT from peer {} with {} endpoints, NAT type={}",
+             payload.peer_node_id, endpoints.size(),
+             wire::nat_type_to_string(static_cast<wire::NATType>(payload.nat_type)));
+    for (size_t i = 0; i < endpoints.size(); ++i) {
+        LOG_DEBUG("ControlChannelCoro:   Endpoint[{}]: {}", i, endpoints[i]);
     }
 
     if (control_callbacks_.on_p2p_init) {

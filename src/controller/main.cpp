@@ -266,7 +266,7 @@ int main(int argc, char* argv[]) {
 
     // Initialize logging
     if (quiet) {
-        log::set_level(spdlog::level::off);
+        log::set_level(log::Level::Off);
     } else {
         log::init_from_env();
     }

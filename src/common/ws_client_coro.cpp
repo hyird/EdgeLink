@@ -72,6 +72,10 @@ void WsClientCoro::send_binary(std::vector<uint8_t> data) {
 }
 
 void WsClientCoro::send_frame(const wire::Frame& frame) {
+    LOG_TRACE("{}: TX frame type={} ({}) size={} flags=0x{:02x}",
+              name_, static_cast<int>(frame.header.type),
+              wire::message_type_to_string(frame.header.type),
+              frame.payload.size(), frame.header.flags);
     auto data = frame.serialize();
     enqueue_send(std::move(data), false);
 }
@@ -93,11 +97,23 @@ WsClientCoro::Stats WsClientCoro::stats() const {
     return s;
 }
 
+static const char* state_to_string(WsClientCoro::State s) {
+    switch (s) {
+        case WsClientCoro::State::INIT: return "INIT";
+        case WsClientCoro::State::CONNECTING: return "CONNECTING";
+        case WsClientCoro::State::AUTHENTICATING: return "AUTHENTICATING";
+        case WsClientCoro::State::CONNECTED: return "CONNECTED";
+        case WsClientCoro::State::RECONNECTING: return "RECONNECTING";
+        case WsClientCoro::State::STOPPED: return "STOPPED";
+        default: return "UNKNOWN";
+    }
+}
+
 void WsClientCoro::set_state(State new_state) {
     State old_state = state_.exchange(new_state, std::memory_order_acq_rel);
     if (old_state != new_state) {
         LOG_DEBUG("{}: State {} -> {}", name_,
-                  static_cast<int>(old_state), static_cast<int>(new_state));
+                  state_to_string(old_state), state_to_string(new_state));
     }
 }
 
@@ -315,6 +331,11 @@ net::awaitable<void> WsClientCoro::reader() {
             auto frame_opt = wire::Frame::deserialize(span);
             if (frame_opt) {
                 frames_received_.fetch_add(1, std::memory_order_relaxed);
+
+                LOG_TRACE("{}: RX frame type={} ({}) size={} flags=0x{:02x}",
+                          name_, static_cast<int>(frame_opt->header.type),
+                          wire::message_type_to_string(frame_opt->header.type),
+                          frame_opt->payload.size(), frame_opt->header.flags);
 
                 // Handle pong specially for RTT measurement
                 if (frame_opt->header.type == wire::MessageType::PONG) {

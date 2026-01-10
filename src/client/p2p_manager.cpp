@@ -218,15 +218,19 @@ bool P2PManager::send_to_peer(uint32_t peer_node_id, const std::vector<uint8_t>&
     auto& socket = endpoint_manager_->get_udp_socket();
     boost::system::error_code ec;
     socket.send_to(net::buffer(packet), conn->active_endpoint, 0, ec);
-    
+
     if (ec) {
         LOG_WARN("P2PManager: Failed to send to peer {}: {}", peer_node_id, ec.message());
         return false;
     }
-    
+
     conn->packets_sent++;
     conn->bytes_sent += packet.size();
-    
+
+    LOG_TRACE("P2PManager: TX DATA to peer {} at {}:{} ({} bytes)",
+              peer_node_id, conn->active_endpoint.address().to_string(),
+              conn->active_endpoint.port(), packet.size());
+
     return true;
 }
 
@@ -308,12 +312,27 @@ void P2PManager::handle_receive(const boost::system::error_code& ec,
     do_receive();
 }
 
+static const char* p2p_packet_type_name(uint8_t type) {
+    switch (type) {
+        case 0x01: return "PUNCH";
+        case 0x02: return "PING";
+        case 0x03: return "PONG";
+        case 0x04: return "KEEPALIVE";
+        case 0x10: return "DATA";
+        default: return "UNKNOWN";
+    }
+}
+
 void P2PManager::process_p2p_packet(const udp::endpoint& sender,
                                     const uint8_t* data, size_t len) {
     if (len < 1) return;
-    
+
     uint8_t packet_type = data[0];
-    
+
+    LOG_TRACE("P2PManager: RX {} (0x{:02x}) from {}:{} ({} bytes)",
+              p2p_packet_type_name(packet_type), packet_type,
+              sender.address().to_string(), sender.port(), len);
+
     // Find connection by sender endpoint
     auto conn = find_connection_by_endpoint(sender);
     

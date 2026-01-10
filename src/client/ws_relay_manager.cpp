@@ -187,14 +187,22 @@ void WsRelayManager::disconnect_all() {
 }
 
 void WsRelayManager::on_relay_frame(uint32_t relay_id, const wire::Frame& frame) {
+    LOG_TRACE("WsRelayManager: RX from relay {} type={} ({}) size={}",
+              relay_id, static_cast<int>(frame.header.type),
+              wire::message_type_to_string(frame.header.type), frame.payload.size());
+
     switch (frame.header.type) {
         case wire::MessageType::DATA: {
             // Parse DATA frame
             auto data_result = wire::DataPayload::deserialize(frame.payload);
             if (!data_result) {
-                LOG_WARN("WsRelayManager: Invalid DATA frame from relay {}", relay_id);
+                LOG_WARN("WsRelayManager: Invalid DATA frame from relay {} ({} bytes)",
+                         relay_id, frame.payload.size());
                 return;
             }
+
+            LOG_DEBUG("WsRelayManager: DATA from node {} via relay {} ({} bytes encrypted)",
+                      data_result->src_node_id, relay_id, data_result->encrypted_data.size());
 
             // Deliver to callback
             if (callbacks_.on_data_received) {
@@ -207,7 +215,7 @@ void WsRelayManager::on_relay_frame(uint32_t relay_id, const wire::Frame& frame)
         case wire::MessageType::ERROR_MSG: {
             auto result = wire::ErrorPayload::deserialize_binary(frame.payload);
             if (result) {
-                LOG_WARN("WsRelayManager: Error from relay {}: {} - {}",
+                LOG_WARN("WsRelayManager: Error from relay {}: code={} message={}",
                         relay_id, result->code, result->message);
             } else {
                 LOG_WARN("WsRelayManager: Error from relay {} (failed to parse): error={}",
@@ -217,7 +225,8 @@ void WsRelayManager::on_relay_frame(uint32_t relay_id, const wire::Frame& frame)
         }
 
         default:
-            LOG_DEBUG("WsRelayManager: Unhandled message type {} from relay {}",
+            LOG_DEBUG("WsRelayManager: Unhandled message {} (0x{:02x}) from relay {}",
+                     wire::message_type_to_string(frame.header.type),
                      static_cast<int>(frame.header.type), relay_id);
             break;
     }
@@ -265,18 +274,24 @@ std::expected<void, ErrorCode> WsRelayManager::send_via_relay(
         std::lock_guard<std::mutex> lock(relays_mutex_);
         auto it = relays_.find(relay_id);
         if (it == relays_.end()) {
+            LOG_WARN("WsRelayManager: Relay {} not found for sending to node {}", relay_id, dst_node_id);
             return std::unexpected(ErrorCode::NODE_NOT_FOUND);
         }
         relay = it->second;
     }
 
     if (relay->state() != RelayState::CONNECTED) {
+        LOG_DEBUG("WsRelayManager: Relay {} not connected (state={}) for sending to node {}",
+                  relay_id, static_cast<int>(relay->state()), dst_node_id);
         return std::unexpected(ErrorCode::NOT_CONNECTED);
     }
 
     // Create DATA frame
     auto frame = wire::Frame::create(wire::MessageType::DATA, encrypted_data);
     relay->send_frame(frame);
+
+    LOG_TRACE("WsRelayManager: TX DATA to node {} via relay {} ({} bytes)",
+              dst_node_id, relay_id, encrypted_data.size());
 
     return {};
 }

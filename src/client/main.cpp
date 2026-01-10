@@ -59,17 +59,17 @@ void print_usage(const char* program) {
 
 void setup_logging(const std::string& level, bool quiet) {
     if (quiet) {
-        log::set_level(spdlog::level::off);
+        log::set_level(log::Level::Off);
         return;
     }
-    
+
     log::LogConfig config;
-    if (level == "trace") config.level = spdlog::level::trace;
-    else if (level == "debug") config.level = spdlog::level::debug;
-    else if (level == "info") config.level = spdlog::level::info;
-    else if (level == "warn") config.level = spdlog::level::warn;
-    else if (level == "error") config.level = spdlog::level::err;
-    
+    if (level == "trace") config.level = log::Level::Trace;
+    else if (level == "debug") config.level = log::Level::Debug;
+    else if (level == "info") config.level = log::Level::Info;
+    else if (level == "warn") config.level = log::Level::Warn;
+    else if (level == "error") config.level = log::Level::Error;
+
     config.console = true;
     config.file_path = "/var/log/edgelink/client.log";
     log::init(config);
