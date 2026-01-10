@@ -36,12 +36,16 @@ public:
     // Initialize with new or existing keys
     std::expected<void, CryptoEngineError> init();
 
-    // Load keys from storage
+    // Load keys from raw bytes
     std::expected<void, CryptoEngineError> load_keys(
         std::span<const uint8_t, ED25519_PUBLIC_KEY_SIZE> machine_pub,
         std::span<const uint8_t, ED25519_PRIVATE_KEY_SIZE> machine_priv,
         std::span<const uint8_t, X25519_KEY_SIZE> node_pub,
         std::span<const uint8_t, X25519_KEY_SIZE> node_priv);
+
+    // Save/load keys to/from file for persistence
+    std::expected<void, CryptoEngineError> save_keys_to_file(const std::string& path);
+    std::expected<void, CryptoEngineError> load_keys_from_file(const std::string& path);
 
     // Get keys
     const MachineKey& machine_key() const { return machine_key_; }

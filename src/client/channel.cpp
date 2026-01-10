@@ -353,6 +353,9 @@ asio::awaitable<void> ControlChannel::handle_config(const Frame& frame) {
 
     spdlog::info("Received CONFIG v{} with {} peers", config->version, config->peers.size());
 
+    // Save subnet mask for TUN configuration
+    subnet_mask_ = config->subnet_mask;
+
     // Update relay token if present
     if (!config->relay_token.empty()) {
         relay_token_ = config->relay_token;

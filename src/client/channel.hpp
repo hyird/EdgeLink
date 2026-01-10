@@ -94,6 +94,7 @@ public:
     NodeId node_id() const { return node_id_; }
     NetworkId network_id() const { return network_id_; }
     IPv4Address virtual_ip() const { return virtual_ip_; }
+    uint8_t subnet_mask() const { return subnet_mask_; }
     const std::vector<uint8_t>& relay_token() const { return relay_token_; }
 
 private:
@@ -133,6 +134,7 @@ private:
     NodeId node_id_ = 0;
     NetworkId network_id_ = 0;
     IPv4Address virtual_ip_{};
+    uint8_t subnet_mask_ = 16;  // Default /16
     std::vector<uint8_t> auth_token_;
     std::vector<uint8_t> relay_token_;
 

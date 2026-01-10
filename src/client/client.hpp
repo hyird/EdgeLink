@@ -25,6 +25,9 @@ struct ClientConfig {
     std::chrono::seconds reconnect_interval{5};
     std::chrono::seconds ping_interval{30};
 
+    // State directory for storing persistent keys
+    std::string state_dir;  // Empty = platform default
+
     // TUN mode settings
     bool enable_tun = false;       // Enable TUN device for IP-level routing
     std::string tun_name = "";     // TUN device name (empty = auto)

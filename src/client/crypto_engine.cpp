@@ -1,5 +1,7 @@
 #include "client/crypto_engine.hpp"
 #include <spdlog/spdlog.h>
+#include <fstream>
+#include <filesystem>
 
 namespace edgelink::client {
 
@@ -218,6 +220,80 @@ std::expected<std::vector<uint8_t>, CryptoEngineError> CryptoEngine::decrypt(
     }
 
     return *result;
+}
+
+std::expected<void, CryptoEngineError> CryptoEngine::save_keys_to_file(const std::string& path) {
+    // Create parent directory if needed
+    std::filesystem::path file_path(path);
+    if (file_path.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(file_path.parent_path(), ec);
+        if (ec) {
+            spdlog::error("Failed to create key directory: {}", ec.message());
+            return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
+        }
+    }
+
+    // Write keys to file: machine_pub(32) + machine_priv(64) + node_pub(32) + node_priv(32) = 160 bytes
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        spdlog::error("Failed to open key file for writing: {}", path);
+        return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
+    }
+
+    file.write(reinterpret_cast<const char*>(machine_key_.public_key.data()),
+               machine_key_.public_key.size());
+    file.write(reinterpret_cast<const char*>(machine_key_.private_key.data()),
+               machine_key_.private_key.size());
+    file.write(reinterpret_cast<const char*>(node_key_.public_key.data()),
+               node_key_.public_key.size());
+    file.write(reinterpret_cast<const char*>(node_key_.private_key.data()),
+               node_key_.private_key.size());
+
+    if (!file) {
+        spdlog::error("Failed to write keys to file: {}", path);
+        return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
+    }
+
+    spdlog::info("Keys saved to: {}", path);
+    return {};
+}
+
+std::expected<void, CryptoEngineError> CryptoEngine::load_keys_from_file(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        // File doesn't exist - not an error, will generate new keys
+        return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
+    }
+
+    // Read keys: machine_pub(32) + machine_priv(64) + node_pub(32) + node_priv(32) = 160 bytes
+    constexpr size_t expected_size = ED25519_PUBLIC_KEY_SIZE + ED25519_PRIVATE_KEY_SIZE +
+                                      X25519_KEY_SIZE + X25519_KEY_SIZE;
+
+    std::vector<uint8_t> buffer(expected_size);
+    file.read(reinterpret_cast<char*>(buffer.data()), expected_size);
+
+    if (file.gcount() != static_cast<std::streamsize>(expected_size)) {
+        spdlog::warn("Invalid key file size, will generate new keys");
+        return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
+    }
+
+    // Parse buffer
+    size_t offset = 0;
+    std::copy_n(buffer.begin() + offset, ED25519_PUBLIC_KEY_SIZE, machine_key_.public_key.begin());
+    offset += ED25519_PUBLIC_KEY_SIZE;
+    std::copy_n(buffer.begin() + offset, ED25519_PRIVATE_KEY_SIZE, machine_key_.private_key.begin());
+    offset += ED25519_PRIVATE_KEY_SIZE;
+    std::copy_n(buffer.begin() + offset, X25519_KEY_SIZE, node_key_.public_key.begin());
+    offset += X25519_KEY_SIZE;
+    std::copy_n(buffer.begin() + offset, X25519_KEY_SIZE, node_key_.private_key.begin());
+
+    initialized_ = true;
+    spdlog::info("Keys loaded from: {}", path);
+    spdlog::debug("Machine key: {}...", crypto::key_to_hex(machine_key_.public_key).substr(0, 16));
+    spdlog::debug("Node key: {}...", crypto::key_to_hex(node_key_.public_key).substr(0, 16));
+
+    return {};
 }
 
 } // namespace edgelink::client

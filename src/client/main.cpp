@@ -157,6 +157,7 @@ int main(int argc, char* argv[]) {
         client_cfg.auto_reconnect = cfg.auto_reconnect;
         client_cfg.reconnect_interval = cfg.reconnect_interval;
         client_cfg.ping_interval = cfg.ping_interval;
+        client_cfg.state_dir = cfg.state_dir;
         client_cfg.enable_tun = cfg.enable_tun;
         client_cfg.tun_name = cfg.tun_name;
         client_cfg.tun_mtu = cfg.tun_mtu;

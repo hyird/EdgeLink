@@ -203,7 +203,7 @@ std::expected<void, DbError> Database::init_schema() {
     // Create default network if not exists
     auto network = get_network_by_name("default");
     if (!network) {
-        auto created = create_network("default", "10.0.0.0/8");
+        auto created = create_network("default", "100.64.0.0/16");
         if (!created) {
             return std::unexpected(created.error());
         }

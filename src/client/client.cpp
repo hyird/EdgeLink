@@ -81,13 +81,18 @@ void Client::setup_callbacks() {
     RelayChannelCallbacks relay_cbs;
 
     relay_cbs.on_data = [this](NodeId src, std::span<const uint8_t> data) {
-        spdlog::trace("Received {} bytes from node {}", data.size(), src);
+        spdlog::debug("Received {} bytes from node {}", data.size(), src);
 
         // If TUN mode is enabled, write IP packets to TUN device
         if (is_tun_enabled() && ip_packet::version(data) == 4) {
+            auto src_ip = ip_packet::src_ipv4(data);
+            auto dst_ip = ip_packet::dst_ipv4(data);
+            spdlog::debug("Writing to TUN: {} -> {} ({} bytes)",
+                          src_ip.to_string(), dst_ip.to_string(), data.size());
+
             auto result = tun_->write(data);
             if (!result) {
-                spdlog::debug("Failed to write to TUN: {}", tun_error_message(result.error()));
+                spdlog::warn("Failed to write to TUN: {}", tun_error_message(result.error()));
             }
         }
 
@@ -149,7 +154,11 @@ bool Client::setup_tun() {
 
     // Configure TUN device with our virtual IP
     auto vip = control_->virtual_ip();
-    auto netmask = IPv4Address::from_string("255.0.0.0");  // /8 for 10.x.x.x
+
+    // Calculate netmask from prefix length (e.g., /16 -> 255.255.0.0)
+    uint8_t prefix_len = control_->subnet_mask();
+    uint32_t mask = prefix_len == 0 ? 0 : (~0U << (32 - prefix_len));
+    auto netmask = IPv4Address::from_u32(mask);
 
     result = tun_->configure(vip, netmask, config_.tun_mtu);
     if (!result) {
@@ -185,13 +194,21 @@ void Client::on_tun_packet(std::span<const uint8_t> packet) {
 
     // Get destination IP
     auto dst_ip = ip_packet::dst_ipv4(packet);
+    auto src_ip = ip_packet::src_ipv4(packet);
+
+    spdlog::debug("TUN packet: {} -> {} ({} bytes)",
+                  src_ip.to_string(), dst_ip.to_string(), packet.size());
 
     // Find peer by destination IP
     auto peer = peers_.get_peer_by_ip(dst_ip);
     if (!peer) {
-        spdlog::trace("TUN packet to unknown IP {}, dropping", dst_ip.to_string());
+        spdlog::warn("TUN packet to unknown IP {}, dropping (known peers: {})",
+                     dst_ip.to_string(), peers_.peer_count());
         return;
     }
+
+    spdlog::debug("Forwarding to peer {} ({})", peer->info.node_id,
+                  peer->info.online ? "online" : "offline");
 
     // Send via relay
     asio::co_spawn(ioc_, [this, peer_id = peer->info.node_id,
@@ -210,12 +227,30 @@ asio::awaitable<bool> Client::start() {
     state_ = ClientState::STARTING;
     spdlog::info("Starting client...");
 
-    // Initialize crypto
-    auto init_result = crypto_.init();
-    if (!init_result) {
-        spdlog::error("Failed to initialize crypto engine");
-        state_ = ClientState::STOPPED;
-        co_return false;
+    // Determine key file path
+    std::string key_file;
+    if (!config_.state_dir.empty()) {
+        key_file = config_.state_dir + "/keys";
+    } else {
+        // Default: .edgelink/keys in current directory
+        key_file = ".edgelink/keys";
+    }
+
+    // Try to load existing keys, or generate new ones
+    auto load_result = crypto_.load_keys_from_file(key_file);
+    if (!load_result) {
+        // Generate new keys
+        auto init_result = crypto_.init();
+        if (!init_result) {
+            spdlog::error("Failed to initialize crypto engine");
+            state_ = ClientState::STOPPED;
+            co_return false;
+        }
+        // Save new keys for future sessions
+        auto save_result = crypto_.save_keys_to_file(key_file);
+        if (!save_result) {
+            spdlog::warn("Failed to save keys (will regenerate on next startup)");
+        }
     }
 
     // Build control and relay URLs from server address
