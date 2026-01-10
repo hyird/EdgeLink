@@ -190,17 +190,24 @@ public:
 
     std::expected<void, TunError> write(std::span<const uint8_t> packet) override {
         if (!is_open()) {
+            spdlog::warn("TUN write failed: device not open");
             return std::unexpected(TunError::WRITE_FAILED);
         }
 
         boost::system::error_code ec;
-        asio::write(stream_, asio::buffer(packet.data(), packet.size()), ec);
+        size_t bytes_written = asio::write(stream_, asio::buffer(packet.data(), packet.size()), ec);
 
         if (ec) {
-            spdlog::debug("TUN write error: {}", ec.message());
+            spdlog::warn("TUN write error: {} (wrote {} of {} bytes)", ec.message(), bytes_written, packet.size());
             return std::unexpected(TunError::WRITE_FAILED);
         }
 
+        if (bytes_written != packet.size()) {
+            spdlog::warn("TUN write incomplete: {} of {} bytes", bytes_written, packet.size());
+            return std::unexpected(TunError::WRITE_FAILED);
+        }
+
+        spdlog::trace("TUN write: {} bytes to fd {}", bytes_written, fd_);
         return {};
     }
 

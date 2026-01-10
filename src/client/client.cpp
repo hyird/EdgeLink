@@ -93,6 +93,8 @@ void Client::setup_callbacks() {
             auto result = tun_->write(data);
             if (!result) {
                 spdlog::warn("Failed to write to TUN: {}", tun_error_message(result.error()));
+            } else {
+                spdlog::debug("TUN write successful: {} bytes", data.size());
             }
         }
 
