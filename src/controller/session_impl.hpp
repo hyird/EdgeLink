@@ -97,7 +97,9 @@ asio::awaitable<void> SessionBase<StreamType>::write_loop() {
                 auto data = std::move(write_queue_.front());
                 write_queue_.pop();
 
+                spdlog::debug("Session write_loop: sending {} bytes to node {}", data.size(), node_id_);
                 co_await ws_.async_write(asio::buffer(data), asio::use_awaitable);
+                spdlog::debug("Session write_loop: sent {} bytes to node {}", data.size(), node_id_);
             }
         }
     } catch (const boost::system::system_error& e) {

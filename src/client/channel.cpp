@@ -624,12 +624,16 @@ asio::awaitable<void> RelayChannel::read_loop() {
             std::span<const uint8_t> span(
                 static_cast<const uint8_t*>(data.data()), data.size());
 
+            spdlog::debug("Relay read_loop: received {} bytes", span.size());
+
             auto result = FrameCodec::decode(span);
             if (!result) {
-                spdlog::warn("Relay: failed to decode frame");
+                spdlog::warn("Relay: failed to decode frame ({} bytes)", span.size());
                 continue;
             }
 
+            spdlog::debug("Relay read_loop: decoded frame type 0x{:02X}",
+                         static_cast<uint8_t>(result->first.header.type));
             co_await handle_frame(result->first);
         }
     } catch (const boost::system::system_error& e) {
@@ -718,11 +722,16 @@ asio::awaitable<void> RelayChannel::handle_relay_auth_resp(const Frame& frame) {
 }
 
 asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
+    spdlog::debug("Relay handle_data: processing {} bytes", frame.payload.size());
+
     auto data = DataPayload::parse(frame.payload);
     if (!data) {
         spdlog::warn("Failed to parse DATA payload");
         co_return;
     }
+
+    spdlog::debug("Relay handle_data: DATA from {} to {}, encrypted {} bytes",
+                 data->src_node, data->dst_node, data->encrypted_payload.size());
 
     // Ensure session key exists for sender
     if (!peers_.ensure_session_key(data->src_node)) {
@@ -739,7 +748,7 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
 
     peers_.update_last_seen(data->src_node);
 
-    spdlog::trace("Received {} bytes from peer {}", plaintext->size(), data->src_node);
+    spdlog::debug("Relay handle_data: decrypted {} bytes from peer {}", plaintext->size(), data->src_node);
 
     if (callbacks_.on_data) {
         callbacks_.on_data(data->src_node, *plaintext);
