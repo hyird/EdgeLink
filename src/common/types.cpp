@@ -83,7 +83,7 @@ const char* frame_type_name(FrameType type) {
         case FrameType::SHUTDOWN_NOTIFY: return "SHUTDOWN_NOTIFY";
         case FrameType::SHUTDOWN_ACK: return "SHUTDOWN_ACK";
         case FrameType::GENERIC_ACK: return "GENERIC_ACK";
-        case FrameType::ERROR: return "ERROR";
+        case FrameType::FRAME_ERROR: return "ERROR";
         default: return "UNKNOWN";
     }
 }

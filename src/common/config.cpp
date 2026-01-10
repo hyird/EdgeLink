@@ -47,6 +47,9 @@ std::expected<ControllerConfig, ConfigError> ControllerConfig::parse(const std::
             if (auto v = (*server)["threads"].value<int64_t>()) {
                 config.num_threads = static_cast<size_t>(*v);
             }
+            if (auto v = (*server)["tls"].value<bool>()) {
+                config.tls = *v;
+            }
         }
 
         // [ssl] section

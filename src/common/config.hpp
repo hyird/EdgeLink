@@ -29,10 +29,11 @@ std::string config_error_message(ConfigError error);
 struct ControllerConfig {
     // Server settings
     std::string bind_address = "0.0.0.0";
-    uint16_t port = 8443;
+    uint16_t port = 8080;
     size_t num_threads = 0;  // 0 = auto (hardware_concurrency)
+    bool tls = false;  // Enable TLS - default disabled
 
-    // SSL settings
+    // SSL settings (only used if tls = true)
     std::string cert_file;
     std::string key_file;
 

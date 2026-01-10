@@ -23,7 +23,8 @@ namespace edgelink::controller {
 // Server configuration
 struct ServerConfig {
     std::string bind_address = "0.0.0.0";
-    uint16_t port = 8443;
+    uint16_t port = 8080;
+    bool tls = false;           // Enable TLS
     std::string cert_file;      // Path to SSL certificate
     std::string key_file;       // Path to SSL private key
     size_t num_threads = 4;     // Number of IO threads
@@ -47,6 +48,8 @@ private:
 
     // Handle HTTP upgrade request and route to appropriate session type
     asio::awaitable<void> handle_connection(tcp::socket socket);
+    asio::awaitable<void> handle_tls_connection(tcp::socket socket);
+    asio::awaitable<void> handle_plain_connection(tcp::socket socket);
 
     asio::io_context& ioc_;
     ssl::context& ssl_ctx_;
@@ -57,7 +60,7 @@ private:
     bool running_ = false;
 };
 
-// HTTP request handler for WebSocket upgrade
+// HTTP request handler for WebSocket upgrade (TLS)
 class HttpSession : public std::enable_shared_from_this<HttpSession> {
 public:
     HttpSession(beast::ssl_stream<beast::tcp_stream>&& stream,
@@ -72,6 +75,21 @@ private:
     beast::flat_buffer buffer_;
 };
 
+// HTTP request handler for WebSocket upgrade (Plain)
+class PlainHttpSession : public std::enable_shared_from_this<PlainHttpSession> {
+public:
+    PlainHttpSession(beast::tcp_stream&& stream,
+                     SessionManager& manager);
+
+    // Run the session (handle HTTP upgrade)
+    asio::awaitable<void> run();
+
+private:
+    beast::tcp_stream stream_;
+    SessionManager& manager_;
+    beast::flat_buffer buffer_;
+};
+
 // SSL context setup utilities
 namespace ssl_util {
 
@@ -81,6 +99,9 @@ ssl::context create_ssl_context(const std::string& cert_file,
 
 // Create self-signed certificate for testing (in-memory)
 ssl::context create_self_signed_context();
+
+// Create dummy context for non-TLS mode
+ssl::context create_dummy_context();
 
 } // namespace ssl_util
 

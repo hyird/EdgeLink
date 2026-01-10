@@ -23,31 +23,63 @@ namespace edgelink::controller {
 
 class SessionManager;
 
-// WebSocket stream type (SSL)
-using WsStream = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
+// WebSocket stream types
+using TlsWsStream = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
+using PlainWsStream = websocket::stream<beast::tcp_stream>;
 
-// Base session class
-class Session : public std::enable_shared_from_this<Session> {
+// Legacy alias for compatibility
+using WsStream = TlsWsStream;
+
+// ============================================================================
+// Session interface (type-erased base for session storage)
+// ============================================================================
+
+class ISession {
 public:
-    virtual ~Session() = default;
+    virtual ~ISession() = default;
+
+    // Send raw bytes (for relay forwarding)
+    virtual asio::awaitable<void> send_raw(std::span<const uint8_t> data) = 0;
 
     // Send a frame
-    asio::awaitable<void> send_frame(FrameType type, std::span<const uint8_t> payload,
-                                     FrameFlags flags = FrameFlags::NONE);
-
-    // Send raw bytes
-    asio::awaitable<void> send_raw(std::span<const uint8_t> data);
+    virtual asio::awaitable<void> send_frame(FrameType type, std::span<const uint8_t> payload,
+                                              FrameFlags flags = FrameFlags::NONE) = 0;
 
     // Close the session
-    asio::awaitable<void> close();
+    virtual asio::awaitable<void> close() = 0;
 
     // Get session info
-    bool is_authenticated() const { return authenticated_; }
-    NodeId node_id() const { return node_id_; }
-    NetworkId network_id() const { return network_id_; }
+    virtual bool is_authenticated() const = 0;
+    virtual NodeId node_id() const = 0;
+    virtual NetworkId network_id() const = 0;
+};
+
+// ============================================================================
+// Base session template
+// ============================================================================
+
+template<typename StreamType>
+class SessionBase : public ISession, public std::enable_shared_from_this<SessionBase<StreamType>> {
+public:
+    virtual ~SessionBase() = default;
+
+    // Send a frame (ISession interface)
+    asio::awaitable<void> send_frame(FrameType type, std::span<const uint8_t> payload,
+                                     FrameFlags flags = FrameFlags::NONE) override;
+
+    // Send raw bytes (ISession interface)
+    asio::awaitable<void> send_raw(std::span<const uint8_t> data) override;
+
+    // Close the session (ISession interface)
+    asio::awaitable<void> close() override;
+
+    // Get session info (ISession interface)
+    bool is_authenticated() const override { return authenticated_; }
+    NodeId node_id() const override { return node_id_; }
+    NetworkId network_id() const override { return network_id_; }
 
 protected:
-    Session(WsStream&& ws, SessionManager& manager);
+    SessionBase(StreamType&& ws, SessionManager& manager);
 
     // Run the session (to be implemented by subclasses)
     virtual asio::awaitable<void> run() = 0;
@@ -63,10 +95,10 @@ protected:
 
     // Send error response
     asio::awaitable<void> send_error(uint16_t code, const std::string& message,
-                                     FrameType request_type = FrameType::ERROR,
+                                     FrameType request_type = FrameType::FRAME_ERROR,
                                      uint32_t request_id = 0);
 
-    WsStream ws_;
+    StreamType ws_;
     SessionManager& manager_;
 
     bool authenticated_ = false;
@@ -82,12 +114,16 @@ protected:
     beast::flat_buffer read_buffer_;
 };
 
-// Control channel session (/api/v1/control)
-class ControlSession : public Session {
-public:
-    ControlSession(WsStream&& ws, SessionManager& manager);
+// ============================================================================
+// Control channel session template (/api/v1/control)
+// ============================================================================
 
-    static asio::awaitable<void> start(WsStream ws, SessionManager& manager);
+template<typename StreamType>
+class ControlSessionImpl : public SessionBase<StreamType> {
+public:
+    ControlSessionImpl(StreamType&& ws, SessionManager& manager);
+
+    static asio::awaitable<void> start(StreamType ws, SessionManager& manager);
 
 protected:
     asio::awaitable<void> run() override;
@@ -104,12 +140,16 @@ private:
     uint64_t config_version_ = 0;
 };
 
-// Relay channel session (/api/v1/relay)
-class RelaySession : public Session {
-public:
-    RelaySession(WsStream&& ws, SessionManager& manager);
+// ============================================================================
+// Relay channel session template (/api/v1/relay)
+// ============================================================================
 
-    static asio::awaitable<void> start(WsStream ws, SessionManager& manager);
+template<typename StreamType>
+class RelaySessionImpl : public SessionBase<StreamType> {
+public:
+    RelaySessionImpl(StreamType&& ws, SessionManager& manager);
+
+    static asio::awaitable<void> start(StreamType ws, SessionManager& manager);
 
 protected:
     asio::awaitable<void> run() override;
@@ -120,5 +160,19 @@ private:
     asio::awaitable<void> handle_data(const Frame& frame);
     asio::awaitable<void> handle_ping(const Frame& frame);
 };
+
+// ============================================================================
+// Type aliases for TLS and Plain sessions
+// ============================================================================
+
+// TLS sessions (original)
+using Session = SessionBase<TlsWsStream>;
+using ControlSession = ControlSessionImpl<TlsWsStream>;
+using RelaySession = RelaySessionImpl<TlsWsStream>;
+
+// Plain sessions (non-TLS)
+using PlainSession = SessionBase<PlainWsStream>;
+using PlainControlSession = ControlSessionImpl<PlainWsStream>;
+using PlainRelaySession = RelaySessionImpl<PlainWsStream>;
 
 } // namespace edgelink::controller

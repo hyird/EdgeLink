@@ -28,7 +28,7 @@ inline constexpr size_t COMPRESSION_THRESHOLD = 256;
 // Frame header structure
 struct FrameHeader {
     uint8_t version = PROTOCOL_VERSION;
-    FrameType type = FrameType::ERROR;
+    FrameType type = FrameType::FRAME_ERROR;
     FrameFlags flags = FrameFlags::NONE;
     uint16_t length = 0; // Payload length (not including header)
 };
@@ -38,7 +38,7 @@ struct FragmentHeader {
     MessageId message_id = 0;
     uint16_t frag_index = 0;
     uint16_t frag_total = 0;
-    FrameType orig_type = FrameType::ERROR;
+    FrameType orig_type = FrameType::FRAME_ERROR;
 };
 
 // Decoded frame structure

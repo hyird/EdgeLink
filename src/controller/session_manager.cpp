@@ -11,7 +11,7 @@ SessionManager::SessionManager(asio::io_context& ioc, Database& db, JwtUtil& jwt
 // Control session management
 // ============================================================================
 
-void SessionManager::register_control_session(NodeId node_id, std::shared_ptr<ControlSession> session) {
+void SessionManager::register_control_session(NodeId node_id, std::shared_ptr<ISession> session) {
     std::unique_lock lock(control_mutex_);
 
     // Unregister existing session if any
@@ -33,15 +33,15 @@ void SessionManager::unregister_control_session(NodeId node_id) {
     }
 }
 
-std::shared_ptr<ControlSession> SessionManager::get_control_session(NodeId node_id) {
+std::shared_ptr<ISession> SessionManager::get_control_session(NodeId node_id) {
     std::shared_lock lock(control_mutex_);
     auto it = control_sessions_.find(node_id);
     return it != control_sessions_.end() ? it->second : nullptr;
 }
 
-std::vector<std::shared_ptr<ControlSession>> SessionManager::get_all_control_sessions() {
+std::vector<std::shared_ptr<ISession>> SessionManager::get_all_control_sessions() {
     std::shared_lock lock(control_mutex_);
-    std::vector<std::shared_ptr<ControlSession>> sessions;
+    std::vector<std::shared_ptr<ISession>> sessions;
     sessions.reserve(control_sessions_.size());
     for (const auto& [_, session] : control_sessions_) {
         sessions.push_back(session);
@@ -49,9 +49,9 @@ std::vector<std::shared_ptr<ControlSession>> SessionManager::get_all_control_ses
     return sessions;
 }
 
-std::vector<std::shared_ptr<ControlSession>> SessionManager::get_network_control_sessions(NetworkId network_id) {
+std::vector<std::shared_ptr<ISession>> SessionManager::get_network_control_sessions(NetworkId network_id) {
     std::shared_lock lock(control_mutex_);
-    std::vector<std::shared_ptr<ControlSession>> sessions;
+    std::vector<std::shared_ptr<ISession>> sessions;
     for (const auto& [_, session] : control_sessions_) {
         if (session->network_id() == network_id) {
             sessions.push_back(session);
@@ -64,7 +64,7 @@ std::vector<std::shared_ptr<ControlSession>> SessionManager::get_network_control
 // Relay session management
 // ============================================================================
 
-void SessionManager::register_relay_session(NodeId node_id, std::shared_ptr<RelaySession> session) {
+void SessionManager::register_relay_session(NodeId node_id, std::shared_ptr<ISession> session) {
     std::unique_lock lock(relay_mutex_);
 
     auto it = relay_sessions_.find(node_id);
@@ -85,7 +85,7 @@ void SessionManager::unregister_relay_session(NodeId node_id) {
     }
 }
 
-std::shared_ptr<RelaySession> SessionManager::get_relay_session(NodeId node_id) {
+std::shared_ptr<ISession> SessionManager::get_relay_session(NodeId node_id) {
     std::shared_lock lock(relay_mutex_);
     auto it = relay_sessions_.find(node_id);
     return it != relay_sessions_.end() ? it->second : nullptr;

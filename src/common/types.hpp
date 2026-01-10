@@ -112,7 +112,7 @@ enum class FrameType : uint8_t {
 
     // Generic (0xF0-0xFF)
     GENERIC_ACK = 0xFE,
-    ERROR = 0xFF,
+    FRAME_ERROR = 0xFF,  // Note: Can't use ERROR due to Windows macro conflict
 };
 
 // Frame flags

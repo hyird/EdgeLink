@@ -6,13 +6,16 @@
 bind = "0.0.0.0"
 
 # Port to listen on
-port = 8443
+port = 8080
 
 # Number of IO threads (0 = auto, uses hardware_concurrency)
 threads = 0
 
+# Enable TLS (default: false)
+tls = false
+
 [ssl]
-# SSL certificate file (PEM format)
+# SSL certificate file (PEM format) - only used if tls = true
 # If not specified, a self-signed certificate will be generated
 # cert = "/path/to/cert.pem"
 

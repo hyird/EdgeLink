@@ -58,11 +58,12 @@ void print_help() {
               << "Usage: edgelink-controller [options]\n\n"
               << "Options:\n"
               << "  -c, --config FILE    Load configuration from TOML file\n"
-              << "  -p, --port PORT      Listen port (default: 8443)\n"
+              << "  -p, --port PORT      Listen port (default: 8080)\n"
               << "  -b, --bind ADDR      Bind address (default: 0.0.0.0)\n"
               << "  -t, --threads N      Number of IO threads (default: auto)\n"
-              << "  --cert FILE          SSL certificate file\n"
-              << "  --key FILE           SSL private key file\n"
+              << "  --tls                Enable TLS (default: disabled)\n"
+              << "  --cert FILE          SSL certificate file (requires --tls)\n"
+              << "  --key FILE           SSL private key file (requires --tls)\n"
               << "  --db FILE            Database file path (default: edgelink.db)\n"
               << "  -d, --debug          Enable debug logging\n"
               << "  -v, --verbose        Enable verbose (trace) logging\n"
@@ -107,6 +108,8 @@ int main(int argc, char* argv[]) {
             cfg.bind_address = argv[++i];
         } else if ((arg == "-t" || arg == "--threads") && i + 1 < argc) {
             cfg.num_threads = static_cast<size_t>(std::stoi(argv[++i]));
+        } else if (arg == "--tls") {
+            cfg.tls = true;
         } else if (arg == "--cert" && i + 1 < argc) {
             cfg.cert_file = argv[++i];
         } else if (arg == "--key" && i + 1 < argc) {
@@ -174,7 +177,10 @@ int main(int argc, char* argv[]) {
 
         // Create SSL context
         ssl::context ssl_ctx = [&cfg]() {
-            if (!cfg.cert_file.empty() && !cfg.key_file.empty()) {
+            if (!cfg.tls) {
+                // TLS disabled - create dummy context
+                return ssl_util::create_dummy_context();
+            } else if (!cfg.cert_file.empty() && !cfg.key_file.empty()) {
                 spdlog::info("Loading SSL certificates from files");
                 return ssl_util::create_ssl_context(cfg.cert_file, cfg.key_file);
             } else {
@@ -190,6 +196,7 @@ int main(int argc, char* argv[]) {
         ServerConfig server_cfg;
         server_cfg.bind_address = cfg.bind_address;
         server_cfg.port = cfg.port;
+        server_cfg.tls = cfg.tls;
         server_cfg.num_threads = cfg.num_threads;
         server_cfg.cert_file = cfg.cert_file;
         server_cfg.key_file = cfg.key_file;
@@ -208,10 +215,12 @@ int main(int argc, char* argv[]) {
         // Start server
         asio::co_spawn(ioc, server.run(), asio::detached);
 
+        std::string scheme = cfg.tls ? "wss" : "ws";
         spdlog::info("Controller ready");
-        spdlog::info("  Control endpoint: wss://{}:{}/api/v1/control", cfg.bind_address, cfg.port);
-        spdlog::info("  Relay endpoint:   wss://{}:{}/api/v1/relay", cfg.bind_address, cfg.port);
+        spdlog::info("  Control endpoint: {}://{}:{}/api/v1/control", scheme, cfg.bind_address, cfg.port);
+        spdlog::info("  Relay endpoint:   {}://{}:{}/api/v1/relay", scheme, cfg.bind_address, cfg.port);
         spdlog::info("  Database: {}", cfg.database_path);
+        spdlog::info("  TLS: {}", cfg.tls ? "enabled" : "disabled");
         spdlog::info("  IO threads: {}", cfg.num_threads);
 
         // Run IO threads

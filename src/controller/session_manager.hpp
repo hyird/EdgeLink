@@ -14,8 +14,8 @@ namespace asio = boost::asio;
 
 namespace edgelink::controller {
 
-class ControlSession;
-class RelaySession;
+// Forward declaration of session interface
+class ISession;
 
 // Session manager - manages all active sessions
 class SessionManager {
@@ -26,19 +26,19 @@ public:
     // Control session management
     // ========================================================================
 
-    void register_control_session(NodeId node_id, std::shared_ptr<ControlSession> session);
+    void register_control_session(NodeId node_id, std::shared_ptr<ISession> session);
     void unregister_control_session(NodeId node_id);
-    std::shared_ptr<ControlSession> get_control_session(NodeId node_id);
-    std::vector<std::shared_ptr<ControlSession>> get_all_control_sessions();
-    std::vector<std::shared_ptr<ControlSession>> get_network_control_sessions(NetworkId network_id);
+    std::shared_ptr<ISession> get_control_session(NodeId node_id);
+    std::vector<std::shared_ptr<ISession>> get_all_control_sessions();
+    std::vector<std::shared_ptr<ISession>> get_network_control_sessions(NetworkId network_id);
 
     // ========================================================================
     // Relay session management
     // ========================================================================
 
-    void register_relay_session(NodeId node_id, std::shared_ptr<RelaySession> session);
+    void register_relay_session(NodeId node_id, std::shared_ptr<ISession> session);
     void unregister_relay_session(NodeId node_id);
-    std::shared_ptr<RelaySession> get_relay_session(NodeId node_id);
+    std::shared_ptr<ISession> get_relay_session(NodeId node_id);
 
     // ========================================================================
     // Broadcast/Notify
@@ -76,11 +76,11 @@ private:
 
     // Control sessions (by node_id)
     mutable std::shared_mutex control_mutex_;
-    std::unordered_map<NodeId, std::shared_ptr<ControlSession>> control_sessions_;
+    std::unordered_map<NodeId, std::shared_ptr<ISession>> control_sessions_;
 
     // Relay sessions (by node_id)
     mutable std::shared_mutex relay_mutex_;
-    std::unordered_map<NodeId, std::shared_ptr<RelaySession>> relay_sessions_;
+    std::unordered_map<NodeId, std::shared_ptr<ISession>> relay_sessions_;
 
     // Config version counter
     std::atomic<uint64_t> config_version_{1};

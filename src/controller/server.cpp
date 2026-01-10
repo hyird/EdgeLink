@@ -32,7 +32,8 @@ asio::awaitable<void> Server::run() {
     acceptor_.listen(asio::socket_base::max_listen_connections);
 
     running_ = true;
-    spdlog::info("Server listening on {}:{}", config_.bind_address, config_.port);
+    spdlog::info("Server listening on {}:{} (TLS: {})",
+                 config_.bind_address, config_.port, config_.tls ? "enabled" : "disabled");
 
     co_await accept_loop();
 }
@@ -59,6 +60,14 @@ asio::awaitable<void> Server::accept_loop() {
 }
 
 asio::awaitable<void> Server::handle_connection(tcp::socket socket) {
+    if (config_.tls) {
+        co_await handle_tls_connection(std::move(socket));
+    } else {
+        co_await handle_plain_connection(std::move(socket));
+    }
+}
+
+asio::awaitable<void> Server::handle_tls_connection(tcp::socket socket) {
     try {
         // Create SSL stream
         beast::ssl_stream<beast::tcp_stream> stream(std::move(socket), ssl_ctx_);
@@ -71,12 +80,26 @@ asio::awaitable<void> Server::handle_connection(tcp::socket socket) {
         co_await session->run();
 
     } catch (const boost::system::system_error& e) {
-        spdlog::debug("Connection error: {}", e.what());
+        spdlog::debug("TLS connection error: {}", e.what());
+    }
+}
+
+asio::awaitable<void> Server::handle_plain_connection(tcp::socket socket) {
+    try {
+        // Create plain TCP stream
+        beast::tcp_stream stream(std::move(socket));
+
+        // Create plain HTTP session to handle upgrade
+        auto session = std::make_shared<PlainHttpSession>(std::move(stream), manager_);
+        co_await session->run();
+
+    } catch (const boost::system::system_error& e) {
+        spdlog::debug("Plain connection error: {}", e.what());
     }
 }
 
 // ============================================================================
-// HttpSession implementation
+// HttpSession implementation (TLS)
 // ============================================================================
 
 HttpSession::HttpSession(beast::ssl_stream<beast::tcp_stream>&& stream,
@@ -125,13 +148,78 @@ asio::awaitable<void> HttpSession::run() {
     // Route based on target path
     if (target == "/api/v1/control" || target == "/api/v1/control/") {
         // Control channel
-        spdlog::info("New control channel connection");
+        spdlog::info("New control channel connection (TLS)");
         co_await ControlSession::start(std::move(ws), manager_);
 
     } else if (target == "/api/v1/relay" || target == "/api/v1/relay/") {
         // Relay channel (built-in relay)
-        spdlog::info("New relay channel connection");
+        spdlog::info("New relay channel connection (TLS)");
         co_await RelaySession::start(std::move(ws), manager_);
+
+    } else {
+        // Unknown endpoint
+        spdlog::warn("Unknown WebSocket endpoint: {}", target);
+        co_await ws.async_close(websocket::close_code::policy_error, asio::use_awaitable);
+    }
+}
+
+// ============================================================================
+// PlainHttpSession implementation (non-TLS)
+// ============================================================================
+
+PlainHttpSession::PlainHttpSession(beast::tcp_stream&& stream,
+                                   SessionManager& manager)
+    : stream_(std::move(stream))
+    , manager_(manager) {}
+
+asio::awaitable<void> PlainHttpSession::run() {
+    // Set timeout
+    stream_.expires_after(std::chrono::seconds(30));
+
+    // Read HTTP request
+    http::request<http::string_body> req;
+    co_await http::async_read(stream_, buffer_, req, asio::use_awaitable);
+
+    // Check if this is a WebSocket upgrade
+    if (!websocket::is_upgrade(req)) {
+        // Return 400 Bad Request for non-WebSocket requests
+        http::response<http::string_body> res{http::status::bad_request, req.version()};
+        res.set(http::field::server, "EdgeLink Controller");
+        res.set(http::field::content_type, "text/plain");
+        res.body() = "WebSocket upgrade required";
+        res.prepare_payload();
+
+        co_await http::async_write(stream_, res, asio::use_awaitable);
+        co_return;
+    }
+
+    // Get target path
+    std::string target(req.target());
+    spdlog::debug("WebSocket upgrade request for: {}", target);
+
+    // Create WebSocket stream (plain)
+    PlainWsStream ws(std::move(stream_));
+
+    // Set WebSocket options
+    ws.set_option(websocket::stream_base::timeout::suggested(beast::role_type::server));
+    ws.set_option(websocket::stream_base::decorator(
+        [](websocket::response_type& res) {
+            res.set(http::field::server, "EdgeLink Controller");
+        }));
+
+    // Accept WebSocket handshake
+    co_await ws.async_accept(req, asio::use_awaitable);
+
+    // Route based on target path
+    if (target == "/api/v1/control" || target == "/api/v1/control/") {
+        // Control channel
+        spdlog::info("New control channel connection (plain)");
+        co_await PlainControlSession::start(std::move(ws), manager_);
+
+    } else if (target == "/api/v1/relay" || target == "/api/v1/relay/") {
+        // Relay channel (built-in relay)
+        spdlog::info("New relay channel connection (plain)");
+        co_await PlainRelaySession::start(std::move(ws), manager_);
 
     } else {
         // Unknown endpoint
@@ -240,6 +328,14 @@ ssl::context create_self_signed_context() {
     EVP_PKEY_free(pkey);
 
     spdlog::info("Generated self-signed certificate for development");
+    return ctx;
+}
+
+ssl::context create_dummy_context() {
+    // Create a minimal SSL context for non-TLS mode
+    // This context won't be used but is needed to satisfy the Server constructor
+    ssl::context ctx(ssl::context::tlsv12);
+    spdlog::debug("Created dummy SSL context (TLS disabled)");
     return ctx;
 }
 

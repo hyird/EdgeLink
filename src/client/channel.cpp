@@ -238,7 +238,7 @@ asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
         case FrameType::PONG:
             co_await handle_pong(frame);
             break;
-        case FrameType::ERROR:
+        case FrameType::FRAME_ERROR:
             co_await handle_error(frame);
             break;
         default:

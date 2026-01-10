@@ -183,7 +183,7 @@ using Pong = Ping; // Same structure
 // ERROR (0xFF)
 struct ErrorPayload {
     uint16_t error_code = 0;
-    FrameType request_type = FrameType::ERROR;
+    FrameType request_type = FrameType::FRAME_ERROR;
     uint32_t request_id = 0;
     std::string error_msg;
 
@@ -193,7 +193,7 @@ struct ErrorPayload {
 
 // GENERIC_ACK (0xFE)
 struct GenericAck {
-    FrameType request_type = FrameType::ERROR;
+    FrameType request_type = FrameType::FRAME_ERROR;
     uint32_t request_id = 0;
     uint8_t status = 0;
 
