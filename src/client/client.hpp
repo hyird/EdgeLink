@@ -24,6 +24,7 @@ struct ClientConfig {
     bool auto_reconnect = true;
     std::chrono::seconds reconnect_interval{5};
     std::chrono::seconds ping_interval{30};
+    std::chrono::seconds dns_refresh_interval{60};  // DNS resolution refresh interval (0 = disabled)
 
     // State directory for storing persistent keys
     std::string state_dir;  // Empty = platform default
@@ -104,6 +105,9 @@ private:
     // Keepalive timer
     asio::awaitable<void> keepalive_loop();
 
+    // DNS refresh loop - periodically check for DNS changes
+    asio::awaitable<void> dns_refresh_loop();
+
     // Reconnection logic
     asio::awaitable<void> reconnect();
 
@@ -120,6 +124,10 @@ private:
 
     asio::steady_timer keepalive_timer_;
     asio::steady_timer reconnect_timer_;
+    asio::steady_timer dns_refresh_timer_;
+
+    // Cached DNS resolution results for change detection
+    std::string cached_controller_endpoints_;
 
     // TUN device (optional)
     std::unique_ptr<TunDevice> tun_;

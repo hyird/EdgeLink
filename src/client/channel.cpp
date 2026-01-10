@@ -177,6 +177,12 @@ asio::awaitable<bool> ControlChannel::reconnect() {
 }
 
 asio::awaitable<void> ControlChannel::close() {
+    if (state_ == ChannelState::DISCONNECTED) {
+        co_return;
+    }
+
+    state_ = ChannelState::DISCONNECTED;
+
     try {
         if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
             co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
@@ -184,8 +190,6 @@ asio::awaitable<void> ControlChannel::close() {
             co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
         }
     } catch (...) {}
-
-    state_ = ChannelState::DISCONNECTED;
 
     if (callbacks_.on_disconnected) {
         callbacks_.on_disconnected();
@@ -240,9 +244,12 @@ asio::awaitable<void> ControlChannel::read_loop() {
         }
     }
 
-    state_ = ChannelState::DISCONNECTED;
-    if (callbacks_.on_disconnected) {
-        callbacks_.on_disconnected();
+    // Only trigger callback if not already disconnected (avoid duplicate calls)
+    if (state_ != ChannelState::DISCONNECTED) {
+        state_ = ChannelState::DISCONNECTED;
+        if (callbacks_.on_disconnected) {
+            callbacks_.on_disconnected();
+        }
     }
 }
 
@@ -559,6 +566,12 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
 }
 
 asio::awaitable<void> RelayChannel::close() {
+    if (state_ == ChannelState::DISCONNECTED) {
+        co_return;
+    }
+
+    state_ = ChannelState::DISCONNECTED;
+
     try {
         if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
             co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
@@ -566,8 +579,6 @@ asio::awaitable<void> RelayChannel::close() {
             co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
         }
     } catch (...) {}
-
-    state_ = ChannelState::DISCONNECTED;
 
     if (callbacks_.on_disconnected) {
         callbacks_.on_disconnected();
@@ -649,9 +660,12 @@ asio::awaitable<void> RelayChannel::read_loop() {
         }
     }
 
-    state_ = ChannelState::DISCONNECTED;
-    if (callbacks_.on_disconnected) {
-        callbacks_.on_disconnected();
+    // Only trigger callback if not already disconnected (avoid duplicate calls)
+    if (state_ != ChannelState::DISCONNECTED) {
+        state_ = ChannelState::DISCONNECTED;
+        if (callbacks_.on_disconnected) {
+            callbacks_.on_disconnected();
+        }
     }
 }
 

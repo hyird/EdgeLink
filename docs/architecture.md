@@ -1894,6 +1894,48 @@ on_first_fragment(frag_total, first_payload_len):
 | RECONNECTING | max_retries  | DISABLED     | 通知用户                 |
 | DISABLED     | enable()     | INIT         | 重置重试计数             |
 
+#### DNS 解析刷新机制
+
+Client 支持定时检查 Controller URL 的 DNS 解析变化，以支持动态 DNS 场景（如服务器 IP 变更、故障转移等）。
+
+**工作流程**：
+
+```
+运行中状态:
+┌─────────────────────────────────────────────────────────────┐
+│                                                             │
+│  dns_refresh_loop() 协程                                    │
+│                                                             │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐              │
+│  │ 等待     │    │ DNS      │    │ 比较     │              │
+│  │ 定时器   ├───►│ 解析     ├───►│ 结果     │              │
+│  │ (60s)    │    │          │    │          │              │
+│  └──────────┘    └──────────┘    └────┬─────┘              │
+│                                       │                     │
+│                      ┌────────────────┼────────────────┐    │
+│                      │ 未变化         │ 已变化         │    │
+│                      ▼                ▼                │    │
+│                  继续循环        触发 reconnect()      │    │
+│                                                        │    │
+└────────────────────────────────────────────────────────┘    │
+```
+
+**配置参数**：
+
+| 参数                 | 默认值 | 说明                              |
+| -------------------- | ------ | --------------------------------- |
+| dns_refresh_interval | 60s    | DNS 解析检查间隔 (0 = 禁用)       |
+
+**触发重连条件**：
+- 新解析的 IP 地址列表与缓存的不同
+- 仅在 `auto_reconnect = true` 时触发重连
+
+**实现细节**：
+- 使用异步 DNS 解析 (`tcp::resolver::async_resolve`)
+- 解析结果序列化为 "ip:port,ip:port,..." 格式进行比较
+- 重连时清空 DNS 缓存，重连成功后重新初始化
+- 定时器在 `stop()` 时取消
+
 ### 4.2 P2P 连接状态机 (每个对端)
 
 ```
@@ -4002,6 +4044,7 @@ level = "info"  # 全局默认等级
 | p2p.stun_timeout         | uint32   | 5000      | STUN 探测超时 (毫秒)       |
 | p2p.hole_punch_attempts  | uint32   | 5         | 打洞尝试次数               |
 | p2p.hole_punch_interval  | uint32   | 200       | 打洞尝试间隔 (毫秒)        |
+| dns_refresh_interval     | uint32   | 60        | DNS 解析刷新间隔 (秒, 0=禁用) |
 | queue.capacity           | uint32   | 65536     | 消息队列最大容量           |
 | queue.high_watermark     | float    | 0.8       | 高水位线 (触发背压)        |
 | queue.low_watermark      | float    | 0.5       | 低水位线 (恢复正常)        |

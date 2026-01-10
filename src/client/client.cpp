@@ -22,7 +22,8 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     , crypto_()
     , peers_(crypto_)
     , keepalive_timer_(ioc)
-    , reconnect_timer_(ioc) {
+    , reconnect_timer_(ioc)
+    , dns_refresh_timer_(ioc) {
 
     // Setup SSL context
     ssl_ctx_.set_default_verify_paths();
@@ -124,6 +125,9 @@ void Client::setup_callbacks() {
 
         // Start keepalive
         asio::co_spawn(ioc_, keepalive_loop(), asio::detached);
+
+        // Start DNS refresh loop
+        asio::co_spawn(ioc_, dns_refresh_loop(), asio::detached);
     };
 
     relay_cbs.on_disconnected = [this]() {
@@ -376,6 +380,7 @@ asio::awaitable<void> Client::stop() {
 
     keepalive_timer_.cancel();
     reconnect_timer_.cancel();
+    dns_refresh_timer_.cancel();
 
     // Teardown TUN first
     teardown_tun();
@@ -455,6 +460,9 @@ asio::awaitable<void> Client::reconnect() {
     state_ = ClientState::RECONNECTING;
     spdlog::info("Attempting to reconnect...");
 
+    // Clear DNS cache so it will be re-initialized after reconnect
+    cached_controller_endpoints_.clear();
+
     // Teardown TUN on reconnect
     teardown_tun();
 
@@ -490,6 +498,92 @@ asio::awaitable<void> Client::reconnect() {
             if (config_.auto_reconnect) {
                 asio::co_spawn(ioc_, reconnect(), asio::detached);
             }
+        }
+    }
+}
+
+asio::awaitable<void> Client::dns_refresh_loop() {
+    // Skip if DNS refresh is disabled
+    if (config_.dns_refresh_interval.count() == 0) {
+        co_return;
+    }
+
+    while (state_ == ClientState::RUNNING) {
+        try {
+            dns_refresh_timer_.expires_after(config_.dns_refresh_interval);
+            co_await dns_refresh_timer_.async_wait(asio::use_awaitable);
+
+            if (state_ != ClientState::RUNNING) {
+                break;
+            }
+
+            // Parse URL to get host and port
+            std::string base_url = config_.controller_url;
+            if (!base_url.empty() && base_url.back() == '/') {
+                base_url.pop_back();
+            }
+            // Remove scheme
+            if (base_url.substr(0, 6) == "wss://") {
+                base_url = base_url.substr(6);
+            } else if (base_url.substr(0, 5) == "ws://") {
+                base_url = base_url.substr(5);
+            } else if (base_url.substr(0, 8) == "https://") {
+                base_url = base_url.substr(8);
+            } else if (base_url.substr(0, 7) == "http://") {
+                base_url = base_url.substr(7);
+            }
+            // Remove path
+            auto path_pos = base_url.find('/');
+            if (path_pos != std::string::npos) {
+                base_url = base_url.substr(0, path_pos);
+            }
+
+            // Extract host and port
+            std::string host = base_url;
+            std::string port = config_.tls ? "443" : "80";
+            auto colon_pos = base_url.find(':');
+            if (colon_pos != std::string::npos) {
+                host = base_url.substr(0, colon_pos);
+                port = base_url.substr(colon_pos + 1);
+            }
+
+            // Resolve DNS
+            asio::ip::tcp::resolver resolver(ioc_);
+            auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
+
+            // Build endpoints string for comparison
+            std::string new_endpoints;
+            for (const auto& ep : endpoints) {
+                if (!new_endpoints.empty()) {
+                    new_endpoints += ",";
+                }
+                new_endpoints += ep.endpoint().address().to_string();
+                new_endpoints += ":";
+                new_endpoints += std::to_string(ep.endpoint().port());
+            }
+
+            // Check if DNS resolution changed
+            if (!cached_controller_endpoints_.empty() &&
+                cached_controller_endpoints_ != new_endpoints) {
+                spdlog::info("DNS resolution changed: {} -> {}", cached_controller_endpoints_, new_endpoints);
+                // Trigger reconnect to use new endpoints
+                if (config_.auto_reconnect) {
+                    asio::co_spawn(ioc_, reconnect(), asio::detached);
+                }
+                co_return;
+            }
+
+            // Update cache (first time or unchanged)
+            if (cached_controller_endpoints_.empty()) {
+                cached_controller_endpoints_ = new_endpoints;
+                spdlog::debug("DNS cache initialized: {}", new_endpoints);
+            }
+
+        } catch (const boost::system::system_error& e) {
+            if (e.code() != asio::error::operation_aborted) {
+                spdlog::debug("DNS refresh error: {}", e.what());
+            }
+            break;
         }
     }
 }
