@@ -45,7 +45,7 @@ struct ControllerConfig {
     std::chrono::minutes relay_token_validity{90};
 
     // Logging
-    std::string log_level = "info";
+    std::string log_level = "debug";
     std::string log_file;
 
     // Load from TOML file
@@ -79,7 +79,7 @@ struct ClientConfig {
     uint32_t tun_mtu = 1420;       // MTU for TUN device
 
     // Logging
-    std::string log_level = "info";
+    std::string log_level = "debug";
     std::string log_file;
 
     // Load from TOML file

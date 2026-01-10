@@ -42,7 +42,7 @@ enable = false
 
 [log]
 # Log level: trace, debug, info, warn, error
-level = "info"
+level = "debug"
 
 # Log file (optional, logs to console if not specified)
 # file = "/var/log/edgelink-client.log"

@@ -36,7 +36,7 @@ relay_token_minutes = 90
 
 [log]
 # Log level: trace, debug, info, warn, error
-level = "info"
+level = "debug"
 
 # Log file (optional, logs to console if not specified)
 # file = "/var/log/edgelink-controller.log"
