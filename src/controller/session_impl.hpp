@@ -15,7 +15,8 @@ template<typename StreamType>
 SessionBase<StreamType>::SessionBase(StreamType&& ws, SessionManager& manager)
     : ws_(std::move(ws))
     , manager_(manager)
-    , write_timer_(ws_.get_executor()) {
+    , strand_(asio::make_strand(ws_.get_executor()))
+    , write_timer_(strand_) {
     write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
 }
 
@@ -30,11 +31,14 @@ asio::awaitable<void> SessionBase<StreamType>::send_frame(FrameType type,
 template<typename StreamType>
 asio::awaitable<void> SessionBase<StreamType>::send_raw(std::span<const uint8_t> data) {
     std::vector<uint8_t> copy(data.begin(), data.end());
-    write_queue_.push(std::move(copy));
 
-    if (!writing_) {
-        write_timer_.cancel();
-    }
+    // Dispatch to strand to ensure thread-safe access to write_queue_ and write_timer_
+    asio::dispatch(strand_, [this, d = std::move(copy)]() mutable {
+        write_queue_.push(std::move(d));
+        if (!writing_) {
+            write_timer_.cancel();
+        }
+    });
     co_return;
 }
 
@@ -78,9 +82,14 @@ asio::awaitable<void> SessionBase<StreamType>::read_loop() {
 template<typename StreamType>
 asio::awaitable<void> SessionBase<StreamType>::write_loop() {
     try {
+        // Ensure we start on the strand
+        co_await asio::dispatch(asio::bind_executor(strand_, asio::use_awaitable));
+
         while (ws_.is_open()) {
             if (write_queue_.empty()) {
                 writing_ = false;
+                // Reset timer for next wait
+                write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
                 boost::system::error_code ec;
                 co_await write_timer_.async_wait(asio::redirect_error(asio::use_awaitable, ec));
                 // Timer cancelled means new data arrived, continue loop
@@ -100,6 +109,9 @@ asio::awaitable<void> SessionBase<StreamType>::write_loop() {
                 spdlog::debug("Session write_loop: sending {} bytes to node {}", data.size(), node_id_);
                 co_await ws_.async_write(asio::buffer(data), asio::use_awaitable);
                 spdlog::debug("Session write_loop: sent {} bytes to node {}", data.size(), node_id_);
+
+                // Return to strand after write completes (ws_ might use different executor)
+                co_await asio::dispatch(asio::bind_executor(strand_, asio::use_awaitable));
             }
         }
     } catch (const boost::system::system_error& e) {

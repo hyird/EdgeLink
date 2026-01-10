@@ -105,7 +105,10 @@ protected:
     NodeId node_id_ = 0;
     NetworkId network_id_ = 0;
 
-    // Write queue
+    // Strand for thread-safe write queue access
+    asio::strand<asio::any_io_executor> strand_;
+
+    // Write queue (protected by strand_)
     std::queue<std::vector<uint8_t>> write_queue_;
     bool writing_ = false;
     asio::steady_timer write_timer_;
