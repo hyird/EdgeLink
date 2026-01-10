@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 env:
-  BUILD_TYPE: Release
+  BUILD_TYPE: RelWithDebInfo
 
 jobs:
   # =============================================================================
@@ -52,11 +52,6 @@ jobs:
 
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
-
-    - name: Strip Binaries
-      run: |
-        strip build/edgelink-controller || true
-        strip build/edgelink-client || true
 
     - name: Verify Static Linking
       run: |
@@ -147,11 +142,6 @@ jobs:
 
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
-
-    - name: Strip Binaries
-      run: |
-        strip build/edgelink-controller.exe || true
-        strip build/edgelink-client.exe || true
 
     - name: Package Windows Artifacts
       shell: powershell
