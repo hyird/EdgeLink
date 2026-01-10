@@ -33,6 +33,17 @@ struct NetworkRecord {
     uint64_t created_at = 0;   // Unix timestamp (ms)
 };
 
+// User record
+struct UserRecord {
+    uint32_t id = 0;
+    std::string username;
+    std::string password_hash;  // Argon2 hash
+    std::string role = "user";  // "admin" or "user"
+    bool enabled = true;
+    uint64_t created_at = 0;
+    uint64_t last_login = 0;
+};
+
 // AuthKey record
 struct AuthKeyRecord {
     uint32_t id = 0;
@@ -123,6 +134,20 @@ public:
     std::expected<NetworkRecord, DbError> get_network(uint32_t id);
     std::expected<NetworkRecord, DbError> get_network_by_name(const std::string& name);
     std::expected<std::vector<NetworkRecord>, DbError> list_networks();
+
+    // ========================================================================
+    // User operations
+    // ========================================================================
+    std::expected<UserRecord, DbError> create_user(
+        const std::string& username, const std::string& password,
+        const std::string& role = "user");
+    std::expected<UserRecord, DbError> get_user(uint32_t id);
+    std::expected<UserRecord, DbError> get_user_by_username(const std::string& username);
+    std::expected<std::vector<UserRecord>, DbError> list_users();
+    std::expected<void, DbError> delete_user(uint32_t id);
+    std::expected<void, DbError> update_user_password(uint32_t id, const std::string& password);
+    std::expected<void, DbError> update_user_last_login(uint32_t id, uint64_t timestamp);
+    bool verify_user_password(const std::string& username, const std::string& password);
 
     // ========================================================================
     // AuthKey operations

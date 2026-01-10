@@ -66,6 +66,9 @@ struct IpcServerConfig {
     bool enabled = true;
 };
 
+// Shutdown callback type
+using ShutdownCallback = std::function<void()>;
+
 // IPC Server - provides local control interface for CLI commands
 class IpcServer : public std::enable_shared_from_this<IpcServer> {
 public:
@@ -80,6 +83,9 @@ public:
 
     // Check if running
     bool is_running() const { return running_; }
+
+    // Set shutdown callback (called when shutdown command received)
+    void set_shutdown_callback(ShutdownCallback callback) { shutdown_callback_ = std::move(callback); }
 
     // Get the socket path
     const std::string& socket_path() const { return config_.socket_path; }
@@ -113,6 +119,7 @@ private:
     asio::io_context& ioc_;
     Client& client_;
     IpcServerConfig config_;
+    ShutdownCallback shutdown_callback_;
 
 #ifdef _WIN32
     // Windows: use local stream (named pipe emulation via Boost.Asio)

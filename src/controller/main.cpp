@@ -79,6 +79,7 @@ void print_usage() {
               << "  serve       Start the controller server (default)\n"
               << "  authkey     Manage authentication keys\n"
               << "  node        Manage nodes\n"
+              << "  user        Manage users\n"
               << "  version     Show version information\n"
               << "  help        Show this help message\n\n"
               << "Run 'edgelink-controller <command> --help' for more information.\n";
@@ -134,6 +135,26 @@ void print_node_help() {
               << "Examples:\n"
               << "  edgelink-controller node list\n"
               << "  edgelink-controller node delete --id 5\n";
+}
+
+void print_user_help() {
+    std::cout << "EdgeLink Controller - User management\n\n"
+              << "Usage: edgelink-controller user <action> [options]\n\n"
+              << "Actions:\n"
+              << "  list        List all users\n"
+              << "  add         Add a new user\n"
+              << "  delete      Delete a user\n\n"
+              << "Options:\n"
+              << "  --db FILE            Database file (default: edgelink.db)\n"
+              << "  --username NAME      Username (for 'add' action)\n"
+              << "  --password PASS      Password (for 'add' action)\n"
+              << "  --role ROLE          Role: admin or user (default: user)\n"
+              << "  --id ID              User ID to delete (for 'delete' action)\n"
+              << "  -h, --help           Show this help\n\n"
+              << "Examples:\n"
+              << "  edgelink-controller user list\n"
+              << "  edgelink-controller user add --username admin --password secret --role admin\n"
+              << "  edgelink-controller user delete --id 2\n";
 }
 
 // ============================================================================
@@ -385,6 +406,136 @@ int cmd_node(int argc, char* argv[]) {
 }
 
 // ============================================================================
+// Command: user
+// ============================================================================
+
+int cmd_user(int argc, char* argv[]) {
+    std::string db_path = "edgelink.db";
+    std::string action;
+    std::string username;
+    std::string password;
+    std::string role = "user";
+    uint32_t user_id = 0;
+
+    // Parse arguments
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "-h" || arg == "--help") {
+            print_user_help();
+            return 0;
+        } else if (arg == "--db" && i + 1 < argc) {
+            db_path = argv[++i];
+        } else if (arg == "--username" && i + 1 < argc) {
+            username = argv[++i];
+        } else if (arg == "--password" && i + 1 < argc) {
+            password = argv[++i];
+        } else if (arg == "--role" && i + 1 < argc) {
+            role = argv[++i];
+        } else if (arg == "--id" && i + 1 < argc) {
+            user_id = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (action.empty() && arg[0] != '-') {
+            action = arg;
+        }
+    }
+
+    if (action.empty()) {
+        print_user_help();
+        return 1;
+    }
+
+    // Open database
+    setup_quiet_logging();
+    Database db;
+    auto result = db.open(db_path);
+    if (!result) {
+        std::cerr << "Error: Failed to open database: " << db_path << "\n";
+        return 1;
+    }
+
+    if (action == "list") {
+        auto users = db.list_users();
+        if (!users) {
+            std::cerr << "Error: Failed to list users\n";
+            return 1;
+        }
+
+        if (users->empty()) {
+            std::cout << "No users found.\n";
+            return 0;
+        }
+
+        std::cout << std::left
+                  << std::setw(6) << "ID"
+                  << std::setw(20) << "USERNAME"
+                  << std::setw(10) << "ROLE"
+                  << std::setw(10) << "ENABLED"
+                  << std::setw(20) << "CREATED"
+                  << "LAST_LOGIN\n";
+        std::cout << std::string(76, '-') << "\n";
+
+        for (const auto& u : *users) {
+            std::string enabled = u.enabled ? "yes" : "no";
+            std::string last_login = u.last_login > 0 ? format_time(u.last_login) : "never";
+
+            std::cout << std::left
+                      << std::setw(6) << u.id
+                      << std::setw(20) << u.username
+                      << std::setw(10) << u.role
+                      << std::setw(10) << enabled
+                      << std::setw(20) << format_time(u.created_at)
+                      << last_login << "\n";
+        }
+        return 0;
+
+    } else if (action == "add") {
+        if (username.empty()) {
+            std::cerr << "Error: --username is required for add action\n";
+            return 1;
+        }
+        if (password.empty()) {
+            std::cerr << "Error: --password is required for add action\n";
+            return 1;
+        }
+        if (role != "admin" && role != "user") {
+            std::cerr << "Error: --role must be 'admin' or 'user'\n";
+            return 1;
+        }
+
+        auto user = db.create_user(username, password, role);
+        if (!user) {
+            std::cerr << "Error: Failed to create user (may already exist)\n";
+            return 1;
+        }
+
+        std::cout << "Created user: " << username << "\n";
+        std::cout << "  ID:   " << user->id << "\n";
+        std::cout << "  Role: " << role << "\n";
+        return 0;
+
+    } else if (action == "delete") {
+        if (user_id == 0) {
+            std::cerr << "Error: --id is required for delete action\n";
+            return 1;
+        }
+
+        auto result = db.delete_user(user_id);
+        if (!result) {
+            std::cerr << "Error: Failed to delete user " << user_id << " (may not exist)\n";
+            return 1;
+        }
+
+        std::cout << "Deleted user: " << user_id << "\n";
+        return 0;
+
+    } else {
+        std::cerr << "Unknown action: " << action << "\n";
+        print_user_help();
+        return 1;
+    }
+}
+
+// ============================================================================
 // Command: serve
 // ============================================================================
 
@@ -601,6 +752,11 @@ int main(int argc, char* argv[]) {
     // Handle 'node' command
     if (command == "node") {
         return cmd_node(argc - 2, argv + 2);
+    }
+
+    // Handle 'user' command
+    if (command == "user") {
+        return cmd_user(argc - 2, argv + 2);
     }
 
     // Legacy mode: if first arg starts with '-', treat as 'serve' command

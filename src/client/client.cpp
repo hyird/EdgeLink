@@ -693,6 +693,11 @@ bool Client::setup_ipc() {
 
     ipc_ = std::make_shared<IpcServer>(ioc_, *this);
 
+    // Set shutdown callback if provided
+    if (callbacks_.on_shutdown_requested) {
+        ipc_->set_shutdown_callback(callbacks_.on_shutdown_requested);
+    }
+
     IpcServerConfig ipc_config;
     ipc_config.socket_path = config_.ipc_socket_path;
     ipc_config.enabled = true;

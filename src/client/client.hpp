@@ -63,6 +63,7 @@ struct ClientCallbacks {
     std::function<void()> on_disconnected;
     std::function<void(NodeId peer_id, std::span<const uint8_t> data)> on_data_received;
     std::function<void(uint16_t code, const std::string& msg)> on_error;
+    std::function<void()> on_shutdown_requested;  // Called when shutdown is requested via IPC
 };
 
 // Main client coordinator

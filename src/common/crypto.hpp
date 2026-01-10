@@ -123,6 +123,16 @@ uint32_t random_u32();
 uint64_t random_u64();
 
 // ============================================================================
+// Password Hashing (Argon2id)
+// ============================================================================
+
+// Hash a password using Argon2id (returns hex-encoded string)
+std::string password_hash(const std::string& password);
+
+// Verify a password against a hash
+bool password_verify(const std::string& password, const std::string& hash);
+
+// ============================================================================
 // Utility Functions
 // ============================================================================
 

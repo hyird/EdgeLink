@@ -43,6 +43,7 @@ void print_usage() {
               << "  edgelink-client <command> [options]\n\n"
               << "Commands:\n"
               << "  up          Start client and connect to network\n"
+              << "  down        Stop the running client daemon\n"
               << "  status      Show connection status\n"
               << "  peers       List all peer nodes\n"
               << "  version     Show version information\n"
@@ -95,8 +96,15 @@ void print_peers_help() {
               << "  --json        Output in JSON format\n"
               << "  --online      Only show online peers\n"
               << "  -h, --help    Show this help\n\n"
-              << "Note: This command requires the client daemon to be running.\n"
-              << "      Currently shows simulated peer list for testing.\n";
+              << "Note: This command requires the client daemon to be running.\n";
+}
+
+void print_down_help() {
+    std::cout << "EdgeLink Client - Stop the daemon\n\n"
+              << "Usage: edgelink-client down [options]\n\n"
+              << "Options:\n"
+              << "  -h, --help    Show this help\n\n"
+              << "Sends a shutdown signal to the running client daemon.\n";
 }
 
 // ============================================================================
@@ -279,6 +287,45 @@ int cmd_peers(int argc, char* argv[]) {
 }
 
 // ============================================================================
+// Command: down
+// ============================================================================
+
+int cmd_down(int argc, char* argv[]) {
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            print_down_help();
+            return 0;
+        }
+    }
+
+    // Connect to IPC server
+    IpcClient ipc;
+    if (!ipc.connect()) {
+        std::cout << "Client daemon is not running.\n";
+        return 0;
+    }
+
+    std::string response = ipc.request_shutdown();
+
+    try {
+        auto jv = boost::json::parse(response);
+        auto& obj = jv.as_object();
+
+        if (obj.at("status").as_string() == "ok") {
+            std::cout << "Shutdown signal sent to client daemon.\n";
+            return 0;
+        } else {
+            std::cerr << "Error: " << obj.at("message").as_string() << "\n";
+            return 1;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error parsing response: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ============================================================================
 // Command: up
 // ============================================================================
 
@@ -440,6 +487,12 @@ int cmd_up(int argc, char* argv[]) {
             Logger::get("client").error("Error {}: {}", code, msg);
         };
 
+        callbacks.on_shutdown_requested = [&ioc, &client, &log]() {
+            log.info("Shutdown requested via IPC, stopping...");
+            asio::co_spawn(ioc, client->stop(), asio::detached);
+            ioc.stop();
+        };
+
         client->set_callbacks(std::move(callbacks));
 
         // Setup signal handler
@@ -505,6 +558,11 @@ int main(int argc, char* argv[]) {
     if (command == "up") {
         // Pass remaining arguments (skip program name and 'up')
         return cmd_up(argc - 2, argv + 2);
+    }
+
+    // Handle 'down' command
+    if (command == "down") {
+        return cmd_down(argc - 2, argv + 2);
     }
 
     // Handle 'status' command

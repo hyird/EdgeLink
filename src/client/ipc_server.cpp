@@ -318,7 +318,14 @@ std::string IpcServer::handle_log_level(const std::string& module, const std::st
 
 std::string IpcServer::handle_shutdown() {
     log().info("Shutdown requested via IPC");
-    // TODO: Signal the main loop to stop
+
+    if (shutdown_callback_) {
+        // Post the callback to execute after response is sent
+        asio::post(ioc_, [callback = shutdown_callback_]() {
+            callback();
+        });
+    }
+
     return encode_ok("Shutdown initiated");
 }
 

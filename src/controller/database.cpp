@@ -1,4 +1,5 @@
 #include "controller/database.hpp"
+#include "common/crypto.hpp"
 #include "common/logger.hpp"
 #include <sqlite3.h>
 #include <chrono>
@@ -171,6 +172,16 @@ std::expected<void, DbError> Database::init_schema() {
             created_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT DEFAULT 'user',
+            enabled INTEGER DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            last_login INTEGER DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS authkeys (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             key TEXT UNIQUE NOT NULL,
@@ -313,6 +324,168 @@ std::expected<std::vector<NetworkRecord>, DbError> Database::list_networks() {
     }
 
     return records;
+}
+
+// ============================================================================
+// User operations
+// ============================================================================
+
+std::expected<UserRecord, DbError> Database::create_user(
+    const std::string& username, const std::string& password, const std::string& role) {
+
+    // Hash the password
+    std::string hash = crypto::password_hash(password);
+    if (hash.empty()) {
+        return std::unexpected(DbError::INTERNAL_ERROR);
+    }
+
+    auto stmt = prepare(
+        "INSERT INTO users (username, password_hash, role, created_at) "
+        "VALUES (?, ?, ?, ?)");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    uint64_t now = now_ms();
+    stmt->bind_text(1, username);
+    stmt->bind_text(2, hash);
+    stmt->bind_text(3, role);
+    stmt->bind_int64(4, static_cast<int64_t>(now));
+
+    if (stmt->step() != SQLITE_DONE) {
+        return std::unexpected(DbError::QUERY_FAILED);
+    }
+
+    uint32_t id = static_cast<uint32_t>(sqlite3_last_insert_rowid(db_));
+    return UserRecord{id, username, hash, role, true, now, 0};
+}
+
+std::expected<UserRecord, DbError> Database::get_user(uint32_t id) {
+    auto stmt = prepare("SELECT id, username, password_hash, role, enabled, created_at, last_login "
+                       "FROM users WHERE id = ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_int(1, static_cast<int>(id));
+
+    if (stmt->step() != SQLITE_ROW) {
+        return std::unexpected(DbError::NOT_FOUND);
+    }
+
+    UserRecord record;
+    record.id = static_cast<uint32_t>(stmt->column_int(0));
+    record.username = stmt->column_text(1);
+    record.password_hash = stmt->column_text(2);
+    record.role = stmt->column_text(3);
+    record.enabled = stmt->column_int(4) != 0;
+    record.created_at = static_cast<uint64_t>(stmt->column_int64(5));
+    record.last_login = static_cast<uint64_t>(stmt->column_int64(6));
+
+    return record;
+}
+
+std::expected<UserRecord, DbError> Database::get_user_by_username(const std::string& username) {
+    auto stmt = prepare("SELECT id, username, password_hash, role, enabled, created_at, last_login "
+                       "FROM users WHERE username = ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_text(1, username);
+
+    if (stmt->step() != SQLITE_ROW) {
+        return std::unexpected(DbError::NOT_FOUND);
+    }
+
+    UserRecord record;
+    record.id = static_cast<uint32_t>(stmt->column_int(0));
+    record.username = stmt->column_text(1);
+    record.password_hash = stmt->column_text(2);
+    record.role = stmt->column_text(3);
+    record.enabled = stmt->column_int(4) != 0;
+    record.created_at = static_cast<uint64_t>(stmt->column_int64(5));
+    record.last_login = static_cast<uint64_t>(stmt->column_int64(6));
+
+    return record;
+}
+
+std::expected<std::vector<UserRecord>, DbError> Database::list_users() {
+    auto stmt = prepare("SELECT id, username, password_hash, role, enabled, created_at, last_login "
+                       "FROM users ORDER BY id");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    std::vector<UserRecord> records;
+    while (stmt->step() == SQLITE_ROW) {
+        UserRecord record;
+        record.id = static_cast<uint32_t>(stmt->column_int(0));
+        record.username = stmt->column_text(1);
+        record.password_hash = stmt->column_text(2);
+        record.role = stmt->column_text(3);
+        record.enabled = stmt->column_int(4) != 0;
+        record.created_at = static_cast<uint64_t>(stmt->column_int64(5));
+        record.last_login = static_cast<uint64_t>(stmt->column_int64(6));
+        records.push_back(record);
+    }
+
+    return records;
+}
+
+std::expected<void, DbError> Database::delete_user(uint32_t id) {
+    auto stmt = prepare("DELETE FROM users WHERE id = ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_int(1, static_cast<int>(id));
+
+    if (stmt->step() != SQLITE_DONE) {
+        return std::unexpected(DbError::QUERY_FAILED);
+    }
+
+    if (sqlite3_changes(db_) == 0) {
+        return std::unexpected(DbError::NOT_FOUND);
+    }
+
+    return {};
+}
+
+std::expected<void, DbError> Database::update_user_password(uint32_t id, const std::string& password) {
+    std::string hash = crypto::password_hash(password);
+    if (hash.empty()) {
+        return std::unexpected(DbError::INTERNAL_ERROR);
+    }
+
+    auto stmt = prepare("UPDATE users SET password_hash = ? WHERE id = ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_text(1, hash);
+    stmt->bind_int(2, static_cast<int>(id));
+
+    if (stmt->step() != SQLITE_DONE) {
+        return std::unexpected(DbError::QUERY_FAILED);
+    }
+
+    return {};
+}
+
+std::expected<void, DbError> Database::update_user_last_login(uint32_t id, uint64_t timestamp) {
+    auto stmt = prepare("UPDATE users SET last_login = ? WHERE id = ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_int64(1, static_cast<int64_t>(timestamp));
+    stmt->bind_int(2, static_cast<int>(id));
+
+    if (stmt->step() != SQLITE_DONE) {
+        return std::unexpected(DbError::QUERY_FAILED);
+    }
+
+    return {};
+}
+
+bool Database::verify_user_password(const std::string& username, const std::string& password) {
+    auto user = get_user_by_username(username);
+    if (!user) {
+        return false;
+    }
+
+    if (!user->enabled) {
+        return false;
+    }
+
+    return crypto::password_verify(password, user->password_hash);
 }
 
 // ============================================================================
