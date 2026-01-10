@@ -15,8 +15,7 @@ template<typename StreamType>
 SessionBase<StreamType>::SessionBase(StreamType&& ws, SessionManager& manager)
     : ws_(std::move(ws))
     , manager_(manager)
-    , strand_(asio::make_strand(ws_.get_executor()))
-    , write_timer_(strand_) {
+    , write_timer_(ws_.get_executor()) {
     write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
 }
 
@@ -32,16 +31,13 @@ template<typename StreamType>
 asio::awaitable<void> SessionBase<StreamType>::send_raw(std::span<const uint8_t> data) {
     std::vector<uint8_t> copy(data.begin(), data.end());
 
-    // Dispatch to strand to ensure thread-safe access to write_queue_ and write_timer_
-    // Capture shared_ptr to prevent session destruction before dispatch completes
-    auto self = this->shared_from_this();
-    asio::dispatch(strand_, [self, d = std::move(copy)]() mutable {
-        auto* session = static_cast<SessionBase<StreamType>*>(self.get());
-        session->write_queue_.push(std::move(d));
-        if (!session->writing_) {
-            session->write_timer_.cancel();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        write_queue_.push(std::move(copy));
+        if (!writing_) {
+            write_timer_.cancel();
         }
-    });
+    }
     co_return;
 }
 
@@ -85,12 +81,18 @@ asio::awaitable<void> SessionBase<StreamType>::read_loop() {
 template<typename StreamType>
 asio::awaitable<void> SessionBase<StreamType>::write_loop() {
     try {
-        // Ensure we start on the strand
-        co_await asio::dispatch(asio::bind_executor(strand_, asio::use_awaitable));
-
         while (ws_.is_open()) {
-            if (write_queue_.empty()) {
-                writing_ = false;
+            // Check queue under lock
+            bool queue_empty;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                queue_empty = write_queue_.empty();
+                if (queue_empty) {
+                    writing_ = false;
+                }
+            }
+
+            if (queue_empty) {
                 // Reset timer for next wait
                 write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
                 boost::system::error_code ec;
@@ -104,17 +106,26 @@ asio::awaitable<void> SessionBase<StreamType>::write_loop() {
                 }
             }
 
-            writing_ = true;
-            while (!write_queue_.empty() && ws_.is_open()) {
-                auto data = std::move(write_queue_.front());
-                write_queue_.pop();
+            // Process queue
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                writing_ = true;
+            }
+
+            while (ws_.is_open()) {
+                std::vector<uint8_t> data;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (write_queue_.empty()) {
+                        break;
+                    }
+                    data = std::move(write_queue_.front());
+                    write_queue_.pop();
+                }
 
                 spdlog::debug("Session write_loop: sending {} bytes to node {}", data.size(), node_id_);
                 co_await ws_.async_write(asio::buffer(data), asio::use_awaitable);
                 spdlog::debug("Session write_loop: sent {} bytes to node {}", data.size(), node_id_);
-
-                // Return to strand after write completes (ws_ might use different executor)
-                co_await asio::dispatch(asio::bind_executor(strand_, asio::use_awaitable));
             }
         }
     } catch (const boost::system::system_error& e) {
