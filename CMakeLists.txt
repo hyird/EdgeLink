@@ -34,6 +34,8 @@ if(WIN32)
         endif()
         # Suppress some MinGW warnings
         add_compile_options(-Wno-deprecated-declarations)
+        # Fix "too many sections" error for large C++ files (like Boost.Beast templates)
+        add_compile_options(-Wa,-mbig-obj)
     endif()
 elseif(APPLE)
     message(STATUS "Building for macOS")

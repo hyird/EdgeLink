@@ -9,6 +9,13 @@ include(FetchContent)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 # Disable assembly optimizations (requires NASM)
 set(OPENSSL_NO_ASM ON CACHE BOOL "" FORCE)
+# Disable testing (prevents benchmark regex issues on MinGW)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+# Additional benchmark options in case it's still included
+set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+set(BENCHMARK_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     boringssl

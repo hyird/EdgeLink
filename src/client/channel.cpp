@@ -251,11 +251,19 @@ asio::awaitable<void> ControlChannel::write_loop() {
         while (is_ws_open()) {
             if (write_queue_.empty()) {
                 writing_ = false;
-                co_await write_timer_.async_wait(asio::use_awaitable);
+                boost::system::error_code ec;
+                co_await write_timer_.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+                // Timer cancelled means new data arrived, continue loop
+                if (ec == asio::error::operation_aborted) {
+                    continue;
+                }
+                if (ec) {
+                    break;
+                }
             }
 
             writing_ = true;
-            while (!write_queue_.empty()) {
+            while (!write_queue_.empty() && is_ws_open()) {
                 auto data = std::move(write_queue_.front());
                 write_queue_.pop();
 
@@ -633,11 +641,19 @@ asio::awaitable<void> RelayChannel::write_loop() {
         while (is_ws_open()) {
             if (write_queue_.empty()) {
                 writing_ = false;
-                co_await write_timer_.async_wait(asio::use_awaitable);
+                boost::system::error_code ec;
+                co_await write_timer_.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+                // Timer cancelled means new data arrived, continue loop
+                if (ec == asio::error::operation_aborted) {
+                    continue;
+                }
+                if (ec) {
+                    break;
+                }
             }
 
             writing_ = true;
-            while (!write_queue_.empty()) {
+            while (!write_queue_.empty() && is_ws_open()) {
                 auto data = std::move(write_queue_.front());
                 write_queue_.pop();
 
