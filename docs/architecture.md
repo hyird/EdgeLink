@@ -58,7 +58,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 
 | 组件           | 可执行文件           | 职责                                                     |
 | -------------- | -------------------- | -------------------------------------------------------- |
-| **Controller** | `edgelink-controller`| 网络拓扑管理、节点认证授权、配置分发、路径计算、JWT 签发（控制面中心，可做 HA） |
+| **Controller** | `edgelink-controller`| 网络拓扑管理、节点认证授权、配置分发、路径计算、JWT 签发（控制面中心，单点部署） |
 | **Relay**      | `edgelink-relay`     | 数据中继、STUN 服务、Relay Mesh 网络、延迟上报（数据面组件） |
 | **Client**     | `edgelink-client`    | TUN 虚拟网卡、P2P 直连、加密通信、路由管理、端点发现（数据面去中心化） |
 
@@ -70,7 +70,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | **二进制协议** | 所有 WSS 消息采用紧凑二进制格式，减少传输体积              |
 | **状态机驱动** | 各组件使用明确的 FSM 管理连接和会话生命周期                |
 | **零信任中继** | Relay 仅转发密文，不参与密钥交换                           |
-| **控制面中心化** | Controller 作为控制中心管理认证与配置，支持高可用部署    |
+| **控制面中心化** | Controller 作为控制中心管理认证与配置（单点部署，无状态设计便于故障恢复） |
 | **数据面去中心化** | 节点间优先 P2P 直连，Relay 仅作为回退路径              |
 
 ---
@@ -105,9 +105,9 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | Version | 1 字节 | 协议版本，当前 `0x02`                    |
 | Type    | 1 字节 | **消息类型** (Frame Type)，见 2.3 节     |
 | Flags   | 1 字节 | 标志位                                   |
-| Length  | 2 字节 | Payload 长度 (大端序)，最大 **65530**    |
+| Length  | 2 字节 | Payload 长度 (大端序)，最大 **65535**    |
 
-> **Length 上限说明**：虽然 2 字节大端序理论最大值为 65535，但协议限制为 **65530** 字节，预留 5 字节用于未来帧头扩展。实现时若 Length > 65530 应视为协议错误。
+> **Length 上限说明**：Length 字段使用完整的 16 位范围，最大值为 **65535** 字节。未来协议扩展应通过版本号升级处理，而非预留空间。
 
 > **术语约定**：
 > - **Frame Type (消息类型)**：帧头中的 Type 字段，标识消息种类（如 AUTH_REQUEST=0x01）
@@ -167,7 +167,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 
 服务端 (Controller/Relay) 应尽可能支持低版本协议：
 
-1. **消息类型兼容**：未识别的 Type 返回 `UNKNOWN_TYPE (2002)`，但不断开连接
+1. **消息类型兼容**：未识别的 Type 返回 `UNKNOWN_MESSAGE_TYPE (2002)`，但不断开连接
 2. **Payload 字段兼容**：
    - 新增字段位于 Payload 末尾，旧版本可忽略
    - 旧版本发送的短 Payload 使用默认值填充缺失字段
@@ -268,6 +268,13 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | 0x81  | ROUTE_UPDATE   | Controller → Client | RouteUpdate   |
 | 0x82  | ROUTE_WITHDRAW | Client → Controller | RouteWithdraw |
 | 0x83  | ROUTE_ACK      | 双向                | RouteAck      |
+
+#### 安全类 (0x90-0x9F)
+
+| Type  | 名称          | 方向                | Payload 格式  |
+| ----- | ------------- | ------------------- | ------------- |
+| 0x90  | NODE_REVOKE   | Controller → All    | NodeRevoke    |
+| 0x91  | NODE_REVOKE_ACK | All → Controller  | NodeRevokeAck |
 
 #### 通用类 (0xF0-0xFF)
 
@@ -384,6 +391,25 @@ signed_data = auth_type (1B)
 | 0x01         | user    | username (len+str) + password_hash (32B)|
 | 0x02         | authkey | key (len+str)                           |
 | 0x03         | machine | 空 (已注册节点重连)                     |
+
+**时间戳验证要求**：
+
+| 参数                   | 值       | 说明                                    |
+| ---------------------- | -------- | --------------------------------------- |
+| 允许时钟偏差           | ±5 分钟  | timestamp 与服务器时间差值上限          |
+| 时钟偏差过大错误码     | 1010     | CLOCK_SKEW_TOO_LARGE                    |
+| 时间戳防重放窗口       | 10 分钟  | 拒绝超过此时间的旧请求                  |
+
+**验证流程**：
+1. 检查 `abs(timestamp - server_time) <= 5 minutes`
+2. 若超出范围，返回错误码 1010 并附带服务器时间供客户端参考
+3. 检查 (machine_key, timestamp) 对是否已见过（防重放）
+
+**客户端时钟同步建议**：
+- 客户端应使用 NTP 同步本地时钟
+- 若收到 CLOCK_SKEW_TOO_LARGE 错误，可选择：
+  1. 调整本地时钟后重试
+  2. 使用服务器返回的时间戳计算偏移量进行补偿
 
 #### 2.4.3 AUTH_RESPONSE Payload (Type=0x02)
 
@@ -589,7 +615,7 @@ signed_data = auth_type (1B)
 | encrypted_payload | 变长 | ChaCha20-Poly1305 加密的 IP 包  |
 | auth_tag          | 16 B | AEAD 认证标签                   |
 
-**最大加密载荷**：65530 (Frame.Length 上限) - 4 - 4 - 12 - 16 = **65494 字节**
+**最大加密载荷**：65535 (Frame.Length 上限) - 4 - 4 - 12 - 16 = **65499 字节**
 
 #### 2.4.6 DATA_ACK Payload (Type=0x21)
 
@@ -809,6 +835,56 @@ P2P 连接保活消息，双向发送。
 │        (RouteIdentifier + error_code)│
 └──────────────────────────────────────┘
 ```
+
+#### 2.4.17.1 NODE_REVOKE Payload (Type=0x90)
+
+节点撤销通知，Controller 广播给所有相关节点。
+
+```
+┌────────────┬────────────┬────────────┬────────────┐
+│revoke_node │  reason    │expires_at  │  signature │
+│   (4 B)    │   (1 B)    │   (8 B)    │  (64 B)    │
+└────────────┴────────────┴────────────┴────────────┘
+```
+
+| 字段        | 大小 | 说明                                        |
+| ----------- | ---- | ------------------------------------------- |
+| revoke_node | 4 B  | 被撤销的节点 ID                             |
+| reason      | 1 B  | 撤销原因 (见下表)                           |
+| expires_at  | 8 B  | 撤销生效时间戳 (毫秒)，0=立即生效           |
+| signature   | 64 B | Controller 签名 (验证撤销合法性)            |
+
+**撤销原因 (reason)**：
+
+| 值   | 名称            | 说明                        |
+| ---- | --------------- | --------------------------- |
+| 0x01 | KEY_COMPROMISED | 密钥泄露                    |
+| 0x02 | ADMIN_REVOKE    | 管理员主动撤销              |
+| 0x03 | POLICY_VIOLATION| 违反安全策略                |
+| 0x04 | NODE_REPLACED   | 节点被替换 (重新注册)       |
+
+**签名覆盖范围**：revoke_node + reason + expires_at
+
+**接收方处理**：
+1. 验证 signature 使用 Controller 公钥
+2. 立即废弃与 revoke_node 的所有 Session Key
+3. 将 revoke_node 加入本地黑名单
+4. 发送 NODE_REVOKE_ACK 确认
+
+#### 2.4.17.2 NODE_REVOKE_ACK Payload (Type=0x91)
+
+```
+┌────────────┬────────────┬────────────┐
+│revoke_node │   status   │  node_id   │
+│   (4 B)    │   (1 B)    │   (4 B)    │
+└────────────┴────────────┴────────────┘
+```
+
+| 字段        | 大小 | 说明                        |
+| ----------- | ---- | --------------------------- |
+| revoke_node | 4 B  | 被撤销的节点 ID             |
+| status      | 1 B  | 0x00=已处理, 0x01=签名无效  |
+| node_id     | 4 B  | 响应方节点 ID               |
 
 #### 2.4.18 RouteInfo 结构 (统一定义)
 
@@ -1254,14 +1330,32 @@ CONFIG 中使用的 STUN 服务器信息。
 
 | 规则           | 说明                                       |
 | -------------- | ------------------------------------------ |
-| 触发条件       | 原始业务 Payload > 65521 字节 (65530 - 9)  |
-| 每片最大业务数据 | 65521 字节 (Length 上限 65530 减去 Fragment Header 9B) |
+| 触发条件       | 原始业务 Payload > 65526 字节 (65535 - 9)  |
+| 每片最大业务数据 | 65526 字节 (Length 上限 65535 减去 Fragment Header 9B) |
 | Frame.Type     | 分片帧的 Type 保持原始消息类型             |
 | orig_type      | Fragment Header 中重复记录原始类型 (用于校验) |
 | Frame.Flags    | 设置 FRAGMENTED (0x08) 标志                |
 | Length 字段    | Fragment Header (9B) + 本片业务数据长度    |
 | 重组超时       | 30 秒内未收齐所有分片则丢弃                |
 | 重组缓冲区     | 每个 message_id 独立缓冲                   |
+
+**分片内存攻击防护**：
+
+| 限制参数                         | 默认值 | 说明                                |
+| -------------------------------- | ------ | ----------------------------------- |
+| max_pending_fragments_per_conn   | 10     | 单连接最大未完成分片消息数量        |
+| max_fragment_buffer_size_global  | 100MB  | 全局分片缓冲区内存上限              |
+| max_fragment_buffer_size_per_conn| 10MB   | 单连接分片缓冲区内存上限            |
+
+**防护策略**：
+
+| 场景                           | 处理方式                              |
+| ------------------------------ | ------------------------------------- |
+| 超出单连接分片消息数量限制     | 丢弃最旧的未完成分片消息              |
+| 超出单连接缓冲区限制           | 返回错误码 2007 (FRAGMENT_LIMIT)      |
+| 超出全局缓冲区限制             | 拒绝新分片，返回错误码 4003 (RATE_LIMITED) |
+| 收到大量分片首包但无后续       | 30 秒超时后自动清理                   |
+| 同一 message_id 分片索引重复   | 丢弃重复分片，记录警告日志            |
 
 **解析流程**：
 1. 读取 Frame Header (5B)，获取 Length 和 Flags
@@ -1450,6 +1544,67 @@ PUNCHING 子状态:
     ┌──────────────────────────────────────────┐
     │              SUCCESS / FAIL              │
     └──────────────────────────────────────────┘
+```
+
+#### 3.2.1 NAT 类型检测与穿透策略
+
+**NAT 类型检测流程**：
+
+```
+1. Client 向 STUN 服务器发送 Binding Request
+2. 比较本地地址与 STUN 响应中的映射地址：
+   - 相同 → OPEN (无 NAT)
+   - 不同 → 继续检测
+3. 向不同 STUN 服务器发送请求，比较映射地址：
+   - 相同 → Cone NAT (需进一步区分)
+   - 不同 → SYMMETRIC NAT
+4. 对于 Cone NAT，通过端口变化测试区分类型
+```
+
+**不同 NAT 组合穿透策略**：
+
+| 发起方 NAT     | 目标方 NAT     | 穿透难度 | 策略                          |
+| -------------- | -------------- | -------- | ----------------------------- |
+| OPEN/FULL_CONE | 任意           | 简单     | 直接连接目标端点              |
+| RESTRICTED     | OPEN/FULL_CONE | 简单     | 发起方先发包打开映射          |
+| RESTRICTED     | RESTRICTED     | 中等     | 双方同时发包                  |
+| PORT_RESTRICTED| PORT_RESTRICTED| 困难     | 需精确端口预测 + 多端口探测   |
+| SYMMETRIC      | SYMMETRIC      | 极困难   | 放弃穿透，使用 Relay          |
+| SYMMETRIC      | 其他           | 困难     | 尝试端口预测，超时后用 Relay  |
+
+**穿透尝试参数**：
+
+| 参数                     | 默认值 | 说明                          |
+| ------------------------ | ------ | ----------------------------- |
+| hole_punch_attempts      | 5      | 每个端点穿透尝试次数          |
+| hole_punch_interval_ms   | 200    | 探测包发送间隔                |
+| port_prediction_range    | 10     | Symmetric NAT 端口预测范围    |
+| simultaneous_open_delay  | 100ms  | 双方同时发包的同步延迟        |
+
+**穿透失败判定**：
+
+| 条件                           | 处理                          |
+| ------------------------------ | ----------------------------- |
+| 所有候选端点均超时             | 转入 RELAY_ONLY 状态          |
+| 双方均为 SYMMETRIC NAT         | 立即放弃穿透，使用 Relay      |
+| 穿透耗时超过 10 秒             | 超时，转入 RELAY_ONLY         |
+
+**P2P 端点优先级规则**：
+
+| 端点类型 | priority 值 | 说明                        |
+| -------- | ----------- | --------------------------- |
+| LAN      | 1 (最高)    | 本地网络，延迟最低          |
+| STUN     | 2           | STUN 探测的公网地址         |
+| UPNP     | 3           | UPnP 映射地址               |
+| RELAY    | 4 (最低)    | Relay 观测地址，仅作备选    |
+
+**优先级选择算法**：
+
+```
+1. 按 priority 升序排列候选端点
+2. 同优先级时，优先选择最近发现的 (discovered 时间戳)
+3. 同时向多个端点发送探测包
+4. 使用首个成功响应的端点建立连接
 ```
 
 ### 3.3 Relay 会话状态机
@@ -1814,6 +1969,59 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 | Counter 不持久化         | Counter 不保存到磁盘，重启后从 0 开始         |
 | 会话状态隔离             | 每个 (src_node, dst_node) 对独立维护会话状态  |
 
+#### 5.3.4 密钥轮换机制
+
+**Node Key 主动轮换**：
+
+| 触发条件               | 说明                                          |
+| ---------------------- | --------------------------------------------- |
+| 时间周期               | 默认每 24 小时轮换一次 Node Key               |
+| Counter 接近溢出       | 当 Counter 超过 2^63 时提前触发轮换           |
+| 管理员强制             | 通过 CLI 命令 `edgelink-client rotate-key`    |
+| 安全事件               | 检测到异常时主动触发                          |
+
+**轮换流程**：
+
+```
+1. 客户端生成新的 Node Key 对
+2. 通过 AUTH_REQUEST (auth_type=machine) 上报新 node_key
+3. Controller 验证 Machine Key 签名后更新记录
+4. Controller 通过 CONFIG_UPDATE 通知所有相关 Peer 新的 node_key
+5. Peer 收到更新后废弃旧 Session Key，使用新 node_key 重新派生
+```
+
+**新旧密钥并存期**：
+
+| 参数                     | 默认值 | 说明                                    |
+| ------------------------ | ------ | --------------------------------------- |
+| key_overlap_period       | 60s    | 新旧密钥并存时间                        |
+| old_key_grace_period     | 30s    | 旧密钥仅接收不发送的宽限期              |
+
+**并存期处理规则**：
+
+| 阶段         | 发送使用   | 接收处理                              |
+| ------------ | ---------- | ------------------------------------- |
+| 新密钥生效前 | 旧密钥     | 仅旧密钥                              |
+| 并存期       | 新密钥     | 新旧密钥均可解密                      |
+| 宽限期       | 新密钥     | 旧密钥仅接收，收到旧密钥包时提示对端更新 |
+| 完全切换后   | 新密钥     | 仅新密钥，旧密钥数据包丢弃            |
+
+**轮换失败回退策略**：
+
+| 失败场景                   | 处理方式                              |
+| -------------------------- | ------------------------------------- |
+| Controller 无响应          | 保持旧密钥，指数退避重试 (最大 5 分钟)|
+| Peer 未收到更新            | 对端使用旧密钥，在宽限期内仍可通信    |
+| Session Key 派生失败       | 降级到 Relay 转发，记录错误日志       |
+
+**配置项**：
+
+| 配置项                     | 类型   | 默认值 | 说明                    |
+| -------------------------- | ------ | ------ | ----------------------- |
+| crypto.key_rotation_interval | uint32 | 86400  | 密钥轮换间隔 (秒)       |
+| crypto.key_overlap_period  | uint32 | 60     | 新旧密钥并存时间 (秒)   |
+| crypto.key_grace_period    | uint32 | 30     | 旧密钥宽限期 (秒)       |
+
 ### 5.4 加密数据包格式
 
 ```
@@ -1844,7 +2052,7 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 | Nonce 长度 | 96 bit (12 bytes)                               |
 | Auth Tag   | 128 bit (16 bytes)                              |
 | 重放保护   | 2048 位滑动窗口                                 |
-| 最大加密载荷 | 65530 - 4 - 4 - 12 - 16 = **65494 bytes**     |
+| 最大加密载荷 | 65535 - 4 - 4 - 12 - 16 = **65499 bytes**     |
 
 ### 5.6 重放攻击防护
 
@@ -1903,6 +2111,7 @@ Payload:
     "node_id": 12345,
     "network_id": 1,
     "type": "auth",
+    "jti": "unique-token-id",  // 用于黑名单
     "iat": 1704787200,
     "exp": 1704873600
 }
@@ -1922,6 +2131,17 @@ Payload:
     "exp": 1704792600
 }
 ```
+
+**jti (JWT ID) 生成规则**：
+
+| 要求           | 说明                                          |
+| -------------- | --------------------------------------------- |
+| 格式           | UUID v4 (RFC 4122)                            |
+| 生成时机       | 每次签发 Token 时生成新的 jti                 |
+| 唯一性保证     | 全局唯一，用于 Token 吊销和防重放             |
+| 存储           | Auth Token 和 Relay Token 均包含 jti          |
+
+**示例**：`"jti": "550e8400-e29b-41d4-a716-446655440000"`
 
 #### 5.7.4 Token 刷新机制
 
@@ -1946,8 +2166,8 @@ Client 需在 Token 过期前主动刷新，避免断连：
 
 | 方案         | 说明                                              | 适用场景            |
 | ------------ | ------------------------------------------------- | ------------------- |
-| 内存 (LRU)   | 基于 `jti` 的 LRU 缓存，默认容量 10000 条         | 单 Controller       |
-| 数据库       | 持久化存储，支持过期自动清理                      | 多 Controller HA    |
+| 内存 (LRU)   | 基于 `jti` 的 LRU 缓存，默认容量 10000 条         | 开发/测试环境       |
+| 数据库       | 持久化存储，支持过期自动清理，重启后自动恢复      | 生产环境（推荐）    |
 
 **黑名单表结构** (数据库方案)：
 
@@ -1962,11 +2182,11 @@ CREATE TABLE token_blacklist (
 CREATE INDEX idx_blacklist_expires ON token_blacklist(expires_at);
 ```
 
-**多 Controller 同步**：
-- HA 部署时，黑名单需通过数据库共享
-- 每个 Controller 启动时加载未过期的黑名单到内存缓存
+**Controller 重启恢复**：
+- Controller 启动时从数据库加载未过期的黑名单到内存缓存
 - 新增黑名单时同步写入数据库和本地缓存
 - 定时任务清理已过期的黑名单条目 (Token.expires_at < now)
+- 重启后所有客户端会自动重连，无需人工干预
 
 **验证流程**：
 1. 验证 JWT 签名和过期时间
@@ -2109,7 +2329,7 @@ Client A               Controller               Client B
 | RouteService   | 路由管理与计算                                  |
 | PathService    | 路径计算与延迟优化                              |
 | Database       | SQLite 持久化                                   |
-| BuiltinRelay   | 可选的内置 Relay 功能                           |
+| BuiltinRelay   | 可选的内置 Relay 功能 (不参与 Mesh)             |
 | BuiltinSTUN    | 可选的内置 STUN 功能                            |
 
 #### 数据表
@@ -2126,6 +2346,44 @@ Client A               Controller               Client B
 | p2p_connections | P2P 连接状态       |
 | endpoints       | 节点端点           |
 | user_nodes      | 用户与节点绑定关系 |
+
+#### 数据库配置要求
+
+**SQLite 运行模式**：
+
+| 配置项           | 值          | 说明                                |
+| ---------------- | ----------- | ----------------------------------- |
+| journal_mode     | WAL         | Write-Ahead Logging，提高并发性能   |
+| synchronous      | NORMAL      | 平衡性能与数据安全                  |
+| busy_timeout     | 5000        | 锁等待超时 (毫秒)                   |
+| foreign_keys     | ON          | 启用外键约束                        |
+| cache_size       | -64000      | 64MB 页面缓存                       |
+
+**事务隔离级别**：SQLite 在 WAL 模式下默认使用 SERIALIZABLE 隔离级别。
+
+**并发写入处理**：
+- SQLite 同一时间仅允许一个写事务
+- 使用连接池管理，写操作排队执行
+- 读操作可并发进行（WAL 模式）
+
+**数据库备份策略**：
+
+| 场景               | 备份方式                          |
+| ------------------ | --------------------------------- |
+| 定期备份           | 使用 SQLite `.backup` 命令        |
+| 实时备份           | 复制 WAL 文件 + 主数据库文件      |
+| 备份频率           | 建议每日一次完整备份              |
+| 备份保留           | 保留最近 7 天备份                 |
+
+**启动时初始化**：
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA busy_timeout = 5000;
+PRAGMA foreign_keys = ON;
+PRAGMA cache_size = -64000;
+```
 
 #### 节点表 (nodes) 字段
 
@@ -2158,21 +2416,9 @@ Client A               Controller               Client B
 | created_at    | timestamp | 创建时间            |
 | last_login    | timestamp | 最后登录时间        |
 
-#### AuthKey 表 (authkeys) 字段
+#### AuthKey 表 (authkeys)
 
-| 字段        | 类型      | 说明                            |
-| ----------- | --------- | ------------------------------- |
-| id          | uint32    | 密钥 ID                         |
-| key         | string    | 密钥值 (格式: tskey-xxxx-xxxxx) |
-| network_id  | uint32    | 所属网络                        |
-| user_id     | uint32    | 创建者用户 ID                   |
-| description | string    | 描述                            |
-| ephemeral   | bool      | 临时节点 (断开后删除)           |
-| reusable    | bool      | 可重复使用                      |
-| max_uses    | uint32    | 最大使用次数 (0=无限)           |
-| use_count   | uint32    | 已使用次数                      |
-| expires_at  | timestamp | 过期时间                        |
-| created_at  | timestamp | 创建时间                        |
+> 详细字段定义见 [附录 J: 数据库表定义](#附录-j-数据库表定义) 中的 authkeys 表。
 
 ### 7.2 Relay
 
@@ -2570,6 +2816,63 @@ EdgeLink 使用 spdlog 作为日志后端，但**禁止直接使用 `SPDLOG_LOGG
 | `/api/v1/admin/log/level`     | PUT   | 设置全局日志等级     |
 | `/api/v1/admin/log/level/:module` | PUT | 设置指定模块日志等级 |
 
+#### 9.6.5 健康检查端点
+
+Controller、Relay 均提供以下健康检查 HTTP 端点：
+
+| 端点                | 方法 | 说明                                    |
+| ------------------- | ---- | --------------------------------------- |
+| `/health`           | GET  | 基本存活检查，返回 200 表示进程运行     |
+| `/health/live`      | GET  | 存活探针 (Liveness)，进程是否需要重启   |
+| `/health/ready`     | GET  | 就绪探针 (Readiness)，是否可接受流量    |
+
+**响应格式**：
+
+```json
+{
+  "status": "healthy",
+  "version": "1.0.0",
+  "uptime_seconds": 3600,
+  "checks": {
+    "database": "ok",
+    "controller_connection": "ok"
+  }
+}
+```
+
+**就绪检查依赖项**：
+
+| 组件       | 检查项                                    |
+| ---------- | ----------------------------------------- |
+| Controller | 数据库连接正常                            |
+| Relay      | 数据库 (如有) + Controller 连接正常       |
+| Client     | Controller 连接正常 + TUN 设备就绪        |
+
+**HTTP 状态码**：
+
+| 状态码 | 含义                    |
+| ------ | ----------------------- |
+| 200    | 健康                    |
+| 503    | 不健康/未就绪           |
+
+**Kubernetes 集成示例**：
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+```
+
 ### 9.7 日志输出目标
 
 | 目标类型     | 说明                             | 配置项           |
@@ -2822,13 +3125,56 @@ Client 收到响应:
 
 #### 9.16.1 Prometheus 指标
 
-日志系统暴露以下 Prometheus 指标：
+**通用指标** (所有组件)：
 
-| 指标名                          | 类型    | 说明                    |
-| ------------------------------- | ------- | ----------------------- |
-| `edgelink_log_messages_total`   | Counter | 各级别日志消息计数      |
-| `edgelink_log_dropped_total`    | Counter | 队列溢出丢弃的日志数    |
-| `edgelink_log_write_latency_us` | Histogram | 日志写入延迟          |
+| 指标名                              | 类型      | 标签                    | 说明                    |
+| ----------------------------------- | --------- | ----------------------- | ----------------------- |
+| `edgelink_info`                     | Gauge     | version, component      | 版本信息 (值恒为 1)     |
+| `edgelink_uptime_seconds`           | Gauge     | -                       | 进程运行时间            |
+| `edgelink_log_messages_total`       | Counter   | level                   | 各级别日志消息计数      |
+| `edgelink_log_dropped_total`        | Counter   | -                       | 队列溢出丢弃的日志数    |
+
+**Controller 指标**：
+
+| 指标名                                    | 类型      | 标签              | 说明                    |
+| ----------------------------------------- | --------- | ----------------- | ----------------------- |
+| `edgelink_controller_connections_active`  | Gauge     | type=client/relay | 当前活跃连接数          |
+| `edgelink_controller_nodes_total`         | Gauge     | status=online/offline | 节点总数            |
+| `edgelink_controller_auth_requests_total` | Counter   | result, auth_type | 认证请求计数            |
+| `edgelink_controller_config_pushes_total` | Counter   | type              | 配置推送计数            |
+| `edgelink_controller_db_queries_total`    | Counter   | operation         | 数据库查询计数          |
+| `edgelink_controller_db_latency_seconds`  | Histogram | operation         | 数据库操作延迟          |
+
+**Relay 指标**：
+
+| 指标名                                  | 类型      | 标签              | 说明                    |
+| --------------------------------------- | --------- | ----------------- | ----------------------- |
+| `edgelink_relay_connections_active`     | Gauge     | type=client/mesh  | 当前活跃连接数          |
+| `edgelink_relay_data_bytes_total`       | Counter   | direction=tx/rx   | 传输数据量              |
+| `edgelink_relay_packets_total`          | Counter   | direction=tx/rx   | 传输数据包数            |
+| `edgelink_relay_forward_latency_seconds`| Histogram | path=local/mesh   | 转发延迟                |
+| `edgelink_relay_auth_requests_total`    | Counter   | result            | 客户端认证请求          |
+| `edgelink_relay_controller_connected`   | Gauge     | -                 | Controller 连接状态 (0/1)|
+| `edgelink_relay_mesh_peers_total`       | Gauge     | -                 | Mesh 连接的 Relay 数量  |
+
+**Client 指标**：
+
+| 指标名                                  | 类型      | 标签              | 说明                    |
+| --------------------------------------- | --------- | ----------------- | ----------------------- |
+| `edgelink_client_state`                 | Gauge     | state             | 当前状态 (枚举值)       |
+| `edgelink_client_peers_total`           | Gauge     | status=p2p/relay  | 对端节点数              |
+| `edgelink_client_p2p_success_rate`      | Gauge     | -                 | P2P 打洞成功率          |
+| `edgelink_client_data_bytes_total`      | Counter   | direction, path   | 传输数据量              |
+| `edgelink_client_latency_seconds`       | Histogram | peer_node, path   | 到各节点延迟            |
+| `edgelink_client_controller_latency_seconds` | Gauge | -                | Controller RTT          |
+| `edgelink_client_relay_latency_seconds` | Gauge     | relay_id          | Relay RTT               |
+
+**Prometheus 端点**：
+
+| 端点             | 说明                    |
+| ---------------- | ----------------------- |
+| `/metrics`       | Prometheus 格式指标     |
+| 默认端口         | 与主服务同端口          |
 
 #### 9.16.2 日志采集配置示例
 
@@ -2983,12 +3329,14 @@ scrape_configs:
 | 1007 | AUTH_FAILED         | 认证失败                 |
 | 1008 | AUTHKEY_EXPIRED     | AuthKey 已过期           |
 | 1009 | AUTHKEY_LIMIT       | AuthKey 使用次数已达上限 |
+| 1010 | CLOCK_SKEW_TOO_LARGE| 时钟偏差过大             |
 | 2001 | INVALID_FRAME       | 无效帧格式               |
-| 2002 | INVALID_MESSAGE     | 无效消息                 |
+| 2002 | UNKNOWN_MESSAGE_TYPE| 未知消息类型             |
 | 2003 | UNSUPPORTED_VERSION | 不支持的协议版本         |
 | 2004 | MESSAGE_TOO_LARGE   | 消息过大                 |
 | 2005 | FRAGMENT_TIMEOUT    | 分片重组超时             |
 | 2006 | FRAGMENT_INVALID    | 无效分片                 |
+| 2007 | FRAGMENT_LIMIT      | 分片缓冲区超限           |
 | 3001 | NODE_NOT_FOUND      | 节点未找到               |
 | 3002 | NODE_OFFLINE        | 节点离线                 |
 | 3003 | ROUTE_NOT_FOUND     | 路由未找到               |
@@ -3052,7 +3400,7 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | jwt.auth_token_ttl       | uint32 | 1440      | Auth Token 有效期(分钟)  |
 | jwt.relay_token_ttl      | uint32 | 90        | Relay Token 有效期(分钟) |
 | database.path            | string | -         | 数据库路径               |
-| builtin_relay.enabled    | bool   | false     | 启用内置 Relay           |
+| builtin_relay.enabled    | bool   | false     | 启用内置 Relay (不参与 Mesh) |
 | builtin_stun.enabled     | bool   | false     | 启用内置 STUN            |
 | builtin_stun.ip          | string | ""        | 公网 IP (NAT 检测)       |
 | log.level                | string | "info"    | 全局日志等级             |
@@ -3067,8 +3415,8 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | log.async                | bool   | true      | 启用异步日志             |
 | log.modules.<name>       | string | 继承全局  | 指定模块的日志等级       |
 | worker_threads           | uint32 | 0         | 工作线程数 (0=CPU核心数) |
-| heartbeat.interval       | uint32 | 30        | 心跳发送间隔 (秒)        |
-| heartbeat.timeout        | uint32 | 90        | 心跳超时时间 (秒)        |
+| control_heartbeat.interval | uint32 | 30      | 控制通道心跳发送间隔 (秒) |
+| control_heartbeat.timeout  | uint32 | 90      | 控制通道心跳超时时间 (秒) |
 | queue.capacity           | uint32 | 65536     | 消息队列最大容量         |
 | queue.high_watermark     | float  | 0.8       | 高水位线 (触发背压)      |
 | queue.low_watermark      | float  | 0.5       | 低水位线 (恢复正常)      |
@@ -3101,8 +3449,8 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | log.file.max_files       | uint32 | 10        | 保留文件数量             |
 | log.modules.<name>       | string | 继承全局  | 指定模块的日志等级       |
 | worker_threads           | uint32 | 0         | 工作线程数 (0=CPU核心数) |
-| heartbeat.interval       | uint32 | 30        | 心跳发送间隔 (秒)        |
-| heartbeat.timeout        | uint32 | 90        | 心跳超时时间 (秒)        |
+| control_heartbeat.interval | uint32 | 30      | 控制通道心跳发送间隔 (秒) |
+| control_heartbeat.timeout  | uint32 | 90      | 控制通道心跳超时时间 (秒) |
 | reconnect.initial_delay  | uint32 | 1000      | 重连初始延迟 (毫秒)      |
 | reconnect.max_delay      | uint32 | 60000     | 重连最大延迟 (毫秒)      |
 | reconnect.multiplier     | float  | 2.0       | 重连延迟倍数             |
@@ -3129,8 +3477,8 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | log.file.path            | string   | -         | 日志文件路径               |
 | log.modules.<name>       | string   | 继承全局  | 指定模块的日志等级         |
 | worker_threads           | uint32   | 0         | 工作线程数 (0=CPU核心数)   |
-| heartbeat.interval       | uint32   | 30        | 心跳发送间隔 (秒)          |
-| heartbeat.timeout        | uint32   | 90        | 心跳超时时间 (秒)          |
+| control_heartbeat.interval | uint32 | 30        | 控制通道心跳发送间隔 (秒)  |
+| control_heartbeat.timeout  | uint32 | 90        | 控制通道心跳超时时间 (秒)  |
 | reconnect.initial_delay  | uint32   | 1000      | 重连初始延迟 (毫秒)        |
 | reconnect.max_delay      | uint32   | 60000     | 重连最大延迟 (毫秒)        |
 | reconnect.multiplier     | float    | 2.0       | 重连延迟倍数               |
@@ -3292,7 +3640,7 @@ edgelink-controller <子命令> [选项]
 | `--jwt-private-key`| -              | ES256 私钥路径          |
 | `--jwt-public-key` | -              | ES256 公钥路径          |
 | `--jwt-secret`    | -               | HS256 密钥 (开发环境)   |
-| `--builtin-relay` | `false`         | 启用内置 Relay          |
+| `--builtin-relay` | `false`         | 启用内置 Relay (不参与 Mesh) |
 | `--builtin-stun`  | `false`         | 启用内置 STUN           |
 | `--public-ip`     | -               | 公网 IP (用于 NAT 检测) |
 
@@ -3876,7 +4224,7 @@ relay_token_ttl = 90
 path = "/var/lib/edgelink/db.sqlite"
 
 [builtin_relay]
-enabled = false
+enabled = false                        # 内置 Relay 不参与 Mesh 网络
 
 [builtin_stun]
 enabled = false
@@ -4050,6 +4398,7 @@ Controller 使用 SQLite 持久化存储，以下为核心表结构。
 | user_id        | INTEGER   | NOT NULL REFERENCES users(id) | 创建者用户 ID       |
 | network_id     | INTEGER   | NOT NULL REFERENCES networks(id) | 目标网络         |
 | type           | TEXT      | NOT NULL                  | 类型: auth/reusable/ephemeral |
+| description    | TEXT      |                           | 描述 (可选)             |
 | use_count      | INTEGER   | NOT NULL DEFAULT 0        | 已使用次数              |
 | max_uses       | INTEGER   |                           | 最大使用次数 (NULL=无限)|
 | expires_at     | INTEGER   |                           | 过期时间 (毫秒时间戳)   |
@@ -4065,6 +4414,7 @@ Controller 使用 SQLite 持久化存储，以下为核心表结构。
 | gateway_node   | INTEGER   | NOT NULL REFERENCES nodes(id) | 网关节点 ID         |
 | metric         | INTEGER   | NOT NULL DEFAULT 100      | 路由优先级              |
 | is_exit        | INTEGER   | NOT NULL DEFAULT 0        | 是否 Exit Node 路由     |
+| enabled        | INTEGER   | NOT NULL DEFAULT 1        | 是否启用 (0/1)          |
 | created_at     | INTEGER   | NOT NULL                  | 创建时间 (毫秒时间戳)   |
 
 #### endpoints 表
@@ -4112,6 +4462,7 @@ Controller 使用 SQLite 持久化存储，以下为核心表结构。
 | state          | TEXT      | NOT NULL                  | 状态: attempting/established/failed |
 | method         | TEXT      |                           | 打洞方式: direct/stun/relay |
 | relay_id       | INTEGER   | REFERENCES servers(id)    | 中继服务器 (如使用)     |
+| rtt_ms         | INTEGER   |                           | 最近测量的 RTT (毫秒)   |
 | established_at | INTEGER   |                           | 建立时间 (毫秒时间戳)   |
 | last_activity  | INTEGER   |                           | 最后活动时间 (毫秒时间戳) |
 | created_at     | INTEGER   | NOT NULL                  | 创建时间 (毫秒时间戳)   |
@@ -4151,3 +4502,177 @@ CREATE INDEX idx_p2p_connections_state ON p2p_connections(state);
 | Node Key       | 节点密钥交换密钥对 (X25519)，可轮换               |
 | AuthKey        | 一次性或可重用的节点注册凭据                      |
 | Exit Node      | 提供默认路由 (0.0.0.0/0) 的特殊节点               |
+
+### 附录 L: 协议版本升级迁移指南
+
+#### L.1 版本兼容性策略
+
+| 策略             | 说明                                        |
+| ---------------- | ------------------------------------------- |
+| 向后兼容期       | 新版本发布后，支持旧版本协议至少 6 个月     |
+| 版本协商         | 客户端发送支持的最高版本，服务端选择双方支持的最高版本 |
+| 强制升级通知     | 低于最低支持版本时，返回 UNSUPPORTED_VERSION (2003) |
+
+#### L.2 从 v0x01 迁移到 v0x02
+
+**主要变更**：
+
+| 变更项           | v0x01                 | v0x02                 |
+| ---------------- | --------------------- | --------------------- |
+| Payload 格式     | JSON                  | 二进制                |
+| 消息类型编号     | 0x01-0x0F             | 按类别分段 (0x00-0xFF)|
+| 路由消息         | 不支持                | 新增 ROUTE_* 系列     |
+| 分片支持         | 不支持                | 支持 (Flags 0x08)     |
+
+**迁移步骤**：
+
+```
+1. 升级 Controller 到支持 v0x02 的版本
+   - Controller 自动支持 v0x01 和 v0x02 客户端
+
+2. 逐步升级 Relay 节点
+   - 可按区域分批升级
+   - 升级后的 Relay 同时支持两种版本
+
+3. 升级客户端
+   - 客户端升级后自动使用 v0x02
+   - 若 Relay 不支持 v0x02，自动降级到 v0x01
+
+4. 结束兼容期
+   - 确认所有客户端已升级后
+   - Controller 配置 min_protocol_version = 0x02
+   - 拒绝 v0x01 连接
+```
+
+**数据库迁移**：v0x01 到 v0x02 无数据库 schema 变更。
+
+#### L.3 版本检测配置
+
+| 配置项                   | 类型   | 默认值 | 说明                    |
+| ------------------------ | ------ | ------ | ----------------------- |
+| min_protocol_version     | uint8  | 0x01   | 最低支持协议版本        |
+| max_protocol_version     | uint8  | 0x02   | 最高支持协议版本        |
+| deprecation_warning      | bool   | true   | 向低版本客户端发送升级提示 |
+
+### 附录 M: 故障排查指南
+
+#### M.1 认证失败排查
+
+| 症状                       | 可能原因                | 排查步骤                          |
+| -------------------------- | ----------------------- | --------------------------------- |
+| 错误码 1001 INVALID_TOKEN  | Token 格式错误          | 检查 Token 是否完整复制           |
+| 错误码 1002 TOKEN_EXPIRED  | Token 已过期            | 检查客户端时钟，刷新 Token        |
+| 错误码 1004 INVALID_SIGNATURE | 签名验证失败         | 检查 Machine Key 是否匹配         |
+| 错误码 1008 AUTHKEY_EXPIRED| AuthKey 已过期          | 创建新的 AuthKey                  |
+| 错误码 1010 CLOCK_SKEW     | 时钟偏差过大            | 同步客户端时钟 (NTP)              |
+
+**诊断命令**：
+
+```bash
+# 检查客户端状态
+edgelink-client status --json
+
+# 查看认证相关日志
+edgelink-client log level client.control debug
+edgelink-client up 2>&1 | grep -i auth
+```
+
+#### M.2 P2P 连接失败排查
+
+| 症状                       | 可能原因                | 排查步骤                          |
+| -------------------------- | ----------------------- | --------------------------------- |
+| 所有连接走 Relay           | NAT 类型不兼容          | 检查两端 NAT 类型                 |
+| 打洞超时                   | 防火墙阻断 UDP          | 检查 UDP 端口是否开放             |
+| STUN 查询失败              | STUN 服务器不可达       | 检查 STUN 服务器配置和网络        |
+| 间歇性断开                 | NAT 映射超时            | 调整 keepalive 间隔               |
+
+**诊断命令**：
+
+```bash
+# 查看对端连接状态
+edgelink-client peers --json
+
+# 启用 P2P 调试日志
+edgelink-client log level client.p2p trace
+
+# 手动测试 STUN
+edgelink-client stun-test <stun-server>
+```
+
+#### M.3 延迟异常排查
+
+| 症状                       | 可能原因                | 排查步骤                          |
+| -------------------------- | ----------------------- | --------------------------------- |
+| 延迟突然升高               | P2P 降级到 Relay        | 检查 P2P 连接状态                 |
+| 延迟持续高                 | Relay 选择不优          | 检查延迟上报，手动选择 Relay      |
+| 延迟抖动大                 | 网络拥塞                | 检查中间网络质量                  |
+
+**诊断命令**：
+
+```bash
+# Ping 指定节点
+edgelink-client ping <node-ip> --count 10
+
+# 查看路径选择
+edgelink-client status --verbose
+```
+
+#### M.4 常用日志模式
+
+| 问题类型         | 建议日志配置                              |
+| ---------------- | ----------------------------------------- |
+| 认证问题         | `controller.auth=debug`, `client.control=debug` |
+| P2P 问题         | `client.p2p=trace`, `relay.stun=debug`    |
+| 路由问题         | `controller.route=debug`, `client.route=debug` |
+| 性能问题         | `relay.forward=debug`, 启用 Prometheus    |
+
+### 附录 N: 安全加固清单
+
+#### N.1 部署前检查
+
+| 检查项                     | 要求                                    | 验证方法                |
+| -------------------------- | --------------------------------------- | ----------------------- |
+| TLS 证书有效期             | 剩余有效期 > 30 天                      | `openssl x509 -enddate` |
+| TLS 证书链完整             | 包含中间证书                            | SSL Labs 测试           |
+| 私钥文件权限               | 600 (仅 owner 可读写)                   | `ls -la`                |
+| JWT 密钥安全               | ES256 密钥或足够强度的 HS256 密钥       | 密钥长度检查            |
+| 数据库文件权限             | 600 (仅 owner 可读写)                   | `ls -la`                |
+| 日志目录权限               | 700 (仅 owner 可访问)                   | `ls -la`                |
+
+#### N.2 运行时安全
+
+| 检查项                     | 要求                                    | 验证方法                |
+| -------------------------- | --------------------------------------- | ----------------------- |
+| 日志脱敏                   | 无完整密钥/Token 输出                   | 检查日志内容            |
+| Token 过期时间             | Auth Token ≤ 24h, Relay Token ≤ 2h      | 检查配置                |
+| 认证失败限流               | 启用并配置合理阈值                      | 检查配置                |
+| 节点撤销机制               | 可快速撤销泄露节点                      | 测试撤销流程            |
+
+#### N.3 网络安全
+
+| 检查项                     | 要求                                    | 验证方法                |
+| -------------------------- | --------------------------------------- | ----------------------- |
+| Controller 端口            | 仅开放必要端口 (8080)                   | `netstat`/`ss`          |
+| Relay 端口                 | WSS (8081) + STUN UDP (3478)            | `netstat`/`ss`          |
+| 防火墙规则                 | 限制源 IP (如适用)                      | 检查防火墙配置          |
+| DDoS 防护                  | 启用 CDN 或云防护                       | 检查部署架构            |
+
+#### N.4 监控告警
+
+| 告警项                     | 阈值建议                                |
+| -------------------------- | --------------------------------------- |
+| 认证失败率                 | > 10% 触发告警                          |
+| Controller 响应延迟        | P99 > 500ms 触发告警                    |
+| Relay 连接数               | > 80% 容量触发告警                      |
+| 证书过期                   | 剩余 < 14 天触发告警                    |
+| 磁盘空间 (日志)            | 剩余 < 20% 触发告警                     |
+
+#### N.5 定期审计
+
+| 审计项                     | 频率       | 内容                              |
+| -------------------------- | ---------- | --------------------------------- |
+| 访问日志审计               | 每日       | 检查异常认证尝试                  |
+| 节点清单审计               | 每周       | 确认所有节点为授权设备            |
+| AuthKey 审计               | 每月       | 清理过期/未使用的 AuthKey         |
+| 依赖库安全更新             | 每月       | 检查并更新有漏洞的依赖            |
+| 密钥轮换                   | 每年       | 轮换 JWT 签名密钥                 |
