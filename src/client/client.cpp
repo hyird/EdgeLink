@@ -197,6 +197,12 @@ void Client::on_tun_packet(std::span<const uint8_t> packet) {
     auto dst_ip = ip_packet::dst_ipv4(packet);
     auto src_ip = ip_packet::src_ipv4(packet);
 
+    // Silently drop multicast (224.0.0.0/4) and broadcast (255.255.255.255)
+    uint8_t first_octet = (dst_ip.to_u32() >> 24) & 0xFF;
+    if (first_octet >= 224 || dst_ip.to_u32() == 0xFFFFFFFF) {
+        return;
+    }
+
     spdlog::debug("TUN packet: {} -> {} ({} bytes)",
                   src_ip.to_string(), dst_ip.to_string(), packet.size());
 
