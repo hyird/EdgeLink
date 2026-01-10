@@ -1,6 +1,6 @@
 # EdgeLink 架构设计文档
 
-> **版本**: 2.7
+> **版本**: 2.8
 > **更新日期**: 2026-01-10
 > **协议版本**: 0x02
 
@@ -3041,6 +3041,7 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | ------------------------ | ------ | --------- | ------------------------ |
 | http.listen_address      | string | "0.0.0.0" | 监听地址                 |
 | http.listen_port         | uint16 | 8080      | 监听端口                 |
+| http.public_url          | string | -         | 对外公开 URL (CDN/反代场景) |
 | http.enable_tls          | bool   | false     | 启用 TLS                 |
 | tls.cert_path            | string | -         | 证书路径                 |
 | tls.key_path             | string | -         | 私钥路径                 |
@@ -3079,12 +3080,15 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | ------------------------ | ------ | --------- | ------------------------ |
 | relay.listen_address     | string | "0.0.0.0" | 监听地址                 |
 | relay.listen_port        | uint16 | 8081      | 监听端口                 |
+| relay.public_url         | string | -         | 对外公开 URL (CDN/反代场景) |
 | relay.tls.enabled        | bool   | false     | 启用 TLS                 |
 | relay.tls.cert_file      | string | -         | 证书路径                 |
 | relay.tls.key_file       | string | -         | 私钥路径                 |
 | stun.enabled             | bool   | true      | 启用 STUN                |
-| stun.listen_port         | uint16 | 3478      | STUN 端口                |
-| stun.ip                  | string | ""        | 公网 IP (NAT 检测)       |
+| stun.listen_address      | string | "0.0.0.0" | STUN 监听地址            |
+| stun.listen_port         | uint16 | 3478      | STUN 监听端口            |
+| stun.public_ip           | string | -         | STUN 公网 IP (绕过 CDN)  |
+| stun.public_port         | uint16 | -         | STUN 公网端口 (NAT 映射) |
 | controller.url           | string | -         | Controller WSS URL       |
 | controller.token         | string | -         | 服务器 Token             |
 | server.name              | string | hostname  | 服务器名称               |
@@ -3152,6 +3156,77 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | 重连时         | 使用 machine_key 签名认证 (auth_type=0x03)    |
 | 配置文件处理   | 注册成功后可选择从配置文件中移除              |
 | 安全建议       | 不建议将 AuthKey 持久化到配置文件             |
+
+### 12.5 CDN/反向代理部署
+
+当 Controller 或 Relay 部署在 CDN 或反向代理后时，需配置对外公开的 URL。
+
+#### 部署架构
+
+```
+                              ┌─────────────┐
+                              │   Client    │
+                              └──────┬──────┘
+                                     │
+                    ┌────────────────┼────────────────┐
+                    │ WebSocket      │                │ UDP (STUN)
+                    ▼                │                ▼
+             ┌──────────┐            │         ┌───────────┐
+             │   CDN    │            │         │  公网 IP  │
+             │ (WSS)    │            │         │ (直连)    │
+             └────┬─────┘            │         └─────┬─────┘
+                  │                  │               │
+                  ▼                  │               ▼
+         ┌────────────────┐         │      ┌─────────────────┐
+         │ Controller     │         │      │  Relay (STUN)   │
+         │ listen:8080    │         │      │  listen:3478    │
+         └────────────────┘         │      └─────────────────┘
+                                    │
+                                    ▼
+                            ┌──────────────┐
+                            │ Relay (WSS)  │
+                            │ listen:8081  │
+                            └──────────────┘
+```
+
+#### 配置说明
+
+| 组件       | 配置项                | 说明                                  |
+| ---------- | --------------------- | ------------------------------------- |
+| Controller | `http.public_url`     | 客户端连接 URL，下发给客户端配置      |
+| Relay      | `relay.public_url`    | 数据链路 URL，注册时上报给 Controller |
+| Relay      | `stun.public_ip`      | STUN 公网 IP，绕过 CDN 直连           |
+| Relay      | `stun.public_port`    | STUN 公网端口 (如有 NAT 映射)         |
+
+#### 关键约束
+
+1. **WebSocket 可走 CDN**：Controller 和 Relay 的 WSS 连接可以通过 CDN 加速
+2. **STUN 必须直连**：UDP 打洞需要真实公网 IP，不能走 CDN/代理
+3. **URL 自动传播**：
+   - Controller 的 `public_url` 通过 CONFIG 下发给 Client
+   - Relay 的 `public_url` 在 SERVER_REGISTER 时上报，Controller 分发给 Client
+
+#### 示例：CloudFlare CDN 部署
+
+```toml
+# controller.toml
+[http]
+listen_address = "0.0.0.0"
+listen_port = 8080
+public_url = "wss://vpn.example.com"    # CloudFlare 代理的域名
+
+# relay.toml
+[relay]
+listen_address = "0.0.0.0"
+listen_port = 8081
+public_url = "wss://relay-tokyo.example.com"  # CDN 代理 (数据面)
+
+[stun]
+enabled = true
+listen_port = 3478
+public_ip = "203.0.113.10"             # 真实公网 IP (绕过 CDN)
+public_port = 3478
+```
 
 ---
 
@@ -3774,6 +3849,8 @@ Payload (1472 bytes):
 listen_address = "0.0.0.0"
 listen_port = 8080
 enable_tls = true
+# CDN/反向代理场景: 配置对外公开的 URL
+# public_url = "wss://vpn.example.com"
 
 [tls]
 cert_path = "/etc/edgelink/cert.pem"
@@ -3822,6 +3899,8 @@ max_files = 10
 [relay]
 listen_address = "0.0.0.0"
 listen_port = 8081
+# CDN/反向代理场景: 配置对外公开的 URL (数据链路走 CDN)
+# public_url = "wss://relay.example.com"
 
 [relay.tls]
 enabled = true
@@ -3830,8 +3909,12 @@ key_file = "/etc/edgelink/key.pem"
 
 [stun]
 enabled = true
+listen_address = "0.0.0.0"
 listen_port = 3478
-ip = "203.0.113.10"
+# STUN 必须配置真实公网 IP (UDP 打洞不走 CDN)
+public_ip = "203.0.113.10"
+# 如有 NAT 映射，配置外部端口
+# public_port = 3478
 
 [controller]
 url = "wss://controller.example.com:8080"
