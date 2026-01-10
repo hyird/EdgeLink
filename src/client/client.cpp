@@ -227,14 +227,15 @@ asio::awaitable<bool> Client::start() {
     state_ = ClientState::STARTING;
     spdlog::info("Starting client...");
 
-    // Determine key file path
-    std::string key_file;
-    if (!config_.state_dir.empty()) {
-        key_file = config_.state_dir + "/keys";
-    } else {
-        // Default: .edgelink/keys in current directory
-        key_file = ".edgelink/keys";
+    // Determine state directory (use default if not specified)
+    std::string state_dir = config_.state_dir;
+    if (state_dir.empty()) {
+        state_dir = ".edgelink";
     }
+    spdlog::info("State directory: {}", state_dir);
+
+    // Key file is always stored in state_dir
+    std::string key_file = state_dir + "/keys";
 
     // Try to load existing keys, or generate new ones
     auto load_result = crypto_.load_keys_from_file(key_file);
