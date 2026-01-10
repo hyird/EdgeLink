@@ -73,6 +73,42 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | **控制面中心化** | Controller 作为控制中心管理认证与配置（单点部署，无状态设计便于故障恢复） |
 | **数据面去中心化** | 节点间优先 P2P 直连，Relay 仅作为回退路径              |
 
+### 1.4 Controller 故障恢复
+
+Controller 采用单点部署设计，通过以下机制实现快速故障恢复：
+
+**故障影响分析**：
+
+| Controller 状态 | 已连接节点                         | 新连接节点              |
+| --------------- | ---------------------------------- | ----------------------- |
+| 正常运行        | 正常通信                           | 正常认证                |
+| 临时故障 (<5min)| 继续使用缓存配置，P2P/Relay 正常   | 无法认证，排队等待      |
+| 长时间故障      | Relay 保持转发，P2P 缓存有效期内正常 | 无法加入网络            |
+
+**故障恢复策略**：
+
+| 策略               | 说明                                               |
+| ------------------ | -------------------------------------------------- |
+| 无状态设计         | Controller 不保存会话状态，重启后节点自动重连重认证 |
+| SQLite 数据库      | 数据持久化到本地 SQLite，支持快速启动              |
+| 定期备份           | 建议每小时备份 data_dir，保留最近 7 天备份         |
+| 客户端重连策略     | 指数退避重连 (1s→2s→4s...→60s)，支持多 Controller URL |
+
+**多 Controller URL 配置**：
+
+客户端支持配置多个 Controller URL，按优先级顺序尝试连接：
+
+```toml
+[controller]
+urls = [
+  "wss://controller1.example.com/api/v1/control",
+  "wss://controller2.example.com/api/v1/control"  # 备用
+]
+failover_timeout = 5000  # 切换超时 (毫秒)
+```
+
+**注意**：多 URL 仅用于 DNS 故障或网络分区场景的客户端容错，不提供 Controller 自身的高可用。生产环境建议配合外部监控和快速恢复流程。
+
 ---
 
 ## 2. 高并发设计要求
@@ -129,7 +165,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | 广播消息          | 每个线程维护本地会话列表，各自广播    |
 | 全局统计          | 各线程本地统计，定期汇总或使用 atomic |
 
-### 2.4.1 背压机制
+### 2.5 背压机制
 
 **MPSC 队列背压策略**：
 
@@ -177,7 +213,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | `backpressure_active`         | Gauge     | 是否处于背压状态    |
 | `backpressure_duration_sec`   | Histogram | 背压持续时间        |
 
-### 2.5 无锁设计要求
+### 2.6 无锁设计要求
 
 | 数据结构       | 无锁方案                           |
 | -------------- | ---------------------------------- |
@@ -186,7 +222,7 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | 全局统计计数   | std::atomic                        |
 | 节点位置缓存   | 每线程本地副本 + 定期同步          |
 
-### 2.6 NodeLocationCache 设计
+### 2.7 NodeLocationCache 设计
 
 #### 缓存策略
 
@@ -215,14 +251,14 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | 节点快速迁移   | 使用版本号，拒绝旧版本更新             |
 | 网络分区恢复   | 全量同步，覆盖本地缓存                 |
 
-### 2.7 协程使用规范
+### 2.8 协程使用规范
 
 - 所有 IO 操作必须使用 co_await
 - 禁止在协程中进行阻塞调用
 - 使用 use_awaitable 作为 completion token
 - 使用 co_spawn 启动协程
 
-### 2.8 内存管理
+### 2.9 内存管理
 
 - Session 使用 shared_ptr 管理
 - SessionManager 持有 weak_ptr 避免循环引用
@@ -263,6 +299,18 @@ EdgeLink 是一个**数据面去中心化、控制面中心化**的 Mesh VPN 系
 | Length  | 2 字节 | Payload 长度 (大端序)，最大 **65535**    |
 
 > **Length 上限说明**：Length 字段使用完整的 16 位范围，最大值为 **65535** 字节。未来协议扩展应通过版本号升级处理，而非预留空间。
+
+**Payload 长度限制汇总表**：
+
+| 场景               | 长度限制                 | 计算公式/说明                        |
+| ------------------ | ------------------------ | ------------------------------------ |
+| 帧 Payload 最大值  | **65535 bytes**          | Length 字段 16 位上限                |
+| 分片触发阈值       | **65526 bytes**          | 65535 - 9 (Fragment Header)          |
+| 每片最大业务数据   | **65526 bytes**          | 65535 - 9 (Fragment Header)          |
+| 加密后最大 Payload | **65499 bytes**          | 65535 - 4 - 4 - 12 - 16 (头部+认证)  |
+| DATA 明文最大值    | **65499 bytes**          | 加密 Payload 上限                    |
+
+> **说明**：加密头部包括 Src Node (4B) + Dst Node (4B) + Nonce (12B) + Auth Tag (16B) = 36 bytes。
 
 > **术语约定**：
 > - **Frame Type (消息类型)**：帧头中的 Type 字段，标识消息种类（如 AUTH_REQUEST=0x01）
@@ -543,9 +591,44 @@ signed_data = auth_type (1B)
 
 | auth_type 值 | 名称    | auth_data 内容                          |
 | ------------ | ------- | --------------------------------------- |
-| 0x01         | user    | username (len+str) + password_hash (32B)|
+| 0x01         | user    | username (len+str) + password_verifier (32B) |
 | 0x02         | authkey | key (len+str)                           |
 | 0x03         | machine | 空 (已注册节点重连)                     |
+
+**用户名密码认证流程 (auth_type=0x01)**：
+
+采用挑战-响应机制防止 pass-the-hash 攻击：
+
+```
+Client                              Controller
+   │  AUTH_REQUEST                       │
+   │  [auth_type=0x01,                   │
+   │   username, client_nonce]           │
+   │─────────────────────────────────────>│
+   │                                      │
+   │           AUTH_CHALLENGE             │
+   │     [server_nonce, salt]             │
+   │<─────────────────────────────────────│
+   │                                      │
+   │           AUTH_VERIFY                │
+   │  [password_verifier]                 │
+   │─────────────────────────────────────>│
+   │                                      │
+   │           AUTH_RESPONSE              │
+   │     [success, tokens...]             │
+   │<─────────────────────────────────────│
+```
+
+**password_verifier 计算**：
+```
+derived_key = PBKDF2-SHA256(password, salt, iterations=100000)
+password_verifier = HMAC-SHA256(derived_key, client_nonce || server_nonce)
+```
+
+**安全说明**：
+- 客户端从不直接发送密码或密码 hash
+- 每次认证使用新的 nonce，防止重放攻击
+- salt 由服务端针对每个用户生成并存储
 
 **时间戳验证要求**：
 
@@ -662,6 +745,19 @@ signed_data = auth_type (1B)
 | routes[]     | 变长 | RouteInfo 数组 (见 3.4.18)          |
 | relay_token  | 变长 | JWT Relay Token                     |
 | expires      | 8 B  | relay_token 过期时间戳 (毫秒)       |
+
+**relay_token 来源说明**：
+
+| 场景                   | relay_token 来源                       | 说明                          |
+| ---------------------- | -------------------------------------- | ----------------------------- |
+| 首次认证成功           | AUTH_RESPONSE 中的 relay_token         | 初始 token                    |
+| 配置推送               | CONFIG 中的 relay_token                | 覆盖已有 token                |
+| Token 即将过期刷新     | CONFIG_UPDATE + UPDATE_RELAY_TOKEN 标志 | 仅更新 token，不重发全配置    |
+
+**处理规则**：
+- 客户端应始终使用最新收到的 relay_token
+- CONFIG 中的 relay_token 优先级高于 AUTH_RESPONSE
+- Token 刷新通过 CONFIG_UPDATE (设置 UPDATE_RELAY_TOKEN=0x01) 单独推送
 
 #### 3.4.4.1 CONFIG_UPDATE Payload (Type=0x11)
 
@@ -932,22 +1028,31 @@ signed_data = auth_type (1B)
 P2P 连接保活消息，双向发送。
 
 ```
-┌────────────┬────────────┬────────────┐
-│ timestamp  │  seq_num   │   flags    │
-│   (8 B)    │   (4 B)    │   (1 B)    │
-└────────────┴────────────┴────────────┘
+┌────────────┬────────────┬────────────┬────────────┐
+│ timestamp  │  seq_num   │   flags    │    mac     │
+│   (8 B)    │   (4 B)    │   (1 B)    │  (16 B)    │
+└────────────┴────────────┴────────────┴────────────┘
 ```
 
-| 字段      | 大小 | 说明                           |
-| --------- | ---- | ------------------------------ |
-| timestamp | 8 B  | 发送时间戳 (毫秒)              |
-| seq_num   | 4 B  | 序列号                         |
-| flags     | 1 B  | 标志: 0x01=请求响应, 0x02=响应 |
+| 字段      | 大小  | 说明                           |
+| --------- | ----- | ------------------------------ |
+| timestamp | 8 B   | 发送时间戳 (毫秒)              |
+| seq_num   | 4 B   | 序列号                         |
+| flags     | 1 B   | 标志: 0x01=请求响应, 0x02=响应 |
+| mac       | 16 B  | Poly1305 MAC 认证码            |
+
+**MAC 计算**：
+- 使用 P2P Session Key 的派生子密钥 (HKDF: info="keepalive-mac")
+- 输入: timestamp (8B) + seq_num (4B) + flags (1B) = 13 字节
+- 算法: Poly1305 (与数据加密使用相同密钥族)
+
+**安全说明**：MAC 字段防止攻击者伪造 keepalive 包维持虚假连接状态。
 
 **行为规范**：
 - 发送间隔: 15 秒 (可配置)
 - 超时判定: 连续 3 次无响应视为断开
 - 收到 flags=0x01 时，应立即发送 flags=0x02 响应
+- MAC 验证失败时丢弃包并记录警告日志
 
 #### 3.4.14 ROUTE_ANNOUNCE Payload (Type=0x80)
 
@@ -1040,6 +1145,30 @@ P2P 连接保活消息，双向发送。
 | revoke_node | 4 B  | 被撤销的节点 ID             |
 | status      | 1 B  | 0x00=已处理, 0x01=签名无效  |
 | node_id     | 4 B  | 响应方节点 ID               |
+
+**广播效率优化**：
+
+大规模网络中直接广播会给 Controller 造成压力，采用以下策略：
+
+| 策略               | 说明                                               |
+| ------------------ | -------------------------------------------------- |
+| Relay 转发         | Controller 发送给 Relay，由 Relay 转发给本地客户端 |
+| 增量推送           | 仅推送给与被撤销节点有过通信的节点                 |
+| 批量合并           | 短时间内多次撤销合并为单条消息 (revoke_nodes[])    |
+| ACK 超时重试       | 未收到 ACK 的节点重试 3 次后标记为离线             |
+
+**扩展: NODE_REVOKE_BATCH Payload (Type=0x92)**：
+
+用于批量撤销场景 (网络安全事件)：
+
+```
+┌────────────┬────────────┬────────────┐
+│   count    │revoke_nodes│  signature │
+│   (2 B)    │ (变长数组) │  (64 B)    │
+└────────────┴────────────┴────────────┘
+```
+
+每个 revoke_node 条目包含: node_id (4B) + reason (1B) + expires_at (8B) = 13 bytes
 
 #### 3.4.18 RouteInfo 结构 (统一定义)
 
@@ -1345,18 +1474,31 @@ Relay 向 Controller 报告到其他 Relay 的延迟。
 Relay 之间建立 Mesh 连接。
 
 ```
-┌────────────┬────────────┬────────────┬────────────┐
-│ server_id  │mesh_token  │capabilities│  version   │
-│   (4 B)    │ (len+bytes)│   (2 B)    │ (len+str)  │
-└────────────┴────────────┴────────────┴────────────┘
+┌────────────┬────────────┬────────────┬────────────┬────────────┬────────────┐
+│ server_id  │mesh_token  │capabilities│  version   │ timestamp  │ signature  │
+│   (4 B)    │ (len+bytes)│   (2 B)    │ (len+str)  │   (8 B)    │  (64 B)    │
+└────────────┴────────────┴────────────┴────────────┴────────────┴────────────┘
 ```
 
-| 字段         | 大小 | 说明                    |
-| ------------ | ---- | ----------------------- |
-| server_id    | 4 B  | 发起方 Relay ID         |
-| mesh_token   | 变长 | Mesh 认证令牌           |
-| capabilities | 2 B  | 能力标志                |
-| version      | 变长 | 协议版本                |
+| 字段         | 大小 | 说明                               |
+| ------------ | ---- | ---------------------------------- |
+| server_id    | 4 B  | 发起方 Relay ID                    |
+| mesh_token   | 变长 | Mesh 认证令牌 (JWT)                |
+| capabilities | 2 B  | 能力标志                           |
+| version      | 变长 | 协议版本                           |
+| timestamp    | 8 B  | 请求时间戳 (毫秒)                  |
+| signature    | 64 B | Ed25519 签名 (Relay Machine Key)   |
+
+**签名计算**：
+- 签名覆盖: server_id + mesh_token + capabilities + version + timestamp
+- 算法: Ed25519 (使用 Relay 的 Machine Key)
+
+**验证流程**：
+1. 验证 mesh_token (JWT) 有效性
+2. 验证 signature 使用发起方 Relay 的公钥
+3. 检查 timestamp 在 ±5 分钟内
+
+**安全说明**：即使 mesh_token 泄露，攻击者也无法伪造 MESH_HELLO，因为需要 Relay 的 Machine Key 签名。
 
 #### 3.4.33 MESH_HELLO_ACK Payload (Type=0x71)
 
@@ -1478,6 +1620,13 @@ CONFIG 中使用的 STUN 服务器信息。
 | frag_index | 2 B  | 当前分片索引 (从 0 开始)     |
 | frag_total | 2 B  | 总分片数                     |
 | orig_type  | 1 B  | 原始消息类型                 |
+
+**message_id 生成规则**：
+- **作用域**: 每个连接独立维护 message_id 计数器
+- **生成方式**: 单调递增，每发送一个完整消息（可能分多片）递增 1
+- **唯一性键**: (connection_id, src_node, message_id) 构成全局唯一标识
+- **回绕处理**: 32 位计数器回绕后从 1 重新开始 (0 保留)
+- **并发安全**: 同一连接的 message_id 分配需原子操作
 
 **Payload 区定义**：当 FRAGMENTED=1 时，Fragment Header 被视为 Payload 的一部分。即：Frame Header (5B) 之后的所有内容均为 Payload，Length 字段表示该 Payload 区的总长度。
 
@@ -2206,8 +2355,20 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 | 密钥长度   | 256 bit                                         |
 | Nonce 长度 | 96 bit (12 bytes)                               |
 | Auth Tag   | 128 bit (16 bytes)                              |
-| 重放保护   | 2048 位滑动窗口                                 |
+| 重放保护   | 滑动窗口 (默认 2048 位，可配置)                 |
 | 最大加密载荷 | 65535 - 4 - 4 - 12 - 16 = **65499 bytes**     |
+
+**滑动窗口配置**：
+
+| 配置项                      | 默认值 | 范围        | 说明                            |
+| --------------------------- | ------ | ----------- | ------------------------------- |
+| crypto.replay_window_size   | 2048   | 256-65536   | 滑动窗口大小 (位)               |
+| crypto.replay_window_auto   | false  | true/false  | 根据 RTT 自动调整窗口大小       |
+
+**动态窗口调整**：当 `replay_window_auto=true` 时，根据 RTT 动态调整：
+- RTT < 50ms: 窗口 = 2048
+- RTT 50-200ms: 窗口 = 4096
+- RTT > 200ms: 窗口 = 8192
 
 ### 6.6 重放攻击防护
 
@@ -2256,6 +2417,23 @@ HKDF 的 Salt 包含双方 node_id 排序拼接，确保：
 - **HS256**：Controller 和 Relay 共享密钥，任一方泄露则整个系统受损。仅用于开发环境。
 
 配置项 `jwt.algorithm` 控制使用的算法，默认 `ES256`。
+
+**HS256 生产环境禁用检查**：
+
+| 配置项                  | 默认值 | 说明                                  |
+| ----------------------- | ------ | ------------------------------------- |
+| jwt.allow_hs256_prod    | false  | 是否允许生产环境使用 HS256            |
+| runtime.environment     | prod   | 运行环境: dev/staging/prod            |
+
+**启动时检查**：
+```
+if jwt.algorithm == "HS256" && runtime.environment == "prod" && !jwt.allow_hs256_prod:
+    log_error("HS256 is not allowed in production environment")
+    log_error("Set jwt.algorithm=ES256 or jwt.allow_hs256_prod=true to override")
+    exit(1)
+```
+
+**安全建议**：生产环境强制使用 ES256，`jwt.allow_hs256_prod` 仅用于特殊场景（需明确记录原因）。
 
 #### 6.7.2 Auth Token (有效期 24 小时)
 
@@ -2688,12 +2866,25 @@ EdgeLink 使用 spdlog 作为日志后端，但**禁止直接使用 `SPDLOG_LOGG
 
 **敏感信息处理**：
 
-| 字段类型     | 处理方式                    |
-| ------------ | --------------------------- |
-| 密钥/Token   | 仅记录前 8 字符 + `...`     |
-| 密码/AuthKey | 使用 `[REDACTED]` 替代      |
-| 加密数据     | 仅记录长度，不记录内容      |
-| IP 地址      | 内网 IP 完整显示，公网 IP 可配置脱敏 |
+| 字段类型     | 处理方式                                |
+| ------------ | --------------------------------------- |
+| 密钥/Token   | 仅记录前 8 字符 + `...`                 |
+| 密码/AuthKey | 使用 `[REDACTED]` 替代                  |
+| 加密数据     | 仅记录长度，不记录内容                  |
+| IP 地址      | 内网 IP 完整显示，公网 IP **默认脱敏**  |
+
+**IP 脱敏配置**：
+
+| 配置项                    | 默认值 | 说明                                |
+| ------------------------- | ------ | ----------------------------------- |
+| log.mask_public_ip        | true   | 是否脱敏公网 IP (默认开启)          |
+| log.mask_format           | "x.x"  | 脱敏格式: "x.x" → 1.2.x.x           |
+| log.mask_exceptions       | []     | 不脱敏的 IP 列表 (调试用)           |
+
+**脱敏示例**：
+- 原始: `203.0.113.42` → 脱敏后: `203.0.x.x`
+- 内网 IP (`10.x`, `192.168.x`, `172.16-31.x`) 不脱敏
+- IPv6 默认显示前 64 位，后 64 位脱敏
 
 ### 9.3 日志模块划分
 
@@ -3412,6 +3603,19 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | log.syslog.enabled       | bool   | false     | 启用 syslog 输出         |
 | log.async                | bool   | true      | 启用异步日志             |
 | log.modules.<name>       | string | 继承全局  | 指定模块的日志等级       |
+
+**log.modules 配置示例**：
+
+```toml
+[log]
+level = "info"  # 全局默认等级
+
+[log.modules]
+"controller.auth" = "debug"     # 认证模块调试
+"controller.ws" = "warn"        # WebSocket 只记录警告
+"controller.db" = "info"        # 数据库正常级别
+```
+
 | worker_threads           | uint32 | 0         | 工作线程数 (0=CPU核心数) |
 | control_heartbeat.interval | uint32 | 30      | 控制通道心跳发送间隔 (秒) |
 | control_heartbeat.timeout  | uint32 | 90      | 控制通道心跳超时时间 (秒) |
@@ -3486,6 +3690,7 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | p2p.keepalive_miss_limit | uint32   | 3         | P2P keepalive 丢失次数阈值 |
 | p2p.stun_timeout         | uint32   | 5000      | STUN 探测超时 (毫秒)       |
 | p2p.hole_punch_attempts  | uint32   | 5         | 打洞尝试次数               |
+| p2p.hole_punch_interval  | uint32   | 200       | 打洞尝试间隔 (毫秒)        |
 | queue.capacity           | uint32   | 65536     | 消息队列最大容量           |
 | queue.high_watermark     | float    | 0.8       | 高水位线 (触发背压)        |
 | queue.low_watermark      | float    | 0.5       | 低水位线 (恢复正常)        |
@@ -4457,8 +4662,8 @@ Controller 使用 SQLite 持久化存储，以下为核心表结构。
 | id             | INTEGER   | PRIMARY KEY AUTOINCREMENT | 连接 ID                 |
 | node_a         | INTEGER   | NOT NULL REFERENCES nodes(id) | 节点 A ID           |
 | node_b         | INTEGER   | NOT NULL REFERENCES nodes(id) | 节点 B ID           |
-| state          | TEXT      | NOT NULL                  | 状态: attempting/established/failed |
-| method         | TEXT      |                           | 打洞方式: direct/stun/relay |
+| state          | INTEGER   | NOT NULL                  | 状态枚举 (见下表)       |
+| method         | INTEGER   |                           | 打洞方式枚举 (见下表)   |
 | relay_id       | INTEGER   | REFERENCES servers(id)    | 中继服务器 (如使用)     |
 | rtt_ms         | INTEGER   |                           | 最近测量的 RTT (毫秒)   |
 | established_at | INTEGER   |                           | 建立时间 (毫秒时间戳)   |
@@ -4466,6 +4671,22 @@ Controller 使用 SQLite 持久化存储，以下为核心表结构。
 | created_at     | INTEGER   | NOT NULL                  | 创建时间 (毫秒时间戳)   |
 
 > UNIQUE 约束: (node_a, node_b) 其中 node_a < node_b (规范化存储)。
+
+**state 枚举值**：
+
+| 值 | 名称        | 说明           |
+| -- | ----------- | -------------- |
+| 0  | attempting  | 正在尝试连接   |
+| 1  | established | 连接已建立     |
+| 2  | failed      | 连接失败       |
+
+**method 枚举值**：
+
+| 值 | 名称   | 说明                 |
+| -- | ------ | -------------------- |
+| 0  | direct | 直接连接 (同一 LAN)  |
+| 1  | stun   | STUN 打洞成功        |
+| 2  | relay  | 通过 Relay 中继      |
 
 #### 索引定义
 
