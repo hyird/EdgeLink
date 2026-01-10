@@ -60,9 +60,9 @@ enable = false
 enable = true
 
 # IPC socket path (empty = platform default)
-# Linux: /run/edgelink-client.sock or $XDG_RUNTIME_DIR/edgelink-client.sock
+# Linux: $XDG_RUNTIME_DIR/edgelink-client.sock or /tmp/edgelink-client.sock
 # macOS: $TMPDIR/edgelink-client.sock or /tmp/edgelink-client.sock
-# Windows: \\.\pipe\edgelink-client
+# Windows: %TEMP%\edgelink-client.sock
 # socket_path = ""
 
 [log]

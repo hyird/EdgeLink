@@ -27,8 +27,14 @@ IpcServer::~IpcServer() {
 
 std::string IpcServer::get_default_socket_path() {
 #ifdef _WIN32
-    // Windows: use a path in the user's temp directory
-    return R"(\\.\pipe\edgelink-client)";
+    // Windows: Unix domain sockets require a file path (not named pipe format)
+    // Use temp directory for the socket file
+    const char* temp = std::getenv("TEMP");
+    if (!temp) temp = std::getenv("TMP");
+    if (temp) {
+        return std::string(temp) + "\\edgelink-client.sock";
+    }
+    return "C:\\Windows\\Temp\\edgelink-client.sock";
 #elif defined(__APPLE__)
     // macOS: use /tmp or user-specific path
     const char* tmpdir = std::getenv("TMPDIR");
