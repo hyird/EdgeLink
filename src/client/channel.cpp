@@ -333,14 +333,11 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
 
     spdlog::info("Authenticated as node {} with IP {}", node_id_, virtual_ip_.to_string());
 
-    state_ = ChannelState::CONNECTED;
+    // Note: state_ is set to CONNECTED after receiving CONFIG, not here
+    // This ensures peers are populated before on_connected is called
 
     if (callbacks_.on_auth_response) {
         callbacks_.on_auth_response(*resp);
-    }
-
-    if (callbacks_.on_connected) {
-        callbacks_.on_connected();
     }
 }
 
@@ -363,6 +360,14 @@ asio::awaitable<void> ControlChannel::handle_config(const Frame& frame) {
 
     if (callbacks_.on_config) {
         callbacks_.on_config(*config);
+    }
+
+    // Mark as connected after receiving initial CONFIG (peers are now populated)
+    if (state_ != ChannelState::CONNECTED) {
+        state_ = ChannelState::CONNECTED;
+        if (callbacks_.on_connected) {
+            callbacks_.on_connected();
+        }
     }
 
     // Send ACK
