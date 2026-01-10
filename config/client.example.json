@@ -1,9 +1,0 @@
-{
-    "controller_url": "wss://controller.example.com:443",
-    "machine_key_pub": "",
-    "machine_key_priv": "",
-    "auth_key": "",
-    "tun_name": "edge",
-    "mtu": 1400,
-    "log_level": "info"
-}
