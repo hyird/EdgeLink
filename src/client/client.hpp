@@ -23,7 +23,7 @@ struct ClientConfig {
     bool tls = false;  // Enable TLS (wss://) - default disabled
     bool auto_reconnect = true;
     std::chrono::seconds reconnect_interval{5};
-    std::chrono::seconds ping_interval{30};
+    std::chrono::seconds ping_interval{5};  // Keep connection alive, avoid CDN idle timeout
     std::chrono::seconds dns_refresh_interval{60};  // DNS resolution refresh interval (0 = disabled)
 
     // State directory for storing persistent keys
