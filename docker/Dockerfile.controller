@@ -6,7 +6,13 @@ COPY edgelink-controller /usr/local/bin/edgelink-controller
 
 RUN chmod +x /usr/local/bin/edgelink-controller
 
-EXPOSE 8080 443
+# Create default config directory
+RUN mkdir -p /etc/edgelink /var/lib/edgelink
+
+# WebSocket server port
+EXPOSE 8443
+
+VOLUME ["/etc/edgelink", "/var/lib/edgelink"]
 
 ENTRYPOINT ["/usr/local/bin/edgelink-controller"]
-CMD ["-c", "/etc/edgelink/controller.json"]
+CMD ["-c", "/etc/edgelink/controller.toml"]
