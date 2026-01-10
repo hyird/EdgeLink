@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Default build type: RelWithDebInfo (optimized but with debug symbols)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+    message(STATUS "Build type not specified, defaulting to RelWithDebInfo")
+endif()
+
 # Options
 option(BUILD_CONTROLLER "Build the controller" ON)
 option(BUILD_SERVER "Build the relay/stun server" OFF)  # Not yet implemented
