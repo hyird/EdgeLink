@@ -13,6 +13,9 @@ void PeerManager::update_from_config(const std::vector<PeerInfo>& peers) {
     peers_.clear();
     ip_to_node_.clear();
 
+    // Clear all session keys since peer node keys may have changed
+    crypto_.clear_all_session_keys();
+
     // Add new peers
     for (const auto& info : peers) {
         Peer peer;
@@ -60,6 +63,13 @@ void PeerManager::add_peer(const PeerInfo& info) {
             // Update existing peer
             was_online = it->second.info.online;
             status_changed = (was_online != info.online);
+
+            // Check if node_key changed - if so, clear session key
+            if (it->second.info.node_key != info.node_key) {
+                crypto_.remove_session_key(info.node_id);
+                it->second.session_key_derived = false;
+                spdlog::info("Peer {} node_key changed, cleared session key", info.node_id);
+            }
 
             it->second.info = info;
             if (status_changed) {
