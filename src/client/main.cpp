@@ -19,6 +19,10 @@ namespace asio = boost::asio;
 using namespace edgelink;
 using namespace edgelink::client;
 
+// Version information
+constexpr const char* VERSION = "1.0.0";
+constexpr const char* BUILD_DATE = __DATE__;
+
 void setup_logging(const std::string& level, const std::string& log_file) {
     std::vector<spdlog::sink_ptr> sinks;
 
@@ -51,28 +55,75 @@ void setup_logging(const std::string& level, const std::string& log_file) {
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v");
 }
 
-void print_help() {
-    std::cout << "EdgeLink Client\n\n"
-              << "Usage: edgelink-client [options]\n\n"
-              << "Options:\n"
-              << "  -c, --config FILE     Load configuration from TOML file\n"
-              << "  --controller URL      Controller server address (default: localhost:8080)\n"
-              << "  -a, --authkey KEY     AuthKey for authentication\n"
-              << "  --tls                 Enable TLS (wss://), default: disabled\n"
-              << "  --tun                 Enable TUN device for IP-level routing\n"
-              << "  --tun-name NAME       TUN device name (default: auto)\n"
-              << "  --tun-mtu MTU         TUN device MTU (default: 1420)\n"
-              << "  -t, --test PEER MSG   Send test message to peer IP after connecting\n"
-              << "  -d, --debug           Enable debug logging\n"
-              << "  -v, --verbose         Enable verbose (trace) logging\n"
-              << "  -h, --help            Show this help\n\n"
-              << "Example:\n"
-              << "  edgelink-client -a tskey-dev-test123 --tun\n"
-              << "  edgelink-client -c client.toml\n"
-              << "  edgelink-client -a tskey-dev-test123 -t 10.0.0.2 \"Hello\"\n";
+void print_usage() {
+    std::cout << "EdgeLink Client - Mesh VPN Client\n\n"
+              << "Usage:\n"
+              << "  edgelink-client <command> [options]\n\n"
+              << "Commands:\n"
+              << "  up          Start client and connect to network\n"
+              << "  version     Show version information\n"
+              << "  help        Show this help message\n\n"
+              << "Run 'edgelink-client <command> --help' for more information on a command.\n";
 }
 
-int main(int argc, char* argv[]) {
+void print_up_help() {
+    std::cout << "EdgeLink Client - Start and connect\n\n"
+              << "Usage: edgelink-client up [options]\n\n"
+              << "Connection Options:\n"
+              << "  -c, --config FILE     Load configuration from TOML file\n"
+              << "  --controller URL      Controller server address (default: ws://localhost:8080)\n"
+              << "  -a, --authkey KEY     AuthKey for authentication (required for first connection)\n"
+              << "  --tls                 Enable TLS (wss://)\n\n"
+              << "TUN Options:\n"
+              << "  --tun                 Enable TUN device for IP-level routing\n"
+              << "  --tun-name NAME       TUN device name (default: auto)\n"
+              << "  --tun-mtu MTU         TUN device MTU (default: 1420)\n\n"
+              << "SSL Options:\n"
+              << "  --ssl-verify          Enable SSL certificate verification\n"
+              << "  --ssl-ca FILE         Custom CA certificate file\n"
+              << "  --ssl-allow-self-signed  Allow self-signed certificates\n\n"
+              << "Logging Options:\n"
+              << "  -d, --debug           Enable debug logging\n"
+              << "  -v, --verbose         Enable verbose (trace) logging\n\n"
+              << "Other Options:\n"
+              << "  -t, --test PEER MSG   Send test message to peer IP after connecting\n"
+              << "  -h, --help            Show this help\n\n"
+              << "Examples:\n"
+              << "  edgelink-client up -a tskey-dev-test123 --tun\n"
+              << "  edgelink-client up -c client.toml\n"
+              << "  edgelink-client up -a tskey-dev-test123 --tls --ssl-allow-self-signed\n";
+}
+
+// ============================================================================
+// Command: version
+// ============================================================================
+
+int cmd_version() {
+    std::cout << "EdgeLink Client " << VERSION << "\n"
+              << "  Build:      " << BUILD_DATE << "\n"
+              << "  Language:   C++23\n"
+#ifdef _WIN32
+              << "  Platform:   windows/"
+#elif defined(__APPLE__)
+              << "  Platform:   macos/"
+#else
+              << "  Platform:   linux/"
+#endif
+#if defined(__x86_64__) || defined(_M_X64)
+              << "amd64\n";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+              << "arm64\n";
+#else
+              << "unknown\n";
+#endif
+    return 0;
+}
+
+// ============================================================================
+// Command: up
+// ============================================================================
+
+int cmd_up(int argc, char* argv[]) {
     // Default configuration
     edgelink::ClientConfig cfg;
     std::string config_file;
@@ -80,7 +131,7 @@ int main(int argc, char* argv[]) {
     std::string test_message;
 
     // First pass: look for config file
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 0; i < argc; ++i) {
         std::string arg = argv[i];
         if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
             config_file = argv[++i];
@@ -111,7 +162,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Second pass: command line overrides
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 0; i < argc; ++i) {
         std::string arg = argv[i];
 
         if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
@@ -135,8 +186,14 @@ int main(int argc, char* argv[]) {
             cfg.log_level = "debug";
         } else if (arg == "-v" || arg == "--verbose") {
             cfg.log_level = "trace";
+        } else if (arg == "--ssl-verify") {
+            cfg.ssl_verify = true;
+        } else if (arg == "--ssl-ca" && i + 1 < argc) {
+            cfg.ssl_ca_file = argv[++i];
+        } else if (arg == "--ssl-allow-self-signed") {
+            cfg.ssl_allow_self_signed = true;
         } else if (arg == "-h" || arg == "--help") {
-            print_help();
+            print_up_help();
             return 0;
         }
     }
@@ -144,7 +201,7 @@ int main(int argc, char* argv[]) {
     // Setup logging
     setup_logging(cfg.log_level, cfg.log_file);
 
-    spdlog::info("EdgeLink Client starting...");
+    spdlog::info("EdgeLink Client {} starting...", VERSION);
 
     // Initialize crypto
     if (!crypto::init()) {
@@ -154,7 +211,7 @@ int main(int argc, char* argv[]) {
 
     if (cfg.authkey.empty()) {
         spdlog::error("AuthKey required. Use -a or --authkey option, or specify in config file.");
-        print_help();
+        print_up_help();
         return 1;
     }
 
@@ -173,6 +230,9 @@ int main(int argc, char* argv[]) {
         client_cfg.enable_tun = cfg.enable_tun;
         client_cfg.tun_name = cfg.tun_name;
         client_cfg.tun_mtu = cfg.tun_mtu;
+        client_cfg.ssl_verify = cfg.ssl_verify;
+        client_cfg.ssl_ca_file = cfg.ssl_ca_file;
+        client_cfg.ssl_allow_self_signed = cfg.ssl_allow_self_signed;
 
         // Create client
         auto client = std::make_shared<Client>(ioc, client_cfg);
@@ -210,9 +270,9 @@ int main(int argc, char* argv[]) {
             spdlog::warn("Client disconnected");
         };
 
-        callbacks.on_data_received = [](NodeId src, std::span<const uint8_t> data) {
-            std::string msg(data.begin(), data.end());
-            spdlog::info("Message from node {}: {}", src, msg);
+        callbacks.on_data_received = [&client](NodeId src, std::span<const uint8_t> data) {
+            auto src_ip = client->peers().get_peer_ip_str(src);
+            spdlog::info("Data from {}: {} bytes", src_ip, data.size());
         };
 
         callbacks.on_error = [](uint16_t code, const std::string& msg) {
@@ -254,4 +314,46 @@ int main(int argc, char* argv[]) {
     }
 
     return 0;
+}
+
+// ============================================================================
+// Main entry point
+// ============================================================================
+
+int main(int argc, char* argv[]) {
+    // No arguments: show usage
+    if (argc < 2) {
+        print_usage();
+        return 0;
+    }
+
+    std::string command = argv[1];
+
+    // Handle global help
+    if (command == "-h" || command == "--help" || command == "help") {
+        print_usage();
+        return 0;
+    }
+
+    // Handle version
+    if (command == "-V" || command == "--version" || command == "version") {
+        return cmd_version();
+    }
+
+    // Handle 'up' command
+    if (command == "up") {
+        // Pass remaining arguments (skip program name and 'up')
+        return cmd_up(argc - 2, argv + 2);
+    }
+
+    // Legacy mode: if first arg starts with '-', treat as 'up' command
+    // This maintains backward compatibility with old usage
+    if (command[0] == '-') {
+        return cmd_up(argc - 1, argv + 1);
+    }
+
+    // Unknown command
+    std::cerr << "Unknown command: " << command << "\n\n";
+    print_usage();
+    return 1;
 }

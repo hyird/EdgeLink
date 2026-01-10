@@ -26,6 +26,11 @@ struct ClientConfig {
     std::chrono::seconds ping_interval{5};  // Keep connection alive, avoid CDN idle timeout
     std::chrono::seconds dns_refresh_interval{60};  // DNS resolution refresh interval (0 = disabled)
 
+    // SSL/TLS settings
+    bool ssl_verify = false;            // Verify server certificate (default: false for dev)
+    std::string ssl_ca_file;            // Custom CA certificate file (empty = system default)
+    bool ssl_allow_self_signed = false; // Allow self-signed certificates
+
     // State directory for storing persistent keys
     std::string state_dir;  // Empty = platform default
 

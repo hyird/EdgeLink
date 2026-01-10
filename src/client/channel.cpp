@@ -2,7 +2,65 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <limits.h>
+#endif
+
 namespace edgelink::client {
+
+namespace {
+
+// Get system hostname (cross-platform)
+std::string get_hostname() {
+#ifdef _WIN32
+    char buffer[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD size = sizeof(buffer);
+    if (GetComputerNameA(buffer, &size)) {
+        return std::string(buffer, size);
+    }
+    return "unknown";
+#else
+    char buffer[HOST_NAME_MAX + 1];
+    if (gethostname(buffer, sizeof(buffer)) == 0) {
+        buffer[sizeof(buffer) - 1] = '\0';
+        return buffer;
+    }
+    return "unknown";
+#endif
+}
+
+// Get OS name
+std::string get_os_name() {
+#ifdef _WIN32
+    return "windows";
+#elif defined(__APPLE__)
+    return "macos";
+#elif defined(__linux__)
+    return "linux";
+#else
+    return "unknown";
+#endif
+}
+
+// Get architecture
+std::string get_arch() {
+#if defined(__x86_64__) || defined(_M_X64)
+    return "amd64";
+#elif defined(__i386__) || defined(_M_IX86)
+    return "386";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return "arm64";
+#elif defined(__arm__) || defined(_M_ARM)
+    return "arm";
+#else
+    return "unknown";
+#endif
+}
+
+} // anonymous namespace
 
 const char* channel_state_name(ChannelState state) {
     switch (state) {
@@ -83,8 +141,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
             tcp_stream.expires_after(std::chrono::seconds(30));
             co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
 
-            // SSL handshake
-            tls_ws_->next_layer().set_verify_mode(ssl::verify_none); // TODO: proper verification
+            // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
             co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
 
             // WebSocket handshake
@@ -131,9 +188,9 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         req.auth_type = AuthType::AUTHKEY;
         req.machine_key = crypto_.machine_key().public_key;
         req.node_key = crypto_.node_key().public_key;
-        req.hostname = "test-client"; // TODO: get actual hostname
-        req.os = "unknown";
-        req.arch = "unknown";
+        req.hostname = get_hostname();
+        req.os = get_os_name();
+        req.arch = get_arch();
         req.version = "1.0.0";
         req.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -171,9 +228,150 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
 }
 
 asio::awaitable<bool> ControlChannel::reconnect() {
-    // Use machine key auth for reconnection
-    // Implementation similar to connect but with AuthType::MACHINE
-    co_return false; // TODO: implement
+    // Reconnect using machine key authentication (for already registered nodes)
+    if (node_id_ == 0) {
+        spdlog::error("Cannot reconnect: not previously authenticated");
+        co_return false;
+    }
+
+    try {
+        state_ = ChannelState::RECONNECTING;
+
+        // Close existing connection if any
+        try {
+            if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
+                co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+            } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
+                co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+            }
+        } catch (...) {}
+
+        // Reset stream pointers
+        tls_ws_.reset();
+        plain_ws_.reset();
+
+        // Parse URL
+        auto parsed = boost::urls::parse_uri(url_);
+        if (!parsed) {
+            spdlog::error("Invalid control URL: {}", url_);
+            state_ = ChannelState::DISCONNECTED;
+            co_return false;
+        }
+
+        std::string host = std::string(parsed->host());
+        std::string port = parsed->has_port() ? std::string(parsed->port()) :
+                           (use_tls_ ? "443" : "80");
+        std::string target = std::string(parsed->path());
+        if (target.empty()) target = "/api/v1/control";
+
+        spdlog::info("Reconnecting to controller: {}:{}{} (TLS: {})",
+                     host, port, target, use_tls_ ? "yes" : "no");
+
+        // Resolve host
+        tcp::resolver resolver(ioc_);
+        auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
+
+        if (use_tls_) {
+            // Create TLS stream
+            tls_ws_ = std::make_unique<TlsWsStream>(ioc_, ssl_ctx_);
+
+            // Set SNI
+            if (!SSL_set_tlsext_host_name(tls_ws_->next_layer().native_handle(), host.c_str())) {
+                spdlog::error("Failed to set SNI");
+                state_ = ChannelState::DISCONNECTED;
+                co_return false;
+            }
+
+            // Connect TCP
+            auto& tcp_stream = beast::get_lowest_layer(*tls_ws_);
+            tcp_stream.expires_after(std::chrono::seconds(30));
+            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
+            co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
+
+            // WebSocket handshake
+            tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+            tls_ws_->set_option(websocket::stream_base::decorator(
+                [](websocket::request_type& req) {
+                    req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
+                }));
+
+            co_await tls_ws_->async_handshake(host, target, asio::use_awaitable);
+
+            // Disable TCP timeout - WebSocket has its own timeout
+            beast::get_lowest_layer(*tls_ws_).expires_never();
+            tls_ws_->binary(true);
+
+        } else {
+            // Create plain stream
+            plain_ws_ = std::make_unique<PlainWsStream>(ioc_);
+
+            // Connect TCP
+            auto& tcp_stream = beast::get_lowest_layer(*plain_ws_);
+            tcp_stream.expires_after(std::chrono::seconds(30));
+            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            // WebSocket handshake
+            plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+            plain_ws_->set_option(websocket::stream_base::decorator(
+                [](websocket::request_type& req) {
+                    req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
+                }));
+
+            co_await plain_ws_->async_handshake(host, target, asio::use_awaitable);
+
+            // Disable TCP timeout - WebSocket has its own timeout
+            beast::get_lowest_layer(*plain_ws_).expires_never();
+            plain_ws_->binary(true);
+        }
+
+        spdlog::info("WebSocket reconnected, authenticating with machine key...");
+        state_ = ChannelState::AUTHENTICATING;
+
+        // Build AUTH_REQUEST with MACHINE auth type (no authkey needed)
+        AuthRequest req;
+        req.auth_type = AuthType::MACHINE;
+        req.machine_key = crypto_.machine_key().public_key;
+        req.node_key = crypto_.node_key().public_key;
+        req.hostname = get_hostname();
+        req.os = get_os_name();
+        req.arch = get_arch();
+        req.version = "1.0.0";
+        req.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        // auth_data is empty for MACHINE auth type
+
+        // Sign the request
+        auto sign_data = req.get_sign_data();
+        auto sig = crypto_.sign(sign_data);
+        if (!sig) {
+            spdlog::error("Failed to sign AUTH_REQUEST");
+            state_ = ChannelState::DISCONNECTED;
+            co_return false;
+        }
+        req.signature = *sig;
+
+        // Send AUTH_REQUEST
+        auto payload = req.serialize();
+        co_await send_frame(FrameType::AUTH_REQUEST, payload);
+
+        // Start read/write loops
+        asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
+            co_await self->read_loop();
+        }, asio::detached);
+
+        asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
+            co_await self->write_loop();
+        }, asio::detached);
+
+        co_return true;
+
+    } catch (const std::exception& e) {
+        spdlog::error("Control channel reconnection failed: {}", e.what());
+        state_ = ChannelState::DISCONNECTED;
+        co_return false;
+    }
 }
 
 asio::awaitable<void> ControlChannel::close() {
@@ -505,8 +703,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             tcp_stream.expires_after(std::chrono::seconds(30));
             co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
 
-            // SSL handshake
-            tls_ws_->next_layer().set_verify_mode(ssl::verify_none);
+            // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
             co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
 
             // WebSocket handshake

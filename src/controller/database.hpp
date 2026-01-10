@@ -131,6 +131,7 @@ public:
         const std::string& key, uint32_t network_id,
         int32_t max_uses = -1, uint64_t expires_at = 0);
     std::expected<AuthKeyRecord, DbError> get_authkey(const std::string& key);
+    std::expected<std::vector<AuthKeyRecord>, DbError> list_authkeys(uint32_t network_id = 0);
     std::expected<void, DbError> increment_authkey_use(const std::string& key);
     std::expected<void, DbError> delete_authkey(const std::string& key);
 
@@ -150,6 +151,8 @@ public:
     std::expected<NodeRecord, DbError> get_node_by_machine_key(
         std::span<const uint8_t, ED25519_PUBLIC_KEY_SIZE> machine_key);
     std::expected<std::vector<NodeRecord>, DbError> get_nodes_by_network(NetworkId network_id);
+    std::expected<std::vector<NodeRecord>, DbError> list_all_nodes();
+    std::expected<void, DbError> delete_node(NodeId id);
 
     std::expected<void, DbError> update_node_key(
         NodeId id, std::span<const uint8_t, X25519_KEY_SIZE> node_key);

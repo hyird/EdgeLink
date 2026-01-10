@@ -13,22 +13,27 @@
 #include <boost/asio/signal_set.hpp>
 
 #include <iostream>
+#include <iomanip>
 #include <thread>
 #include <vector>
+#include <random>
+#include <chrono>
 
 namespace asio = boost::asio;
 
 using namespace edgelink;
 using namespace edgelink::controller;
 
+// Version information
+constexpr const char* VERSION = "1.0.0";
+constexpr const char* BUILD_DATE = __DATE__;
+
 void setup_logging(const std::string& level, const std::string& log_file) {
     std::vector<spdlog::sink_ptr> sinks;
 
-    // Console sink
     auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     sinks.push_back(console_sink);
 
-    // File sink (if specified)
     if (!log_file.empty()) {
         auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
         sinks.push_back(file_sink);
@@ -37,7 +42,6 @@ void setup_logging(const std::string& level, const std::string& log_file) {
     auto logger = std::make_shared<spdlog::logger>("console", sinks.begin(), sinks.end());
     spdlog::set_default_logger(logger);
 
-    // Set log level
     if (level == "trace" || level == "verbose") {
         spdlog::set_level(spdlog::level::trace);
     } else if (level == "debug") {
@@ -53,31 +57,360 @@ void setup_logging(const std::string& level, const std::string& log_file) {
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v");
 }
 
-void print_help() {
-    std::cout << "EdgeLink Controller\n\n"
-              << "Usage: edgelink-controller [options]\n\n"
+void setup_quiet_logging() {
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    auto logger = std::make_shared<spdlog::logger>("console", console_sink);
+    spdlog::set_default_logger(logger);
+    spdlog::set_level(spdlog::level::err);
+}
+
+// Generate random authkey
+std::string generate_authkey() {
+    static const char charset[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, sizeof(charset) - 2);
+
+    std::string key = "tskey-";
+    for (int i = 0; i < 16; ++i) {
+        key += charset[dis(gen)];
+    }
+    return key;
+}
+
+// Format timestamp
+std::string format_time(uint64_t timestamp_ms) {
+    if (timestamp_ms == 0) return "never";
+    auto tp = std::chrono::system_clock::time_point(std::chrono::milliseconds(timestamp_ms));
+    auto time = std::chrono::system_clock::to_time_t(tp);
+    std::ostringstream oss;
+    oss << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
+
+void print_usage() {
+    std::cout << "EdgeLink Controller - Mesh VPN Control Plane\n\n"
+              << "Usage:\n"
+              << "  edgelink-controller <command> [options]\n\n"
+              << "Commands:\n"
+              << "  serve       Start the controller server (default)\n"
+              << "  authkey     Manage authentication keys\n"
+              << "  node        Manage nodes\n"
+              << "  version     Show version information\n"
+              << "  help        Show this help message\n\n"
+              << "Run 'edgelink-controller <command> --help' for more information.\n";
+}
+
+void print_serve_help() {
+    std::cout << "EdgeLink Controller - Start server\n\n"
+              << "Usage: edgelink-controller serve [options]\n\n"
               << "Options:\n"
               << "  -c, --config FILE    Load configuration from TOML file\n"
               << "  -p, --port PORT      Listen port (default: 8080)\n"
               << "  -b, --bind ADDR      Bind address (default: 0.0.0.0)\n"
               << "  -t, --threads N      Number of IO threads (default: auto)\n"
-              << "  --tls                Enable TLS (default: disabled)\n"
-              << "  --cert FILE          SSL certificate file (requires --tls)\n"
-              << "  --key FILE           SSL private key file (requires --tls)\n"
+              << "  --tls                Enable TLS\n"
+              << "  --cert FILE          SSL certificate file\n"
+              << "  --key FILE           SSL private key file\n"
               << "  --db FILE            Database file path (default: edgelink.db)\n"
               << "  -d, --debug          Enable debug logging\n"
-              << "  -v, --verbose        Enable verbose (trace) logging\n"
-              << "  -h, --help           Show this help\n\n"
-              << "Config file takes precedence, command line overrides config file.\n";
+              << "  -v, --verbose        Enable verbose logging\n"
+              << "  -h, --help           Show this help\n";
 }
 
-int main(int argc, char* argv[]) {
-    // Default configuration
+void print_authkey_help() {
+    std::cout << "EdgeLink Controller - AuthKey management\n\n"
+              << "Usage: edgelink-controller authkey <action> [options]\n\n"
+              << "Actions:\n"
+              << "  create      Create a new authkey\n"
+              << "  list        List all authkeys\n"
+              << "  revoke      Revoke (delete) an authkey\n\n"
+              << "Options:\n"
+              << "  --db FILE            Database file (default: edgelink.db)\n"
+              << "  --key KEY            AuthKey to revoke (for 'revoke' action)\n"
+              << "  --max-uses N         Maximum uses (-1 = unlimited, default: -1)\n"
+              << "  --expires HOURS      Expiration in hours (0 = never, default: 0)\n"
+              << "  -h, --help           Show this help\n\n"
+              << "Examples:\n"
+              << "  edgelink-controller authkey create\n"
+              << "  edgelink-controller authkey create --max-uses 1\n"
+              << "  edgelink-controller authkey list\n"
+              << "  edgelink-controller authkey revoke --key tskey-abc123\n";
+}
+
+void print_node_help() {
+    std::cout << "EdgeLink Controller - Node management\n\n"
+              << "Usage: edgelink-controller node <action> [options]\n\n"
+              << "Actions:\n"
+              << "  list        List all nodes\n"
+              << "  delete      Delete a node\n\n"
+              << "Options:\n"
+              << "  --db FILE            Database file (default: edgelink.db)\n"
+              << "  --id ID              Node ID to delete (for 'delete' action)\n"
+              << "  -h, --help           Show this help\n\n"
+              << "Examples:\n"
+              << "  edgelink-controller node list\n"
+              << "  edgelink-controller node delete --id 5\n";
+}
+
+// ============================================================================
+// Command: version
+// ============================================================================
+
+int cmd_version() {
+    std::cout << "EdgeLink Controller " << VERSION << "\n"
+              << "  Build:      " << BUILD_DATE << "\n"
+              << "  Language:   C++23\n"
+#ifdef _WIN32
+              << "  Platform:   windows/"
+#elif defined(__APPLE__)
+              << "  Platform:   macos/"
+#else
+              << "  Platform:   linux/"
+#endif
+#if defined(__x86_64__) || defined(_M_X64)
+              << "amd64\n";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+              << "arm64\n";
+#else
+              << "unknown\n";
+#endif
+    return 0;
+}
+
+// ============================================================================
+// Command: authkey
+// ============================================================================
+
+int cmd_authkey(int argc, char* argv[]) {
+    std::string db_path = "edgelink.db";
+    std::string action;
+    std::string key_to_revoke;
+    int32_t max_uses = -1;
+    uint64_t expires_hours = 0;
+
+    // Parse arguments
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "-h" || arg == "--help") {
+            print_authkey_help();
+            return 0;
+        } else if (arg == "--db" && i + 1 < argc) {
+            db_path = argv[++i];
+        } else if (arg == "--key" && i + 1 < argc) {
+            key_to_revoke = argv[++i];
+        } else if (arg == "--max-uses" && i + 1 < argc) {
+            max_uses = std::stoi(argv[++i]);
+        } else if (arg == "--expires" && i + 1 < argc) {
+            expires_hours = std::stoul(argv[++i]);
+        } else if (action.empty() && arg[0] != '-') {
+            action = arg;
+        }
+    }
+
+    if (action.empty()) {
+        print_authkey_help();
+        return 1;
+    }
+
+    // Open database
+    setup_quiet_logging();
+    Database db;
+    auto result = db.open(db_path);
+    if (!result) {
+        std::cerr << "Error: Failed to open database: " << db_path << "\n";
+        return 1;
+    }
+
+    if (action == "create") {
+        // Get default network
+        auto network = db.get_network_by_name("default");
+        if (!network) {
+            std::cerr << "Error: No default network found. Run 'serve' first to initialize.\n";
+            return 1;
+        }
+
+        std::string new_key = generate_authkey();
+        uint64_t expires_at = expires_hours > 0 ?
+            Database::now_ms() + expires_hours * 3600 * 1000 : 0;
+
+        auto authkey = db.create_authkey(new_key, network->id, max_uses, expires_at);
+        if (!authkey) {
+            std::cerr << "Error: Failed to create authkey\n";
+            return 1;
+        }
+
+        std::cout << "Created authkey: " << new_key << "\n";
+        if (max_uses > 0) {
+            std::cout << "  Max uses: " << max_uses << "\n";
+        }
+        if (expires_hours > 0) {
+            std::cout << "  Expires: " << format_time(expires_at) << "\n";
+        }
+        return 0;
+
+    } else if (action == "list") {
+        auto keys = db.list_authkeys();
+        if (!keys) {
+            std::cerr << "Error: Failed to list authkeys\n";
+            return 1;
+        }
+
+        if (keys->empty()) {
+            std::cout << "No authkeys found.\n";
+            return 0;
+        }
+
+        std::cout << std::left
+                  << std::setw(28) << "KEY"
+                  << std::setw(10) << "USES"
+                  << std::setw(12) << "MAX_USES"
+                  << std::setw(20) << "CREATED"
+                  << "EXPIRES\n";
+        std::cout << std::string(80, '-') << "\n";
+
+        for (const auto& k : *keys) {
+            std::string max_str = k.max_uses < 0 ? "unlimited" : std::to_string(k.max_uses);
+            std::string exp_str = k.expires_at == 0 ? "never" : format_time(k.expires_at);
+
+            std::cout << std::left
+                      << std::setw(28) << k.key
+                      << std::setw(10) << k.use_count
+                      << std::setw(12) << max_str
+                      << std::setw(20) << format_time(k.created_at)
+                      << exp_str << "\n";
+        }
+        return 0;
+
+    } else if (action == "revoke") {
+        if (key_to_revoke.empty()) {
+            std::cerr << "Error: --key is required for revoke action\n";
+            return 1;
+        }
+
+        auto result = db.delete_authkey(key_to_revoke);
+        if (!result) {
+            std::cerr << "Error: Failed to revoke authkey (may not exist)\n";
+            return 1;
+        }
+
+        std::cout << "Revoked authkey: " << key_to_revoke << "\n";
+        return 0;
+
+    } else {
+        std::cerr << "Unknown action: " << action << "\n";
+        print_authkey_help();
+        return 1;
+    }
+}
+
+// ============================================================================
+// Command: node
+// ============================================================================
+
+int cmd_node(int argc, char* argv[]) {
+    std::string db_path = "edgelink.db";
+    std::string action;
+    NodeId node_id = 0;
+
+    // Parse arguments
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "-h" || arg == "--help") {
+            print_node_help();
+            return 0;
+        } else if (arg == "--db" && i + 1 < argc) {
+            db_path = argv[++i];
+        } else if (arg == "--id" && i + 1 < argc) {
+            node_id = static_cast<NodeId>(std::stoul(argv[++i]));
+        } else if (action.empty() && arg[0] != '-') {
+            action = arg;
+        }
+    }
+
+    if (action.empty()) {
+        print_node_help();
+        return 1;
+    }
+
+    // Open database
+    setup_quiet_logging();
+    Database db;
+    auto result = db.open(db_path);
+    if (!result) {
+        std::cerr << "Error: Failed to open database: " << db_path << "\n";
+        return 1;
+    }
+
+    if (action == "list") {
+        auto nodes = db.list_all_nodes();
+        if (!nodes) {
+            std::cerr << "Error: Failed to list nodes\n";
+            return 1;
+        }
+
+        if (nodes->empty()) {
+            std::cout << "No nodes registered.\n";
+            return 0;
+        }
+
+        std::cout << std::left
+                  << std::setw(6) << "ID"
+                  << std::setw(16) << "VIRTUAL_IP"
+                  << std::setw(20) << "HOSTNAME"
+                  << std::setw(10) << "OS"
+                  << std::setw(8) << "STATUS"
+                  << "LAST_SEEN\n";
+        std::cout << std::string(80, '-') << "\n";
+
+        for (const auto& n : *nodes) {
+            std::string status = n.online ? "online" : "offline";
+            std::string last_seen = n.last_seen > 0 ? format_time(n.last_seen) : "never";
+
+            std::cout << std::left
+                      << std::setw(6) << n.id
+                      << std::setw(16) << n.virtual_ip.to_string()
+                      << std::setw(20) << n.hostname
+                      << std::setw(10) << n.os
+                      << std::setw(8) << status
+                      << last_seen << "\n";
+        }
+        return 0;
+
+    } else if (action == "delete") {
+        if (node_id == 0) {
+            std::cerr << "Error: --id is required for delete action\n";
+            return 1;
+        }
+
+        auto result = db.delete_node(node_id);
+        if (!result) {
+            std::cerr << "Error: Failed to delete node " << node_id << " (may not exist)\n";
+            return 1;
+        }
+
+        std::cout << "Deleted node: " << node_id << "\n";
+        return 0;
+
+    } else {
+        std::cerr << "Unknown action: " << action << "\n";
+        print_node_help();
+        return 1;
+    }
+}
+
+// ============================================================================
+// Command: serve
+// ============================================================================
+
+int cmd_serve(int argc, char* argv[]) {
     ControllerConfig cfg;
     std::string config_file;
 
     // First pass: look for config file
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 0; i < argc; ++i) {
         std::string arg = argv[i];
         if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
             config_file = argv[++i];
@@ -97,7 +430,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Second pass: command line overrides
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 0; i < argc; ++i) {
         std::string arg = argv[i];
 
         if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
@@ -121,7 +454,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "-v" || arg == "--verbose") {
             cfg.log_level = "trace";
         } else if (arg == "-h" || arg == "--help") {
-            print_help();
+            print_serve_help();
             return 0;
         }
     }
@@ -129,7 +462,7 @@ int main(int argc, char* argv[]) {
     // Setup logging
     setup_logging(cfg.log_level, cfg.log_file);
 
-    spdlog::info("EdgeLink Controller starting...");
+    spdlog::info("EdgeLink Controller {} starting...", VERSION);
 
     // Initialize crypto
     if (!crypto::init()) {
@@ -163,7 +496,6 @@ int main(int argc, char* argv[]) {
         // Create JWT utility
         std::string jwt_secret = cfg.jwt_secret;
         if (jwt_secret.empty()) {
-            // Generate random secret if not configured
             auto secret_bytes = crypto::random_bytes(32);
             jwt_secret = std::string(secret_bytes.begin(), secret_bytes.end());
             spdlog::info("JWT secret auto-generated (not persistent)");
@@ -178,7 +510,6 @@ int main(int argc, char* argv[]) {
         // Create SSL context
         ssl::context ssl_ctx = [&cfg]() {
             if (!cfg.tls) {
-                // TLS disabled - create dummy context
                 return ssl_util::create_dummy_context();
             } else if (!cfg.cert_file.empty() && !cfg.key_file.empty()) {
                 spdlog::info("Loading SSL certificates from files");
@@ -249,4 +580,53 @@ int main(int argc, char* argv[]) {
     }
 
     return 0;
+}
+
+// ============================================================================
+// Main entry point
+// ============================================================================
+
+int main(int argc, char* argv[]) {
+    // No arguments: default to serve
+    if (argc < 2) {
+        return cmd_serve(0, nullptr);
+    }
+
+    std::string command = argv[1];
+
+    // Handle global help
+    if (command == "-h" || command == "--help" || command == "help") {
+        print_usage();
+        return 0;
+    }
+
+    // Handle version
+    if (command == "-V" || command == "--version" || command == "version") {
+        return cmd_version();
+    }
+
+    // Handle 'serve' command
+    if (command == "serve") {
+        return cmd_serve(argc - 2, argv + 2);
+    }
+
+    // Handle 'authkey' command
+    if (command == "authkey") {
+        return cmd_authkey(argc - 2, argv + 2);
+    }
+
+    // Handle 'node' command
+    if (command == "node") {
+        return cmd_node(argc - 2, argv + 2);
+    }
+
+    // Legacy mode: if first arg starts with '-', treat as 'serve' command
+    if (command[0] == '-') {
+        return cmd_serve(argc - 1, argv + 1);
+    }
+
+    // Unknown command
+    std::cerr << "Unknown command: " << command << "\n\n";
+    print_usage();
+    return 1;
 }

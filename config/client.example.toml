@@ -19,8 +19,23 @@ auto_reconnect = true
 # Reconnection interval in seconds
 reconnect_interval = 5
 
-# Keepalive ping interval in seconds
-ping_interval = 30
+# Keepalive ping interval in seconds (keep low to avoid CDN idle timeout)
+ping_interval = 5
+
+# DNS refresh interval in seconds (detect server IP changes, 0 = disabled)
+dns_refresh_interval = 60
+
+[ssl]
+# Enable SSL certificate verification (default: false for development)
+# Set to true in production environments
+verify = false
+
+# Custom CA certificate file (PEM format)
+# Leave empty to use system default CA store
+# ca_file = "/path/to/ca.pem"
+
+# Allow self-signed certificates (only effective when verify = true)
+allow_self_signed = false
 
 [storage]
 # Directory for storing client state (keys, etc.)

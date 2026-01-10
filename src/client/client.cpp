@@ -27,7 +27,47 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
 
     // Setup SSL context
     ssl_ctx_.set_default_verify_paths();
-    ssl_ctx_.set_verify_mode(ssl::verify_none); // TODO: proper verification
+
+    if (config_.ssl_verify) {
+        // Enable certificate verification
+        ssl_ctx_.set_verify_mode(ssl::verify_peer);
+
+        // Load custom CA certificate if specified
+        if (!config_.ssl_ca_file.empty()) {
+            boost::system::error_code ec;
+            ssl_ctx_.load_verify_file(config_.ssl_ca_file, ec);
+            if (ec) {
+                spdlog::warn("Failed to load CA file '{}': {}", config_.ssl_ca_file, ec.message());
+            } else {
+                spdlog::info("Loaded custom CA certificate: {}", config_.ssl_ca_file);
+            }
+        }
+
+        // Set verification callback for self-signed certificate handling
+        if (config_.ssl_allow_self_signed) {
+            ssl_ctx_.set_verify_callback([](bool preverified, ssl::verify_context& ctx) {
+                // Get verification error
+                int err = X509_STORE_CTX_get_error(ctx.native_handle());
+
+                // Allow self-signed certificates
+                if (err == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT ||
+                    err == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN) {
+                    spdlog::debug("Accepting self-signed certificate");
+                    return true;
+                }
+
+                // For other errors, use default verification result
+                return preverified;
+            });
+            spdlog::info("SSL: allowing self-signed certificates");
+        }
+        // Note: hostname verification is done per-connection in channel.cpp
+        spdlog::info("SSL: certificate verification enabled");
+    } else {
+        // Disable certificate verification (insecure, for testing only)
+        ssl_ctx_.set_verify_mode(ssl::verify_none);
+        spdlog::warn("SSL: certificate verification DISABLED (insecure)");
+    }
 }
 
 Client::~Client() {
@@ -206,11 +246,24 @@ void Client::on_tun_packet(std::span<const uint8_t> packet) {
     // Get destination IP
     auto dst_ip = ip_packet::dst_ipv4(packet);
     auto src_ip = ip_packet::src_ipv4(packet);
+    uint32_t dst_u32 = dst_ip.to_u32();
 
     // Silently drop multicast (224.0.0.0/4) and broadcast (255.255.255.255)
-    uint8_t first_octet = (dst_ip.to_u32() >> 24) & 0xFF;
-    if (first_octet >= 224 || dst_ip.to_u32() == 0xFFFFFFFF) {
+    uint8_t first_octet = (dst_u32 >> 24) & 0xFF;
+    if (first_octet >= 224 || dst_u32 == 0xFFFFFFFF) {
         return;
+    }
+
+    // Silently drop subnet broadcast (e.g., 100.64.255.255 for /16)
+    if (control_) {
+        uint8_t prefix_len = control_->subnet_mask();
+        if (prefix_len > 0 && prefix_len < 32) {
+            uint32_t host_mask = (1U << (32 - prefix_len)) - 1;  // e.g., 0x0000FFFF for /16
+            // Check if all host bits are 1 (broadcast address)
+            if ((dst_u32 & host_mask) == host_mask) {
+                return;
+            }
+        }
     }
 
     spdlog::debug("TUN packet: {} -> {} ({} bytes)",

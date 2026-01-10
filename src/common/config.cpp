@@ -133,6 +133,19 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             }
         }
 
+        // [ssl] section
+        if (auto ssl = tbl["ssl"].as_table()) {
+            if (auto v = (*ssl)["verify"].value<bool>()) {
+                config.ssl_verify = *v;
+            }
+            if (auto v = (*ssl)["ca_file"].value<std::string>()) {
+                config.ssl_ca_file = *v;
+            }
+            if (auto v = (*ssl)["allow_self_signed"].value<bool>()) {
+                config.ssl_allow_self_signed = *v;
+            }
+        }
+
         // [connection] section
         if (auto conn = tbl["connection"].as_table()) {
             if (auto v = (*conn)["auto_reconnect"].value<bool>()) {

@@ -396,6 +396,36 @@ std::expected<void, DbError> Database::delete_authkey(const std::string& key) {
     return {};
 }
 
+std::expected<std::vector<AuthKeyRecord>, DbError> Database::list_authkeys(uint32_t network_id) {
+    std::string sql = "SELECT id, key, network_id, use_count, max_uses, expires_at, created_at FROM authkeys";
+    if (network_id != 0) {
+        sql += " WHERE network_id = ?";
+    }
+    sql += " ORDER BY created_at DESC";
+
+    auto stmt = prepare(sql);
+    if (!stmt) return std::unexpected(stmt.error());
+
+    if (network_id != 0) {
+        stmt->bind_int(1, static_cast<int>(network_id));
+    }
+
+    std::vector<AuthKeyRecord> records;
+    while (stmt->step() == SQLITE_ROW) {
+        AuthKeyRecord record;
+        record.id = static_cast<uint32_t>(stmt->column_int(0));
+        record.key = stmt->column_text(1);
+        record.network_id = static_cast<uint32_t>(stmt->column_int(2));
+        record.use_count = stmt->column_int(3);
+        record.max_uses = stmt->column_int(4);
+        record.expires_at = static_cast<uint64_t>(stmt->column_int64(5));
+        record.created_at = static_cast<uint64_t>(stmt->column_int64(6));
+        records.push_back(record);
+    }
+
+    return records;
+}
+
 // ============================================================================
 // Node operations
 // ============================================================================
@@ -568,6 +598,60 @@ std::expected<std::vector<NodeRecord>, DbError> Database::get_nodes_by_network(N
     }
 
     return records;
+}
+
+std::expected<std::vector<NodeRecord>, DbError> Database::list_all_nodes() {
+    auto stmt = prepare(
+        "SELECT id, network_id, machine_key, node_key, virtual_ip, "
+        "hostname, os, arch, version, online, last_seen, created_at "
+        "FROM nodes ORDER BY id");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    std::vector<NodeRecord> records;
+    while (stmt->step() == SQLITE_ROW) {
+        NodeRecord record;
+        record.id = static_cast<NodeId>(stmt->column_int(0));
+        record.network_id = static_cast<NetworkId>(stmt->column_int(1));
+
+        auto mk = stmt->column_blob(2);
+        auto nk = stmt->column_blob(3);
+        if (mk.size() == ED25519_PUBLIC_KEY_SIZE) {
+            std::copy(mk.begin(), mk.end(), record.machine_key.begin());
+        }
+        if (nk.size() == X25519_KEY_SIZE) {
+            std::copy(nk.begin(), nk.end(), record.node_key.begin());
+        }
+
+        record.virtual_ip = IPv4Address::from_u32(static_cast<uint32_t>(stmt->column_int(4)));
+        record.hostname = stmt->column_text(5);
+        record.os = stmt->column_text(6);
+        record.arch = stmt->column_text(7);
+        record.version = stmt->column_text(8);
+        record.online = stmt->column_int(9) != 0;
+        record.last_seen = static_cast<uint64_t>(stmt->column_int64(10));
+        record.created_at = static_cast<uint64_t>(stmt->column_int64(11));
+
+        records.push_back(record);
+    }
+
+    return records;
+}
+
+std::expected<void, DbError> Database::delete_node(NodeId id) {
+    auto stmt = prepare("DELETE FROM nodes WHERE id = ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_int(1, static_cast<int>(id));
+
+    if (stmt->step() != SQLITE_DONE) {
+        return std::unexpected(DbError::QUERY_FAILED);
+    }
+
+    if (sqlite3_changes(db_) == 0) {
+        return std::unexpected(DbError::NOT_FOUND);
+    }
+
+    return {};
 }
 
 std::expected<void, DbError> Database::update_node_key(

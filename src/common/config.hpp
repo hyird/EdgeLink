@@ -66,6 +66,11 @@ struct ClientConfig {
     std::string authkey;
     bool tls = false;  // Enable TLS (wss://) - default disabled
 
+    // SSL/TLS settings
+    bool ssl_verify = false;            // Verify server certificate (default: false for dev)
+    std::string ssl_ca_file;            // Custom CA certificate file (empty = system default)
+    bool ssl_allow_self_signed = false; // Allow self-signed certificates
+
     // Auto-reconnect settings
     bool auto_reconnect = true;
     std::chrono::seconds reconnect_interval{5};
