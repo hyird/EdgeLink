@@ -742,8 +742,27 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
     // Decrypt
     auto plaintext = crypto_.decrypt(data->src_node, data->nonce, data->encrypted_payload);
     if (!plaintext) {
-        spdlog::warn("Failed to decrypt data from peer {}", data->src_node);
-        co_return;
+        spdlog::warn("Failed to decrypt data from peer {}, renegotiating session key...", data->src_node);
+
+        // Clear old session key and re-derive
+        crypto_.remove_session_key(data->src_node);
+
+        // Try to derive new session key
+        if (!peers_.ensure_session_key(data->src_node)) {
+            spdlog::error("Failed to renegotiate session key for peer {}", data->src_node);
+            co_return;
+        }
+
+        spdlog::info("Session key renegotiated for peer {}", data->src_node);
+
+        // Retry decryption with new key
+        plaintext = crypto_.decrypt(data->src_node, data->nonce, data->encrypted_payload);
+        if (!plaintext) {
+            spdlog::warn("Decryption still failed after renegotiation, peer {} may have different node_key", data->src_node);
+            co_return;
+        }
+
+        spdlog::info("Decryption succeeded after session key renegotiation for peer {}", data->src_node);
     }
 
     peers_.update_last_seen(data->src_node);
