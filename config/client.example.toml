@@ -55,6 +55,16 @@ enable = false
 # MTU for TUN device (default: 1420)
 # mtu = 1420
 
+[ipc]
+# Enable IPC control interface for CLI commands (status, peers, down)
+enable = true
+
+# IPC socket path (empty = platform default)
+# Linux: /run/edgelink-client.sock or $XDG_RUNTIME_DIR/edgelink-client.sock
+# macOS: $TMPDIR/edgelink-client.sock or /tmp/edgelink-client.sock
+# Windows: \\.\pipe\edgelink-client
+# socket_path = ""
+
 [log]
 # Log level: trace, debug, info, warn, error
 level = "debug"
