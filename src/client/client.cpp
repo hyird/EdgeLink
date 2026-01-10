@@ -28,7 +28,8 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     , peers_(crypto_)
     , keepalive_timer_(ioc)
     , reconnect_timer_(ioc)
-    , dns_refresh_timer_(ioc) {
+    , dns_refresh_timer_(ioc)
+    , latency_timer_(ioc) {
 
     // Setup SSL context
     ssl_ctx_.set_default_verify_paths();
@@ -180,6 +181,11 @@ void Client::setup_callbacks() {
 
         // Start DNS refresh loop
         asio::co_spawn(ioc_, dns_refresh_loop(), asio::detached);
+
+        // Start latency measurement loop
+        if (config_.latency_measure_interval.count() > 0) {
+            asio::co_spawn(ioc_, latency_measure_loop(), asio::detached);
+        }
     };
 
     relay_cbs.on_disconnected = [this]() {
@@ -478,6 +484,7 @@ asio::awaitable<void> Client::stop() {
     keepalive_timer_.cancel();
     reconnect_timer_.cancel();
     dns_refresh_timer_.cancel();
+    latency_timer_.cancel();
 
     // Teardown TUN first
     teardown_tun();
@@ -683,6 +690,63 @@ asio::awaitable<void> Client::dns_refresh_loop() {
             break;
         }
     }
+}
+
+asio::awaitable<void> Client::latency_measure_loop() {
+    log().info("Latency measurement started (interval: {}s)", config_.latency_measure_interval.count());
+
+    while (state_ == ClientState::RUNNING) {
+        try {
+            latency_timer_.expires_after(config_.latency_measure_interval);
+            co_await latency_timer_.async_wait(asio::use_awaitable);
+
+            if (state_ != ClientState::RUNNING || !relay_ || !relay_->is_connected()) {
+                continue;
+            }
+
+            // Get all online peers
+            auto online_peers = peers_.get_online_peers();
+            if (online_peers.empty()) {
+                continue;
+            }
+
+            log().debug("Measuring latency to {} online peers", online_peers.size());
+
+            // Ping each online peer (with small delay between pings to avoid burst)
+            for (const auto& peer : online_peers) {
+                if (state_ != ClientState::RUNNING) {
+                    break;
+                }
+
+                // Skip self
+                if (peer.info.node_id == crypto_.node_id()) {
+                    continue;
+                }
+
+                // Send ping with short timeout (2s)
+                uint16_t latency = co_await ping_peer(peer.info.node_id, std::chrono::milliseconds(2000));
+
+                if (latency > 0) {
+                    log().debug("Latency to {}: {}ms", peer.info.virtual_ip.to_string(), latency);
+                } else {
+                    log().debug("Latency to {}: timeout", peer.info.virtual_ip.to_string());
+                }
+
+                // Small delay between pings (100ms)
+                asio::steady_timer delay_timer(co_await asio::this_coro::executor);
+                delay_timer.expires_after(std::chrono::milliseconds(100));
+                co_await delay_timer.async_wait(asio::use_awaitable);
+            }
+
+        } catch (const boost::system::system_error& e) {
+            if (e.code() != asio::error::operation_aborted) {
+                log().debug("Latency measurement error: {}", e.what());
+            }
+            break;
+        }
+    }
+
+    log().debug("Latency measurement loop stopped");
 }
 
 // ============================================================================

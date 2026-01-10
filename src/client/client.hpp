@@ -28,6 +28,7 @@ struct ClientConfig {
     std::chrono::seconds reconnect_interval{5};
     std::chrono::seconds ping_interval{5};  // Keep connection alive, avoid CDN idle timeout
     std::chrono::seconds dns_refresh_interval{60};  // DNS resolution refresh interval (0 = disabled)
+    std::chrono::seconds latency_measure_interval{30};  // Peer latency measurement interval (0 = disabled)
 
     // SSL/TLS settings
     bool ssl_verify = false;            // Verify server certificate (default: false for dev)
@@ -137,6 +138,9 @@ private:
     // DNS refresh loop - periodically check for DNS changes
     asio::awaitable<void> dns_refresh_loop();
 
+    // Latency measurement loop - periodically measure peer latency
+    asio::awaitable<void> latency_measure_loop();
+
     // Reconnection logic
     asio::awaitable<void> reconnect();
 
@@ -154,6 +158,7 @@ private:
     asio::steady_timer keepalive_timer_;
     asio::steady_timer reconnect_timer_;
     asio::steady_timer dns_refresh_timer_;
+    asio::steady_timer latency_timer_;
 
     // Cached DNS resolution results for change detection
     std::string cached_controller_endpoints_;
