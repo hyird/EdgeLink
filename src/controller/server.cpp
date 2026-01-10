@@ -3,6 +3,10 @@
 #include <spdlog/spdlog.h>
 #include <fstream>
 #include <sstream>
+#include <openssl/evp.h>
+#include <openssl/x509.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
 
 namespace edgelink::controller {
 
@@ -167,33 +171,75 @@ ssl::context create_self_signed_context() {
         ssl::context::no_sslv3 |
         ssl::context::single_dh_use);
 
-    // Self-signed certificate for testing (generated at build time or embedded)
-    // In production, use proper certificates
-    static const char cert[] = R"(-----BEGIN CERTIFICATE-----
-MIIBkTCB+wIJAKHBfpKgcKJrMA0GCSqGSIb3DQEBCwUAMBExDzANBgNVBAMMBnRl
-c3RjYTAeFw0yNDAxMDEwMDAwMDBaFw0yNTAxMDEwMDAwMDBaMBExDzANBgNVBAMM
-BnRlc3RjYTBcMA0GCSqGSIb3DQEBAQUAA0sAMEgCQQC5wN8PDxtJ0MmGMLjC+kGM
-4ExMGIvKVMaJ5bYhLwMKcYVbYKGGiGpqQ4fVmL7F/Qz8Z6yCFQvZb7N2M7YQnyzR
-AgMBAAGjUzBRMB0GA1UdDgQWBBQzJ9Q/+Fn0/1B5yzfZnM7J8W/C7TAfBgNVHSME
-GDAWgBQzJ9Q/+Fn0/1B5yzfZnM7J8W/C7TAPBgNVHRMBAf8EBTADAQH/MA0GCSqG
-SIb3DQEBCwUAA0EA0KgkJS9V6IVrB1nk8pP0W6cE7P8M7+mhPLIVQP7Qf/0f8Qug
-jF6vK8QF+DQvC9x8R8d3K6T0m4TGN1GQXQZTAQ==
------END CERTIFICATE-----)";
+    // Generate self-signed certificate at runtime using OpenSSL
+    EVP_PKEY* pkey = nullptr;
+    X509* x509 = nullptr;
 
-    static const char key[] = R"(-----BEGIN PRIVATE KEY-----
-MIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEAucDfDw8bSdDJhjC4
-wvpBjOBMTBiLylTGieW2IS8DCnGFW2ChhohqakOH1Zi+xf0M/GesghUL2W+zdjO2
-EJ8s0QIDAQABAkBIWbIqVR+DS6iSMqyPGdN0xXgQkzlQqKM0rEoCDf7Q7j8NFGZ8
-hvqBNr+XVQm5D7N8QfhLXJ8d8XMPGH8Y9N4BAiEA4kBQnDvBLqXP3zLl7BfJz3pF
-yYJF4pjq6l0C8N1RWmECIQDSgYnFzhGz6W9C7L7d6Nm7N8QVx7c8F7fC5R7VY2rh
-0QIgS1QnXQx/6CUc6D3Z5f8dJwGzQ7K3z7N8QVx7c8F7fCECIQCE8Q7c8F7fC5R7
-VY2rh0S1QnXQx/6CUc6D3Z5f8dJwGzQRAiB3z7N8QVx7c8F7fC5R7VY2rh0S1QnX
-Qx/6CUc6D3Z5f8dJwA==
------END PRIVATE KEY-----)";
+    // Generate RSA key pair
+    EVP_PKEY_CTX* pkey_ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+    if (pkey_ctx) {
+        if (EVP_PKEY_keygen_init(pkey_ctx) > 0 &&
+            EVP_PKEY_CTX_set_rsa_keygen_bits(pkey_ctx, 2048) > 0 &&
+            EVP_PKEY_keygen(pkey_ctx, &pkey) > 0) {
+            // Key generated successfully
+        }
+        EVP_PKEY_CTX_free(pkey_ctx);
+    }
 
-    ctx.use_certificate_chain(asio::buffer(cert, sizeof(cert)));
-    ctx.use_private_key(asio::buffer(key, sizeof(key)), ssl::context::pem);
+    if (!pkey) {
+        throw std::runtime_error("Failed to generate RSA key");
+    }
 
+    // Create X509 certificate
+    x509 = X509_new();
+    if (!x509) {
+        EVP_PKEY_free(pkey);
+        throw std::runtime_error("Failed to create X509 certificate");
+    }
+
+    // Set certificate properties
+    ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
+    X509_gmtime_adj(X509_get_notBefore(x509), 0);
+    X509_gmtime_adj(X509_get_notAfter(x509), 365 * 24 * 60 * 60); // 1 year
+    X509_set_pubkey(x509, pkey);
+
+    // Set subject and issuer
+    X509_NAME* name = X509_get_subject_name(x509);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               reinterpret_cast<const unsigned char*>("EdgeLink Controller"), -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC,
+                               reinterpret_cast<const unsigned char*>("EdgeLink"), -1, -1, 0);
+    X509_set_issuer_name(x509, name);
+
+    // Self-sign the certificate
+    if (!X509_sign(x509, pkey, EVP_sha256())) {
+        X509_free(x509);
+        EVP_PKEY_free(pkey);
+        throw std::runtime_error("Failed to sign certificate");
+    }
+
+    // Convert to PEM format and load into SSL context
+    BIO* cert_bio = BIO_new(BIO_s_mem());
+    BIO* key_bio = BIO_new(BIO_s_mem());
+
+    PEM_write_bio_X509(cert_bio, x509);
+    PEM_write_bio_PrivateKey(key_bio, pkey, nullptr, nullptr, 0, nullptr, nullptr);
+
+    char* cert_data = nullptr;
+    char* key_data = nullptr;
+    long cert_len = BIO_get_mem_data(cert_bio, &cert_data);
+    long key_len = BIO_get_mem_data(key_bio, &key_data);
+
+    ctx.use_certificate_chain(asio::buffer(cert_data, cert_len));
+    ctx.use_private_key(asio::buffer(key_data, key_len), ssl::context::pem);
+
+    // Cleanup
+    BIO_free(cert_bio);
+    BIO_free(key_bio);
+    X509_free(x509);
+    EVP_PKEY_free(pkey);
+
+    spdlog::info("Generated self-signed certificate for development");
     return ctx;
 }
 
