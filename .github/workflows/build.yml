@@ -48,7 +48,7 @@ jobs:
           -DBUILD_SHARED_LIBS=OFF \
           -DEDGELINK_STATIC=ON \
           -DBUILD_CONTROLLER=ON \
-          -DBUILD_SERVER=ON \
+          -DBUILD_SERVER=OFF \
           -DBUILD_CLIENT=ON
 
     - name: Build
@@ -57,7 +57,6 @@ jobs:
     - name: Strip Binaries
       run: |
         strip build/edgelink-controller || true
-        strip build/edgelink-server || true
         strip build/edgelink-client || true
 
     - name: Verify Static Linking
@@ -71,7 +70,6 @@ jobs:
       run: |
         mkdir -p artifacts/linux
         cp build/edgelink-controller artifacts/linux/ || true
-        cp build/edgelink-server artifacts/linux/ || true
         cp build/edgelink-client artifacts/linux/ || true
         cp -r config artifacts/linux/
         tar -czvf edgelink-linux-x64-static.tar.gz -C artifacts linux
@@ -146,7 +144,7 @@ jobs:
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DBUILD_SHARED_LIBS=OFF \
           -DBUILD_CONTROLLER=ON \
-          -DBUILD_SERVER=ON \
+          -DBUILD_SERVER=OFF \
           -DBUILD_CLIENT=ON
 
     - name: Build
@@ -155,7 +153,6 @@ jobs:
     - name: Strip Binaries
       run: |
         strip build/edgelink-controller.exe || true
-        strip build/edgelink-server.exe || true
         strip build/edgelink-client.exe || true
 
     - name: Package Windows Artifacts
@@ -163,7 +160,6 @@ jobs:
       run: |
         New-Item -ItemType Directory -Force -Path artifacts/windows
         Copy-Item -Path "build/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "build/edgelink-server.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "build/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         # Include wintun.dll (client loads from same directory at runtime)
         Copy-Item -Path "wintun-extract/wintun/bin/amd64/wintun.dll" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
@@ -198,7 +194,6 @@ jobs:
       run: |
         tar -xzvf edgelink-linux-x64-static.tar.gz
         cp linux/edgelink-controller docker/
-        cp linux/edgelink-server docker/
         cp linux/edgelink-client docker/
 
     - name: Set up Docker Buildx
@@ -215,18 +210,6 @@ jobs:
       uses: docker/metadata-action@v5
       with:
         images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-controller
-        tags: |
-          type=ref,event=branch
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=sha,prefix=
-          type=raw,value=latest,enable={{is_default_branch}}
-
-    - name: Docker meta (server)
-      id: meta-server
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-server
         tags: |
           type=ref,event=branch
           type=semver,pattern={{version}}
@@ -254,15 +237,6 @@ jobs:
         push: true
         tags: ${{ steps.meta-controller.outputs.tags }}
         labels: ${{ steps.meta-controller.outputs.labels }}
-
-    - name: Build and push server
-      uses: docker/build-push-action@v5
-      with:
-        context: docker
-        file: docker/Dockerfile.server
-        push: true
-        tags: ${{ steps.meta-server.outputs.tags }}
-        labels: ${{ steps.meta-server.outputs.labels }}
 
     - name: Build and push client
       uses: docker/build-push-action@v5
