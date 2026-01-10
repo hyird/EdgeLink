@@ -76,6 +76,10 @@ include(third_party/CMakeLists.txt)
 # Common Library
 # =============================================================================
 add_library(edgelink-common STATIC
+    src/common/types.cpp
+    src/common/frame.cpp
+    src/common/message.cpp
+    src/common/crypto.cpp
 )
 
 target_include_directories(edgelink-common PUBLIC
@@ -118,6 +122,12 @@ target_precompile_headers(edgelink-common PUBLIC
 # =============================================================================
 if(BUILD_CONTROLLER)
     add_executable(edgelink-controller
+        src/controller/main.cpp
+        src/controller/database.cpp
+        src/controller/jwt_util.cpp
+        src/controller/session.cpp
+        src/controller/session_manager.cpp
+        src/controller/server.cpp
     )
 
     target_link_libraries(edgelink-controller PRIVATE
@@ -146,6 +156,11 @@ endif()
 if(BUILD_CLIENT)
     # Common client source files
     set(CLIENT_SOURCE
+        src/client/main.cpp
+        src/client/client.cpp
+        src/client/crypto_engine.cpp
+        src/client/peer_manager.cpp
+        src/client/channel.cpp
     )
 
     # Platform-specific TUN source
