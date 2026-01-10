@@ -222,6 +222,71 @@ std::expected<std::vector<uint8_t>, CryptoEngineError> CryptoEngine::decrypt(
     return *result;
 }
 
+// Base64 encoding table
+static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+// Helper function to encode bytes to base64
+static std::string to_base64(const uint8_t* data, size_t len) {
+    std::string result;
+    result.reserve((len + 2) / 3 * 4);
+
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t n = static_cast<uint32_t>(data[i]) << 16;
+        if (i + 1 < len) n |= static_cast<uint32_t>(data[i + 1]) << 8;
+        if (i + 2 < len) n |= static_cast<uint32_t>(data[i + 2]);
+
+        result.push_back(base64_chars[(n >> 18) & 0x3F]);
+        result.push_back(base64_chars[(n >> 12) & 0x3F]);
+        result.push_back((i + 1 < len) ? base64_chars[(n >> 6) & 0x3F] : '=');
+        result.push_back((i + 2 < len) ? base64_chars[n & 0x3F] : '=');
+    }
+
+    return result;
+}
+
+// Helper function to decode base64 to bytes
+static bool from_base64(const std::string& b64, uint8_t* out, size_t out_len) {
+    static const int decode_table[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
+
+    size_t out_idx = 0;
+    uint32_t buf = 0;
+    int buf_len = 0;
+
+    for (char c : b64) {
+        if (c == '=') break;
+        int val = decode_table[static_cast<unsigned char>(c)];
+        if (val < 0) continue;  // Skip invalid chars
+
+        buf = (buf << 6) | static_cast<uint32_t>(val);
+        buf_len += 6;
+
+        if (buf_len >= 8) {
+            buf_len -= 8;
+            if (out_idx >= out_len) return false;
+            out[out_idx++] = static_cast<uint8_t>((buf >> buf_len) & 0xFF);
+        }
+    }
+
+    return out_idx == out_len;
+}
+
 std::expected<void, CryptoEngineError> CryptoEngine::save_keys_to_file(const std::string& path) {
     // Create parent directory if needed
     std::filesystem::path file_path(path);
@@ -234,21 +299,18 @@ std::expected<void, CryptoEngineError> CryptoEngine::save_keys_to_file(const std
         }
     }
 
-    // Write keys to file: machine_pub(32) + machine_priv(64) + node_pub(32) + node_priv(32) = 160 bytes
-    std::ofstream file(path, std::ios::binary);
+    // Write keys to file in base64 format (one key per line)
+    std::ofstream file(path);
     if (!file) {
         spdlog::error("Failed to open key file for writing: {}", path);
         return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
     }
 
-    file.write(reinterpret_cast<const char*>(machine_key_.public_key.data()),
-               machine_key_.public_key.size());
-    file.write(reinterpret_cast<const char*>(machine_key_.private_key.data()),
-               machine_key_.private_key.size());
-    file.write(reinterpret_cast<const char*>(node_key_.public_key.data()),
-               node_key_.public_key.size());
-    file.write(reinterpret_cast<const char*>(node_key_.private_key.data()),
-               node_key_.private_key.size());
+    file << "# EdgeLink client keys - DO NOT SHARE\n";
+    file << "machine_public=" << to_base64(machine_key_.public_key.data(), machine_key_.public_key.size()) << "\n";
+    file << "machine_private=" << to_base64(machine_key_.private_key.data(), machine_key_.private_key.size()) << "\n";
+    file << "node_public=" << to_base64(node_key_.public_key.data(), node_key_.public_key.size()) << "\n";
+    file << "node_private=" << to_base64(node_key_.private_key.data(), node_key_.private_key.size()) << "\n";
 
     if (!file) {
         spdlog::error("Failed to write keys to file: {}", path);
@@ -260,40 +322,81 @@ std::expected<void, CryptoEngineError> CryptoEngine::save_keys_to_file(const std
 }
 
 std::expected<void, CryptoEngineError> CryptoEngine::load_keys_from_file(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(path);
     if (!file) {
         // File doesn't exist - not an error, will generate new keys
         return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
     }
 
-    // Read keys: machine_pub(32) + machine_priv(64) + node_pub(32) + node_priv(32) = 160 bytes
+    // Try to load as text format (base64)
+    std::unordered_map<std::string, std::string> keys;
+    std::string line;
+    while (std::getline(file, line)) {
+        // Skip comments and empty lines
+        if (line.empty() || line[0] == '#') continue;
+
+        auto eq_pos = line.find('=');
+        if (eq_pos != std::string::npos) {
+            std::string key = line.substr(0, eq_pos);
+            std::string value = line.substr(eq_pos + 1);
+            // Trim whitespace
+            while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' ')) {
+                value.pop_back();
+            }
+            keys[key] = value;
+        }
+    }
+
+    // Check if we have the required keys
+    if (keys.count("machine_public") && keys.count("machine_private") &&
+        keys.count("node_public") && keys.count("node_private")) {
+
+        // Decode base64 keys
+        if (!from_base64(keys["machine_public"], machine_key_.public_key.data(), machine_key_.public_key.size()) ||
+            !from_base64(keys["machine_private"], machine_key_.private_key.data(), machine_key_.private_key.size()) ||
+            !from_base64(keys["node_public"], node_key_.public_key.data(), node_key_.public_key.size()) ||
+            !from_base64(keys["node_private"], node_key_.private_key.data(), node_key_.private_key.size())) {
+            spdlog::warn("Invalid base64 in key file, will generate new keys");
+            return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
+        }
+
+        initialized_ = true;
+        spdlog::info("Keys loaded from: {}", path);
+        spdlog::debug("Machine key: {}...", crypto::key_to_hex(machine_key_.public_key).substr(0, 16));
+        spdlog::debug("Node key: {}...", crypto::key_to_hex(node_key_.public_key).substr(0, 16));
+        return {};
+    }
+
+    // Fallback: try to load as legacy binary format
+    file.clear();
+    file.seekg(0, std::ios::beg);
+
     constexpr size_t expected_size = ED25519_PUBLIC_KEY_SIZE + ED25519_PRIVATE_KEY_SIZE +
                                       X25519_KEY_SIZE + X25519_KEY_SIZE;
 
     std::vector<uint8_t> buffer(expected_size);
     file.read(reinterpret_cast<char*>(buffer.data()), expected_size);
 
-    if (file.gcount() != static_cast<std::streamsize>(expected_size)) {
-        spdlog::warn("Invalid key file size, will generate new keys");
-        return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
+    if (file.gcount() == static_cast<std::streamsize>(expected_size)) {
+        // Parse binary buffer
+        size_t offset = 0;
+        std::copy_n(buffer.begin() + offset, ED25519_PUBLIC_KEY_SIZE, machine_key_.public_key.begin());
+        offset += ED25519_PUBLIC_KEY_SIZE;
+        std::copy_n(buffer.begin() + offset, ED25519_PRIVATE_KEY_SIZE, machine_key_.private_key.begin());
+        offset += ED25519_PRIVATE_KEY_SIZE;
+        std::copy_n(buffer.begin() + offset, X25519_KEY_SIZE, node_key_.public_key.begin());
+        offset += X25519_KEY_SIZE;
+        std::copy_n(buffer.begin() + offset, X25519_KEY_SIZE, node_key_.private_key.begin());
+
+        initialized_ = true;
+        spdlog::info("Keys loaded from: {} (legacy binary format)", path);
+        spdlog::debug("Machine key: {}...", crypto::key_to_hex(machine_key_.public_key).substr(0, 16));
+        spdlog::debug("Node key: {}...", crypto::key_to_hex(node_key_.public_key).substr(0, 16));
+        return {};
     }
 
-    // Parse buffer
-    size_t offset = 0;
-    std::copy_n(buffer.begin() + offset, ED25519_PUBLIC_KEY_SIZE, machine_key_.public_key.begin());
-    offset += ED25519_PUBLIC_KEY_SIZE;
-    std::copy_n(buffer.begin() + offset, ED25519_PRIVATE_KEY_SIZE, machine_key_.private_key.begin());
-    offset += ED25519_PRIVATE_KEY_SIZE;
-    std::copy_n(buffer.begin() + offset, X25519_KEY_SIZE, node_key_.public_key.begin());
-    offset += X25519_KEY_SIZE;
-    std::copy_n(buffer.begin() + offset, X25519_KEY_SIZE, node_key_.private_key.begin());
-
-    initialized_ = true;
-    spdlog::info("Keys loaded from: {}", path);
-    spdlog::debug("Machine key: {}...", crypto::key_to_hex(machine_key_.public_key).substr(0, 16));
-    spdlog::debug("Node key: {}...", crypto::key_to_hex(node_key_.public_key).substr(0, 16));
-
-    return {};
+    spdlog::warn("Invalid key file format, will generate new keys");
+    return std::unexpected(CryptoEngineError::KEY_GENERATION_FAILED);
 }
 
 } // namespace edgelink::client
