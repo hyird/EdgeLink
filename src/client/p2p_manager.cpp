@@ -335,6 +335,14 @@ asio::awaitable<void> P2PManager::recv_loop() {
                 asio::buffer(buffer), sender, asio::use_awaitable);
 
             if (bytes > 0) {
+                // 过滤掉虚拟 IP 段 (100.64.0.0/10) 的包，避免 TUN 回环
+                if (sender.address().is_v4()) {
+                    auto addr = sender.address().to_v4().to_bytes();
+                    if (addr[0] == 100 && addr[1] >= 64 && addr[1] <= 127) {
+                        // 忽略来自虚拟 IP 的包
+                        continue;
+                    }
+                }
                 handle_udp_packet(sender, std::span(buffer.data(), bytes));
             }
         } catch (const boost::system::system_error& e) {
