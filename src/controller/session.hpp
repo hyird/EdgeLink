@@ -132,9 +132,17 @@ private:
     asio::awaitable<void> handle_auth_request(const Frame& frame);
     asio::awaitable<void> handle_config_ack(const Frame& frame);
     asio::awaitable<void> handle_ping(const Frame& frame);
+    asio::awaitable<void> handle_latency_report(const Frame& frame);
+    asio::awaitable<void> handle_route_announce(const Frame& frame);
+    asio::awaitable<void> handle_route_withdraw(const Frame& frame);
 
     // Send CONFIG to this client
     asio::awaitable<void> send_config();
+
+    // Send ROUTE_ACK to this client
+    asio::awaitable<void> send_route_ack(uint32_t request_id, bool success,
+                                         uint16_t error_code = 0,
+                                         const std::string& error_msg = "");
 
     uint64_t config_version_ = 0;
 };

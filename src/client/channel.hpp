@@ -58,6 +58,7 @@ struct ControlChannelCallbacks {
     std::function<void(const AuthResponse&)> on_auth_response;
     std::function<void(const Config&)> on_config;
     std::function<void(const ConfigUpdate&)> on_config_update;
+    std::function<void(const RouteUpdate&)> on_route_update;
     std::function<void(uint16_t code, const std::string& msg)> on_error;
     std::function<void()> on_connected;
     std::function<void()> on_disconnected;
@@ -83,6 +84,15 @@ public:
     // Send PING
     asio::awaitable<void> send_ping();
 
+    // Send LATENCY_REPORT
+    asio::awaitable<void> send_latency_report(const LatencyReport& report);
+
+    // Send ROUTE_ANNOUNCE (announce subnets this node can route)
+    asio::awaitable<void> send_route_announce(const std::vector<RouteInfo>& routes);
+
+    // Send ROUTE_WITHDRAW (withdraw previously announced routes)
+    asio::awaitable<void> send_route_withdraw(const std::vector<RouteInfo>& routes);
+
     // Set callbacks
     void set_callbacks(ControlChannelCallbacks callbacks);
 
@@ -104,6 +114,8 @@ private:
     asio::awaitable<void> handle_auth_response(const Frame& frame);
     asio::awaitable<void> handle_config(const Frame& frame);
     asio::awaitable<void> handle_config_update(const Frame& frame);
+    asio::awaitable<void> handle_route_update(const Frame& frame);
+    asio::awaitable<void> handle_route_ack(const Frame& frame);
     asio::awaitable<void> handle_pong(const Frame& frame);
     asio::awaitable<void> handle_error(const Frame& frame);
 
@@ -141,6 +153,9 @@ private:
     // Ping tracking
     uint32_t ping_seq_ = 0;
     uint64_t last_ping_time_ = 0;
+
+    // Route request tracking
+    uint32_t route_request_id_ = 0;
 
     ControlChannelCallbacks callbacks_;
 };

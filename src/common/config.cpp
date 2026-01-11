@@ -96,6 +96,35 @@ std::expected<ControllerConfig, ConfigError> ControllerConfig::parse(const std::
             }
         }
 
+        // [builtin_relay] section
+        if (auto relay = tbl["builtin_relay"].as_table()) {
+            if (auto v = (*relay)["enabled"].value<bool>()) {
+                config.builtin_relay.enabled = *v;
+            }
+            if (auto v = (*relay)["name"].value<std::string>()) {
+                config.builtin_relay.name = *v;
+            }
+            if (auto v = (*relay)["region"].value<std::string>()) {
+                config.builtin_relay.region = *v;
+            }
+            if (auto v = (*relay)["priority"].value<int64_t>()) {
+                config.builtin_relay.priority = static_cast<uint16_t>(*v);
+            }
+        }
+
+        // [builtin_stun] section
+        if (auto stun = tbl["builtin_stun"].as_table()) {
+            if (auto v = (*stun)["enabled"].value<bool>()) {
+                config.builtin_stun.enabled = *v;
+            }
+            if (auto v = (*stun)["ip"].value<std::string>()) {
+                config.builtin_stun.public_ip = *v;
+            }
+            if (auto v = (*stun)["port"].value<int64_t>()) {
+                config.builtin_stun.port = static_cast<uint16_t>(*v);
+            }
+        }
+
         return config;
 
     } catch (const toml::parse_error& e) {
@@ -126,14 +155,49 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
 
         // [controller] section
         if (auto controller = tbl["controller"].as_table()) {
-            if (auto v = (*controller)["url"].value<std::string>()) {
-                config.controller_url = *v;
+            // 支持单个 host 或 hosts 数组
+            if (auto hosts = (*controller)["hosts"].as_array()) {
+                for (const auto& h : *hosts) {
+                    if (auto v = h.value<std::string>()) {
+                        config.controller_hosts.push_back(*v);
+                    }
+                }
+            } else if (auto v = (*controller)["host"].value<std::string>()) {
+                config.controller_hosts.push_back(*v);
+            }
+            // 兼容旧的 url 格式
+            if (config.controller_hosts.empty()) {
+                if (auto v = (*controller)["url"].value<std::string>()) {
+                    // 从 URL 中提取 host:port
+                    std::string url = *v;
+                    // 移除 scheme
+                    if (url.substr(0, 6) == "wss://") {
+                        url = url.substr(6);
+                        config.tls = true;
+                    } else if (url.substr(0, 5) == "ws://") {
+                        url = url.substr(5);
+                    } else if (url.substr(0, 8) == "https://") {
+                        url = url.substr(8);
+                        config.tls = true;
+                    } else if (url.substr(0, 7) == "http://") {
+                        url = url.substr(7);
+                    }
+                    // 移除路径
+                    auto path_pos = url.find('/');
+                    if (path_pos != std::string::npos) {
+                        url = url.substr(0, path_pos);
+                    }
+                    config.controller_hosts.push_back(url);
+                }
             }
             if (auto v = (*controller)["authkey"].value<std::string>()) {
                 config.authkey = *v;
             }
             if (auto v = (*controller)["tls"].value<bool>()) {
                 config.tls = *v;
+            }
+            if (auto v = (*controller)["failover_timeout"].value<int64_t>()) {
+                config.failover_timeout = std::chrono::milliseconds(*v);
             }
         }
 
@@ -189,6 +253,23 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             }
         }
 
+        // [routing] section
+        if (auto routing = tbl["routing"].as_table()) {
+            if (auto routes = (*routing)["advertise_routes"].as_array()) {
+                for (const auto& r : *routes) {
+                    if (auto v = r.value<std::string>()) {
+                        config.advertise_routes.push_back(*v);
+                    }
+                }
+            }
+            if (auto v = (*routing)["exit_node"].value<bool>()) {
+                config.exit_node = *v;
+            }
+            if (auto v = (*routing)["accept_routes"].value<bool>()) {
+                config.accept_routes = *v;
+            }
+        }
+
         // [log] section
         if (auto log = tbl["log"].as_table()) {
             if (auto v = (*log)["level"].value<std::string>()) {
@@ -196,6 +277,37 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             }
             if (auto v = (*log)["file"].value<std::string>()) {
                 config.log_file = *v;
+            }
+        }
+
+        // [p2p] section
+        if (auto p2p = tbl["p2p"].as_table()) {
+            if (auto v = (*p2p)["enabled"].value<bool>()) {
+                config.p2p.enabled = *v;
+            }
+            if (auto v = (*p2p)["bind_port"].value<int64_t>()) {
+                config.p2p.bind_port = static_cast<uint16_t>(*v);
+            }
+            if (auto v = (*p2p)["keepalive_interval"].value<int64_t>()) {
+                config.p2p.keepalive_interval = static_cast<uint32_t>(*v);
+            }
+            if (auto v = (*p2p)["keepalive_timeout"].value<int64_t>()) {
+                config.p2p.keepalive_timeout = static_cast<uint32_t>(*v);
+            }
+            if (auto v = (*p2p)["punch_timeout"].value<int64_t>()) {
+                config.p2p.punch_timeout = static_cast<uint32_t>(*v);
+            }
+            if (auto v = (*p2p)["punch_attempts"].value<int64_t>()) {
+                config.p2p.punch_attempts = static_cast<uint32_t>(*v);
+            }
+            if (auto v = (*p2p)["punch_interval"].value<int64_t>()) {
+                config.p2p.punch_interval = static_cast<uint32_t>(*v);
+            }
+            if (auto v = (*p2p)["retry_interval"].value<int64_t>()) {
+                config.p2p.retry_interval = static_cast<uint32_t>(*v);
+            }
+            if (auto v = (*p2p)["stun_timeout"].value<int64_t>()) {
+                config.p2p.stun_timeout = static_cast<uint32_t>(*v);
             }
         }
 

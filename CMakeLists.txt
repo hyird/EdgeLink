@@ -5,10 +5,15 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Default build type: RelWithDebInfo (optimized but with debug symbols)
+# Default build type: Release (optimized, stripped)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
-    message(STATUS "Build type not specified, defaulting to RelWithDebInfo")
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    message(STATUS "Build type not specified, defaulting to Release")
+endif()
+
+# Strip symbols in Release mode for smaller binaries
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT MSVC)
+    add_link_options(-s)
 endif()
 
 # Options
@@ -89,6 +94,8 @@ add_library(edgelink-common STATIC
     src/common/message.cpp
     src/common/crypto.cpp
     src/common/config.cpp
+    src/common/config_metadata.cpp
+    src/common/config_writer.cpp
     src/common/logger.cpp
 )
 
@@ -139,6 +146,7 @@ if(BUILD_CONTROLLER)
         src/controller/session.cpp
         src/controller/session_manager.cpp
         src/controller/server.cpp
+        src/controller/stun_server.cpp
     )
 
     target_link_libraries(edgelink-controller PRIVATE
@@ -173,6 +181,11 @@ if(BUILD_CLIENT)
         src/client/peer_manager.cpp
         src/client/channel.cpp
         src/client/ipc_server.cpp
+        src/client/route_manager.cpp
+        src/client/config_watcher.cpp
+        src/client/config_applier.cpp
+        src/client/endpoint_manager.cpp
+        src/client/p2p_manager.cpp
     )
 
     # Platform-specific TUN source
@@ -223,6 +236,17 @@ if(BUILD_CLIENT)
 
         if(EDGELINK_WINTUN_EMBEDDED)
             target_compile_definitions(edgelink-client PRIVATE EDGELINK_WINTUN_EMBEDDED=1)
+        endif()
+
+        # 添加 Windows UAC 管理员权限清单
+        if(MINGW)
+            # MinGW: 使用 windres 编译资源文件
+            set(CLIENT_RC_FILE "${CMAKE_CURRENT_BINARY_DIR}/client.rc")
+            file(WRITE ${CLIENT_RC_FILE} "1 24 \"${CMAKE_CURRENT_SOURCE_DIR}/src/client/client.manifest\"")
+            target_sources(edgelink-client PRIVATE ${CLIENT_RC_FILE})
+        elseif(MSVC)
+            # MSVC: 直接链接 manifest
+            target_sources(edgelink-client PRIVATE src/client/client.manifest)
         endif()
     endif()
 endif()

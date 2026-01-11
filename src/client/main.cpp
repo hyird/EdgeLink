@@ -46,7 +46,9 @@ void print_usage() {
               << "  down        Stop the running client daemon\n"
               << "  status      Show connection status\n"
               << "  peers       List all peer nodes\n"
+              << "  routes      List subnet routes\n"
               << "  ping        Ping a peer node\n"
+              << "  config      View and modify configuration\n"
               << "  version     Show version information\n"
               << "  help        Show this help message\n\n"
               << "Run 'edgelink-client <command> --help' for more information on a command.\n";
@@ -57,7 +59,7 @@ void print_up_help() {
               << "Usage: edgelink-client up [options]\n\n"
               << "Connection Options:\n"
               << "  -c, --config FILE     Load configuration from TOML file\n"
-              << "  --controller URL      Controller server address (default: ws://localhost:8080)\n"
+              << "  --controller HOST     Controller address (host:port, port default 443 with TLS, 80 without)\n"
               << "  -a, --authkey KEY     AuthKey for authentication (required for first connection)\n"
               << "  --tls                 Enable TLS (wss://)\n\n"
               << "TUN Options:\n"
@@ -117,6 +119,37 @@ void print_ping_help() {
               << "  -c, --count N   Number of pings to send (default: 4)\n"
               << "  -h, --help      Show this help\n\n"
               << "Note: This command requires the client daemon to be running.\n";
+}
+
+void print_routes_help() {
+    std::cout << "EdgeLink Client - List subnet routes\n\n"
+              << "Usage: edgelink-client routes [options]\n\n"
+              << "Options:\n"
+              << "  --json        Output in JSON format\n"
+              << "  -h, --help    Show this help\n\n"
+              << "Shows all subnet routes advertised by peers in the network.\n"
+              << "Routes allow access to private networks through gateway nodes.\n";
+}
+
+void print_config_help() {
+    std::cout << "EdgeLink Client - View and modify configuration\n\n"
+              << "Usage: edgelink-client config <subcommand> [options]\n\n"
+              << "Subcommands:\n"
+              << "  get <key>           Get a configuration value\n"
+              << "  set <key> <value>   Set a configuration value\n"
+              << "  list                List all configuration items\n"
+              << "  reload              Reload configuration from file\n"
+              << "  show                Show current configuration (alias for list)\n\n"
+              << "Options:\n"
+              << "  --json        Output in JSON format\n"
+              << "  -h, --help    Show this help\n\n"
+              << "Hot-reloadable configuration items can be changed without restarting.\n"
+              << "Changes are automatically saved to the configuration file.\n\n"
+              << "Examples:\n"
+              << "  edgelink-client config get log.level\n"
+              << "  edgelink-client config set log.level debug\n"
+              << "  edgelink-client config list --json\n"
+              << "  edgelink-client config reload\n";
 }
 
 // ============================================================================
@@ -387,6 +420,329 @@ int cmd_ping(int argc, char* argv[]) {
 }
 
 // ============================================================================
+// Command: routes
+// ============================================================================
+
+int cmd_routes(int argc, char* argv[]) {
+    bool json_output = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--json") {
+            json_output = true;
+        } else if (arg == "-h" || arg == "--help") {
+            print_routes_help();
+            return 0;
+        }
+    }
+
+    // Connect to IPC server
+    IpcClient ipc;
+    if (!ipc.connect()) {
+        if (json_output) {
+            std::cout << "{\n"
+                      << "  \"routes\": [],\n"
+                      << "  \"error\": \"Cannot connect to daemon - it may not be running\"\n"
+                      << "}\n";
+        } else {
+            std::cout << "Routes: None\n\n"
+                      << "Cannot connect to the client daemon.\n"
+                      << "Use 'edgelink-client up' to start the client.\n";
+        }
+        return 1;
+    }
+
+    std::string response = ipc.get_routes();
+
+    if (json_output) {
+        std::cout << response << "\n";
+    } else {
+        // Parse and display human-readable output
+        try {
+            auto jv = boost::json::parse(response);
+            auto& obj = jv.as_object();
+
+            if (obj.at("status").as_string() == "ok") {
+                auto& routes = obj.at("routes").as_array();
+
+                if (routes.empty()) {
+                    std::cout << "No routes found.\n";
+                } else {
+                    std::cout << std::left
+                              << std::setw(20) << "PREFIX"
+                              << std::setw(16) << "GATEWAY_IP"
+                              << std::setw(20) << "GATEWAY_NAME"
+                              << std::setw(8) << "METRIC"
+                              << "TYPE\n";
+                    std::cout << std::string(75, '-') << "\n";
+
+                    for (const auto& r : routes) {
+                        auto& route = r.as_object();
+                        auto& pref = route.at("prefix").as_string();
+                        auto& gip = route.at("gateway_ip").as_string();
+                        auto& gname = route.at("gateway_name").as_string();
+                        std::string prefix(pref.data(), pref.size());
+                        std::string gateway_ip(gip.data(), gip.size());
+                        std::string gateway_name(gname.data(), gname.size());
+                        int64_t metric = route.at("metric").as_int64();
+                        bool is_exit = route.at("exit_node").as_bool();
+                        std::string type = is_exit ? "exit" : "subnet";
+
+                        std::cout << std::left
+                                  << std::setw(20) << prefix
+                                  << std::setw(16) << gateway_ip
+                                  << std::setw(20) << gateway_name
+                                  << std::setw(8) << metric
+                                  << type << "\n";
+                    }
+                }
+            } else {
+                std::cerr << "Error: " << obj.at("message").as_string() << "\n";
+                return 1;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error parsing response: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+// ============================================================================
+// Command: config
+// ============================================================================
+
+int cmd_config(int argc, char* argv[]) {
+    bool json_output = false;
+
+    if (argc == 0) {
+        print_config_help();
+        return 0;
+    }
+
+    std::string subcommand = argv[0];
+
+    // 检查帮助选项
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            print_config_help();
+            return 0;
+        }
+        if (arg == "--json") {
+            json_output = true;
+        }
+    }
+
+    // 连接到 IPC 服务器
+    IpcClient ipc;
+    if (!ipc.connect()) {
+        if (json_output) {
+            std::cout << "{\"status\":\"error\",\"message\":\"Cannot connect to daemon\"}\n";
+        } else {
+            std::cerr << "Cannot connect to the client daemon.\n"
+                      << "Use 'edgelink-client up' to start the client.\n";
+        }
+        return 1;
+    }
+
+    if (subcommand == "get") {
+        if (argc < 2) {
+            std::cerr << "Error: config get requires a key\n";
+            std::cerr << "Usage: edgelink-client config get <key>\n";
+            return 1;
+        }
+        std::string key = argv[1];
+        std::string response = ipc.config_get(key);
+
+        if (json_output) {
+            std::cout << response << "\n";
+        } else {
+            try {
+                auto jv = boost::json::parse(response);
+                auto& obj = jv.as_object();
+
+                if (obj.at("status").as_string() == "ok") {
+                    auto& k = obj.at("key").as_string();
+                    auto& v = obj.at("value").as_string();
+                    auto& desc = obj.at("description").as_string();
+                    bool hot = obj.at("hot_reloadable").as_bool();
+
+                    std::cout << std::string(k.data(), k.size()) << " = "
+                              << std::string(v.data(), v.size()) << "\n";
+                    std::cout << "  " << std::string(desc.data(), desc.size());
+                    if (hot) {
+                        std::cout << " [hot-reloadable]";
+                    }
+                    std::cout << "\n";
+                } else {
+                    auto& msg = obj.at("message").as_string();
+                    std::cerr << "Error: " << std::string(msg.data(), msg.size()) << "\n";
+                    return 1;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error parsing response: " << e.what() << "\n";
+                return 1;
+            }
+        }
+    } else if (subcommand == "set") {
+        if (argc < 3) {
+            std::cerr << "Error: config set requires a key and value\n";
+            std::cerr << "Usage: edgelink-client config set <key> <value>\n";
+            return 1;
+        }
+        std::string key = argv[1];
+        std::string value = argv[2];
+        std::string response = ipc.config_set(key, value);
+
+        if (json_output) {
+            std::cout << response << "\n";
+        } else {
+            try {
+                auto jv = boost::json::parse(response);
+                auto& obj = jv.as_object();
+
+                if (obj.at("status").as_string() == "ok") {
+                    auto& k = obj.at("key").as_string();
+                    auto& nv = obj.at("new_value").as_string();
+                    bool applied = obj.at("applied").as_bool();
+                    bool restart = obj.at("restart_required").as_bool();
+
+                    std::cout << std::string(k.data(), k.size()) << " = "
+                              << std::string(nv.data(), nv.size()) << "\n";
+                    if (applied) {
+                        std::cout << "  Configuration applied successfully.\n";
+                    }
+                    if (restart) {
+                        std::cout << "  Note: Restart required for this change to take effect.\n";
+                    }
+                } else {
+                    auto& msg = obj.at("message").as_string();
+                    std::cerr << "Error: " << std::string(msg.data(), msg.size()) << "\n";
+                    return 1;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error parsing response: " << e.what() << "\n";
+                return 1;
+            }
+        }
+    } else if (subcommand == "list" || subcommand == "show") {
+        std::string response = ipc.config_list();
+
+        if (json_output) {
+            std::cout << response << "\n";
+        } else {
+            try {
+                auto jv = boost::json::parse(response);
+                auto& obj = jv.as_object();
+
+                if (obj.at("status").as_string() == "ok") {
+                    auto& config = obj.at("config").as_array();
+
+                    // 按 section 分组显示
+                    std::string current_section;
+
+                    std::cout << std::left;
+                    for (const auto& item : config) {
+                        auto& it = item.as_object();
+                        auto& k = it.at("key").as_string();
+                        auto& v = it.at("value").as_string();
+                        bool hot = it.at("hot_reloadable").as_bool();
+
+                        std::string key(k.data(), k.size());
+                        std::string value(v.data(), v.size());
+
+                        // 提取 section
+                        size_t dot_pos = key.find('.');
+                        std::string section = dot_pos != std::string::npos ?
+                            key.substr(0, dot_pos) : "";
+
+                        if (section != current_section) {
+                            if (!current_section.empty()) {
+                                std::cout << "\n";
+                            }
+                            std::cout << "[" << section << "]\n";
+                            current_section = section;
+                        }
+
+                        std::string key_part = dot_pos != std::string::npos ?
+                            key.substr(dot_pos + 1) : key;
+
+                        std::cout << "  " << std::setw(30) << key_part
+                                  << " = " << std::setw(20) << value;
+                        if (hot) {
+                            std::cout << " [*]";
+                        }
+                        std::cout << "\n";
+                    }
+
+                    std::cout << "\n[*] = hot-reloadable\n";
+                } else {
+                    auto& msg = obj.at("message").as_string();
+                    std::cerr << "Error: " << std::string(msg.data(), msg.size()) << "\n";
+                    return 1;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error parsing response: " << e.what() << "\n";
+                return 1;
+            }
+        }
+    } else if (subcommand == "reload") {
+        std::string response = ipc.config_reload();
+
+        if (json_output) {
+            std::cout << response << "\n";
+        } else {
+            try {
+                auto jv = boost::json::parse(response);
+                auto& obj = jv.as_object();
+
+                if (obj.at("status").as_string() == "ok") {
+                    auto& changes = obj.at("changes").as_array();
+
+                    if (changes.empty()) {
+                        std::cout << "Configuration reloaded (no changes detected).\n";
+                    } else {
+                        std::cout << "Configuration reloaded. Changes:\n";
+                        for (const auto& c : changes) {
+                            auto& ch = c.as_object();
+                            auto& k = ch.at("key").as_string();
+                            auto& ov = ch.at("old_value").as_string();
+                            auto& nv = ch.at("new_value").as_string();
+                            bool applied = ch.at("applied").as_bool();
+
+                            std::cout << "  " << std::string(k.data(), k.size())
+                                      << ": " << std::string(ov.data(), ov.size())
+                                      << " -> " << std::string(nv.data(), nv.size());
+                            if (applied) {
+                                std::cout << " (applied)";
+                            } else {
+                                std::cout << " (requires restart)";
+                            }
+                            std::cout << "\n";
+                        }
+                    }
+                } else {
+                    auto& msg = obj.at("message").as_string();
+                    std::cerr << "Error: " << std::string(msg.data(), msg.size()) << "\n";
+                    return 1;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error parsing response: " << e.what() << "\n";
+                return 1;
+            }
+        }
+    } else {
+        std::cerr << "Unknown config subcommand: " << subcommand << "\n\n";
+        print_config_help();
+        return 1;
+    }
+
+    return 0;
+}
+
+// ============================================================================
 // Command: down
 // ============================================================================
 
@@ -474,7 +830,9 @@ int cmd_up(int argc, char* argv[]) {
         if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
             ++i; // Already handled
         } else if (arg == "--controller" && i + 1 < argc) {
-            cfg.controller_url = argv[++i];
+            // 清空已有的 hosts，添加命令行指定的
+            cfg.controller_hosts.clear();
+            cfg.controller_hosts.push_back(argv[++i]);
         } else if ((arg == "-a" || arg == "--authkey") && i + 1 < argc) {
             cfg.authkey = argv[++i];
         } else if ((arg == "-t" || arg == "--test") && i + 2 < argc) {
@@ -527,9 +885,10 @@ int cmd_up(int argc, char* argv[]) {
 
         // Create client config
         client::ClientConfig client_cfg;
-        client_cfg.controller_url = cfg.controller_url;
+        client_cfg.controller_hosts = cfg.controller_hosts;
         client_cfg.authkey = cfg.authkey;
         client_cfg.tls = cfg.tls;
+        client_cfg.failover_timeout = cfg.failover_timeout;
         client_cfg.auto_reconnect = cfg.auto_reconnect;
         client_cfg.reconnect_interval = cfg.reconnect_interval;
         client_cfg.ping_interval = cfg.ping_interval;
@@ -542,6 +901,9 @@ int cmd_up(int argc, char* argv[]) {
         client_cfg.ssl_verify = cfg.ssl_verify;
         client_cfg.ssl_ca_file = cfg.ssl_ca_file;
         client_cfg.ssl_allow_self_signed = cfg.ssl_allow_self_signed;
+        client_cfg.advertise_routes = cfg.advertise_routes;
+        client_cfg.exit_node = cfg.exit_node;
+        client_cfg.accept_routes = cfg.accept_routes;
 
         // Create client
         auto client = std::make_shared<Client>(ioc, client_cfg);
@@ -597,6 +959,14 @@ int cmd_up(int argc, char* argv[]) {
 
         client->set_callbacks(std::move(callbacks));
 
+        // Enable config file watching if config file was specified
+        if (!config_file.empty()) {
+            auto abs_config_path = std::filesystem::absolute(config_file).string();
+            client->set_config_path(abs_config_path);
+            client->enable_config_watch();
+            log.info("Config file watching enabled: {}", abs_config_path);
+        }
+
         // Setup signal handler
         asio::signal_set signals(ioc, SIGINT, SIGTERM);
         signals.async_wait([&](const boost::system::error_code&, int sig) {
@@ -614,7 +984,12 @@ int cmd_up(int argc, char* argv[]) {
         }, asio::detached);
 
         log.info("Client running, press Ctrl+C to stop");
-        log.info("  Controller: {}", cfg.controller_url);
+        if (!cfg.controller_hosts.empty()) {
+            log.info("  Controllers: {}", cfg.controller_hosts.size());
+            for (const auto& host : cfg.controller_hosts) {
+                log.info("    - {}", host);
+            }
+        }
         if (cfg.enable_tun) {
             log.info("  TUN mode: enabled (MTU={})", cfg.tun_mtu);
         }
@@ -680,6 +1055,16 @@ int main(int argc, char* argv[]) {
     // Handle 'ping' command
     if (command == "ping") {
         return cmd_ping(argc - 2, argv + 2);
+    }
+
+    // Handle 'routes' command
+    if (command == "routes") {
+        return cmd_routes(argc - 2, argv + 2);
+    }
+
+    // Handle 'config' command
+    if (command == "config") {
+        return cmd_config(argc - 2, argv + 2);
     }
 
     // Legacy mode: if first arg starts with '-', treat as 'up' command

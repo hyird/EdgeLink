@@ -1,5 +1,6 @@
 #include "client/client.hpp"
 #include "common/logger.hpp"
+#include <nlohmann/json.hpp>
 #include <future>
 
 namespace edgelink::client {
@@ -30,6 +31,13 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     , reconnect_timer_(ioc)
     , dns_refresh_timer_(ioc)
     , latency_timer_(ioc) {
+
+    // Initialize config applier
+    config_applier_ = std::make_unique<ConfigApplier>(*this);
+
+    // Initialize P2P managers
+    endpoint_mgr_ = std::make_unique<EndpointManager>(ioc);
+    p2p_mgr_ = std::make_unique<P2PManager>(ioc, crypto_, peers_, *endpoint_mgr_);
 
     // Setup SSL context
     ssl_ctx_.set_default_verify_paths();
@@ -95,7 +103,31 @@ void Client::setup_callbacks() {
 
     control_cbs.on_config = [this](const Config& config) {
         peers_.update_from_config(config.peers);
-        log().info("Config received: {} peers", config.peers.size());
+
+        // 保存路由信息
+        {
+            std::lock_guard lock(routes_mutex_);
+            routes_ = config.routes;
+        }
+
+        log().info("Config received: {} peers, {} routes, {} stuns",
+                   config.peers.size(), config.routes.size(), config.stuns.size());
+
+        // 配置 STUN 服务器
+        if (endpoint_mgr_ && !config.stuns.empty()) {
+            endpoint_mgr_->set_stun_servers(config.stuns);
+        }
+
+        // 初始化路由管理器并同步路由到系统
+        if (config_.accept_routes && is_tun_enabled()) {
+            if (!route_mgr_) {
+                route_mgr_ = std::make_unique<RouteManager>(*this);
+                route_mgr_->start();
+            }
+            if (route_mgr_) {
+                route_mgr_->sync_routes(config.routes);
+            }
+        }
     };
 
     control_cbs.on_config_update = [this](const ConfigUpdate& update) {
@@ -106,6 +138,55 @@ void Client::setup_callbacks() {
             for (auto peer_id : update.del_peer_ids) {
                 peers_.remove_peer(peer_id);
             }
+        }
+    };
+
+    control_cbs.on_route_update = [this](const RouteUpdate& update) {
+        log().info("Route update v{}: +{} routes, -{} routes",
+                   update.version, update.add_routes.size(), update.del_routes.size());
+
+        // 更新本地路由缓存
+        {
+            std::lock_guard lock(routes_mutex_);
+
+            // 添加新路由
+            for (const auto& route : update.add_routes) {
+                // 检查是否已存在，如果存在则更新
+                bool found = false;
+                for (auto& r : routes_) {
+                    if (r.ip_type == route.ip_type &&
+                        r.prefix == route.prefix &&
+                        r.prefix_len == route.prefix_len &&
+                        r.gateway_node == route.gateway_node) {
+                        r = route;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    routes_.push_back(route);
+                }
+                log().debug("  + route /{} via node {}", route.prefix_len, route.gateway_node);
+            }
+
+            // 删除路由
+            for (const auto& route : update.del_routes) {
+                routes_.erase(
+                    std::remove_if(routes_.begin(), routes_.end(),
+                        [&route](const RouteInfo& r) {
+                            return r.ip_type == route.ip_type &&
+                                   r.prefix == route.prefix &&
+                                   r.prefix_len == route.prefix_len &&
+                                   r.gateway_node == route.gateway_node;
+                        }),
+                    routes_.end());
+                log().debug("  - route /{} via node {}", route.prefix_len, route.gateway_node);
+            }
+        }
+
+        // 应用路由更新到系统路由表
+        if (route_mgr_) {
+            route_mgr_->apply_route_update(update.add_routes, update.del_routes);
         }
     };
 
@@ -185,6 +266,16 @@ void Client::setup_callbacks() {
         // Start latency measurement loop
         if (config_.latency_measure_interval.count() > 0) {
             asio::co_spawn(ioc_, latency_measure_loop(), asio::detached);
+        }
+
+        // Announce configured routes (advertise_routes and exit_node)
+        if (!config_.advertise_routes.empty() || config_.exit_node) {
+            asio::co_spawn(ioc_, announce_configured_routes(), asio::detached);
+        }
+
+        // Start P2P manager
+        if (p2p_mgr_) {
+            asio::co_spawn(ioc_, p2p_mgr_->start(), asio::detached);
         }
     };
 
@@ -339,57 +430,114 @@ asio::awaitable<bool> Client::start() {
         }
     }
 
-    // Build control and relay URLs from server address
-    // The URL can be just host:port - we add the scheme based on tls config
-    std::string base_url = config_.controller_url;
-
-    // Remove trailing slash if present
-    if (!base_url.empty() && base_url.back() == '/') {
-        base_url.pop_back();
+    // 支持多 Controller URL 故障转移
+    if (config_.controller_hosts.empty()) {
+        config_.controller_hosts.push_back("edge.a-z.xin");
     }
-
-    // Remove any existing scheme (we'll add based on tls config)
-    if (base_url.substr(0, 6) == "wss://") {
-        base_url = base_url.substr(6);
-    } else if (base_url.substr(0, 5) == "ws://") {
-        base_url = base_url.substr(5);
-    } else if (base_url.substr(0, 8) == "https://") {
-        base_url = base_url.substr(8);
-    } else if (base_url.substr(0, 7) == "http://") {
-        base_url = base_url.substr(7);
-    }
-
-    // Remove path if user accidentally included it
-    auto path_pos = base_url.find("/api/");
-    if (path_pos != std::string::npos) {
-        base_url = base_url.substr(0, path_pos);
-    }
-
-    // Add the correct scheme based on TLS config
-    std::string scheme = config_.tls ? "wss://" : "ws://";
-    base_url = scheme + base_url;
-
-    std::string control_url = base_url + "/api/v1/control";
-    std::string relay_url = base_url + "/api/v1/relay";
 
     log().info("TLS: {}", config_.tls ? "enabled" : "disabled");
-    log().debug("Control URL: {}", control_url);
-    log().debug("Relay URL: {}", relay_url);
+    log().info("Controller hosts: {}", config_.controller_hosts.size());
 
-    // Create channels
-    control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, config_.tls);
-    relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url, config_.tls);
+    // 尝试连接每个 Controller
+    bool controller_connected = false;
 
-    // Setup callbacks
-    setup_callbacks();
+    for (size_t i = 0; i < config_.controller_hosts.size() && !controller_connected; ++i) {
+        const auto& host_port = config_.controller_hosts[i];
 
-    // Connect to control channel
-    state_ = ClientState::AUTHENTICATING;
-    log().info("Connecting to controller...");
+        // 解析 host:port 格式
+        auto [host, port] = ClientConfig::parse_host_port(host_port, config_.tls);
 
-    bool connected = co_await control_->connect(config_.authkey);
-    if (!connected) {
-        log().error("Failed to connect to controller");
+        // 构建 URL
+        std::string scheme = config_.tls ? "wss://" : "ws://";
+        std::string base_url = scheme + host + ":" + std::to_string(port);
+        std::string control_url = base_url + "/api/v1/control";
+        std::string relay_url = base_url + "/api/v1/relay";
+
+        log().info("Trying controller {}/{}: {}:{}", i + 1, config_.controller_hosts.size(), host, port);
+        log().debug("Control URL: {}", control_url);
+        log().debug("Relay URL: {}", relay_url);
+
+        // Create channels
+        control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, config_.tls);
+        relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url, config_.tls);
+
+        // Setup callbacks
+        setup_callbacks();
+
+        // Connect to control channel
+        state_ = ClientState::AUTHENTICATING;
+        log().info("Connecting to controller...");
+
+        bool connected = co_await control_->connect(config_.authkey);
+        if (!connected) {
+            log().warn("Failed to connect to controller {}:{}", host, port);
+            control_.reset();
+            relay_.reset();
+            continue;  // 尝试下一个 controller
+        }
+
+        // Wait a bit for auth response
+        asio::steady_timer timer(ioc_);
+        timer.expires_after(std::chrono::seconds(5));
+
+        bool auth_ok = false;
+        while (!control_->is_connected()) {
+            auto result = co_await (timer.async_wait(asio::use_awaitable) ||
+                                    asio::post(ioc_, asio::use_awaitable));
+            if (timer.expiry() <= std::chrono::steady_clock::now()) {
+                log().warn("Authentication timeout for {}:{}", host, port);
+                break;
+            }
+            co_await asio::post(ioc_, asio::use_awaitable);
+        }
+
+        if (!control_->is_connected()) {
+            try { co_await control_->close(); } catch (...) {}
+            control_.reset();
+            relay_.reset();
+            continue;  // 尝试下一个 controller
+        }
+
+        // Connect to relay channel
+        state_ = ClientState::CONNECTING_RELAY;
+        log().info("Connecting to relay...");
+
+        connected = co_await relay_->connect(control_->relay_token());
+        if (!connected) {
+            log().warn("Failed to connect to relay {}:{}", host, port);
+            try { co_await control_->close(); } catch (...) {}
+            control_.reset();
+            relay_.reset();
+            continue;  // 尝试下一个 controller
+        }
+
+        // Wait for relay auth
+        timer.expires_after(std::chrono::seconds(5));
+        while (!relay_->is_connected()) {
+            auto result = co_await (timer.async_wait(asio::use_awaitable) ||
+                                    asio::post(ioc_, asio::use_awaitable));
+            if (timer.expiry() <= std::chrono::steady_clock::now()) {
+                log().warn("Relay authentication timeout for {}:{}", host, port);
+                break;
+            }
+            co_await asio::post(ioc_, asio::use_awaitable);
+        }
+
+        if (!relay_->is_connected()) {
+            try { co_await control_->close(); } catch (...) {}
+            control_.reset();
+            relay_.reset();
+            continue;  // 尝试下一个 controller
+        }
+
+        // 连接成功
+        controller_connected = true;
+        log().info("Connected to controller: {}:{}", host, port);
+    }
+
+    // 所有 controller 都失败了
+    if (!controller_connected) {
+        log().error("Failed to connect to any controller");
         if (config_.auto_reconnect) {
             log().info("Will retry in {}s...", config_.reconnect_interval.count());
             state_ = ClientState::STOPPED;
@@ -398,65 +546,6 @@ asio::awaitable<bool> Client::start() {
             state_ = ClientState::STOPPED;
         }
         co_return false;
-    }
-
-    // Wait a bit for auth response
-    asio::steady_timer timer(ioc_);
-    timer.expires_after(std::chrono::seconds(5));
-
-    while (!control_->is_connected()) {
-        auto result = co_await (timer.async_wait(asio::use_awaitable) ||
-                                asio::post(ioc_, asio::use_awaitable));
-        if (timer.expiry() <= std::chrono::steady_clock::now()) {
-            log().error("Authentication timeout");
-            if (config_.auto_reconnect) {
-                log().info("Will retry in {}s...", config_.reconnect_interval.count());
-                state_ = ClientState::STOPPED;
-                asio::co_spawn(ioc_, reconnect(), asio::detached);
-            } else {
-                state_ = ClientState::STOPPED;
-            }
-            co_return false;
-        }
-        co_await asio::post(ioc_, asio::use_awaitable);
-    }
-
-    // Connect to relay channel
-    state_ = ClientState::CONNECTING_RELAY;
-    log().info("Connecting to relay...");
-
-    connected = co_await relay_->connect(control_->relay_token());
-    if (!connected) {
-        log().error("Failed to connect to relay");
-        co_await control_->close();
-        if (config_.auto_reconnect) {
-            log().info("Will retry in {}s...", config_.reconnect_interval.count());
-            state_ = ClientState::STOPPED;
-            asio::co_spawn(ioc_, reconnect(), asio::detached);
-        } else {
-            state_ = ClientState::STOPPED;
-        }
-        co_return false;
-    }
-
-    // Wait for relay auth
-    timer.expires_after(std::chrono::seconds(5));
-    while (!relay_->is_connected()) {
-        auto result = co_await (timer.async_wait(asio::use_awaitable) ||
-                                asio::post(ioc_, asio::use_awaitable));
-        if (timer.expiry() <= std::chrono::steady_clock::now()) {
-            log().error("Relay authentication timeout");
-            co_await control_->close();
-            if (config_.auto_reconnect) {
-                log().info("Will retry in {}s...", config_.reconnect_interval.count());
-                state_ = ClientState::STOPPED;
-                asio::co_spawn(ioc_, reconnect(), asio::detached);
-            } else {
-                state_ = ClientState::STOPPED;
-            }
-            co_return false;
-        }
-        co_await asio::post(ioc_, asio::use_awaitable);
     }
 
     // Start IPC server for CLI control
@@ -486,7 +575,18 @@ asio::awaitable<void> Client::stop() {
     dns_refresh_timer_.cancel();
     latency_timer_.cancel();
 
-    // Teardown TUN first
+    // Stop P2P manager
+    if (p2p_mgr_) {
+        co_await p2p_mgr_->stop();
+    }
+
+    // Stop route manager first (removes routes from system)
+    if (route_mgr_) {
+        route_mgr_->stop();
+        route_mgr_.reset();
+    }
+
+    // Teardown TUN
     teardown_tun();
 
     if (relay_) {
@@ -506,6 +606,17 @@ asio::awaitable<void> Client::stop() {
 }
 
 asio::awaitable<bool> Client::send_to_peer(NodeId peer_id, std::span<const uint8_t> data) {
+    // 优先尝试 P2P 发送
+    if (p2p_mgr_ && p2p_mgr_->is_p2p_connected(peer_id)) {
+        bool sent = co_await p2p_mgr_->send_data(peer_id, data);
+        if (sent) {
+            co_return true;
+        }
+        // P2P 发送失败，回退到 Relay
+        log().debug("P2P send failed, falling back to relay");
+    }
+
+    // 通过 Relay 发送
     if (!relay_ || !relay_->is_connected()) {
         log().warn("Cannot send: relay not connected");
         co_return false;
@@ -621,35 +732,14 @@ asio::awaitable<void> Client::dns_refresh_loop() {
                 break;
             }
 
-            // Parse URL to get host and port
-            std::string base_url = config_.controller_url;
-            if (!base_url.empty() && base_url.back() == '/') {
-                base_url.pop_back();
-            }
-            // Remove scheme
-            if (base_url.substr(0, 6) == "wss://") {
-                base_url = base_url.substr(6);
-            } else if (base_url.substr(0, 5) == "ws://") {
-                base_url = base_url.substr(5);
-            } else if (base_url.substr(0, 8) == "https://") {
-                base_url = base_url.substr(8);
-            } else if (base_url.substr(0, 7) == "http://") {
-                base_url = base_url.substr(7);
-            }
-            // Remove path
-            auto path_pos = base_url.find('/');
-            if (path_pos != std::string::npos) {
-                base_url = base_url.substr(0, path_pos);
+            // 使用当前的 controller host
+            if (config_.controller_hosts.empty()) {
+                continue;
             }
 
-            // Extract host and port
-            std::string host = base_url;
-            std::string port = config_.tls ? "443" : "80";
-            auto colon_pos = base_url.find(':');
-            if (colon_pos != std::string::npos) {
-                host = base_url.substr(0, colon_pos);
-                port = base_url.substr(colon_pos + 1);
-            }
+            // 解析第一个 controller host
+            auto [host, port_num] = ClientConfig::parse_host_port(config_.controller_hosts[0], config_.tls);
+            std::string port = std::to_string(port_num);
 
             // Resolve DNS
             asio::ip::tcp::resolver resolver(ioc_);
@@ -712,6 +802,12 @@ asio::awaitable<void> Client::latency_measure_loop() {
 
             log().debug("Measuring latency to {} online peers", online_peers.size());
 
+            // 收集延迟数据
+            LatencyReport report;
+            report.timestamp = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+
             // Ping each online peer (with small delay between pings to avoid burst)
             for (const auto& peer : online_peers) {
                 if (state_ != ClientState::RUNNING) {
@@ -726,6 +822,13 @@ asio::awaitable<void> Client::latency_measure_loop() {
                 // Send ping with short timeout (2s)
                 uint16_t latency = co_await ping_peer(peer.info.node_id, std::chrono::milliseconds(2000));
 
+                // 添加到报告
+                LatencyReportEntry entry;
+                entry.peer_node_id = peer.info.node_id;
+                entry.latency_ms = latency;
+                entry.path_type = 0;  // 0 = relay (目前只有 relay 模式)
+                report.entries.push_back(entry);
+
                 if (latency > 0) {
                     log().debug("Latency to {}: {}ms", peer.info.virtual_ip.to_string(), latency);
                 } else {
@@ -736,6 +839,12 @@ asio::awaitable<void> Client::latency_measure_loop() {
                 asio::steady_timer delay_timer(co_await asio::this_coro::executor);
                 delay_timer.expires_after(std::chrono::milliseconds(100));
                 co_await delay_timer.async_wait(asio::use_awaitable);
+            }
+
+            // 上报延迟数据到 Controller
+            if (!report.entries.empty() && control_ && control_->is_connected()) {
+                co_await control_->send_latency_report(report);
+                log().debug("Reported latency for {} peers to controller", report.entries.size());
             }
 
         } catch (const boost::system::system_error& e) {
@@ -968,6 +1077,298 @@ void Client::send_pong(NodeId peer_id, uint32_t seq_num, uint64_t timestamp) {
     asio::co_spawn(ioc_, [this, peer_id, pong_msg = std::move(pong_msg)]() -> asio::awaitable<void> {
         co_await relay_->send_data(peer_id, pong_msg);
     }, asio::detached);
+}
+
+// ============================================================================
+// Subnet Routing
+// ============================================================================
+
+asio::awaitable<void> Client::announce_routes(const std::vector<RouteInfo>& routes) {
+    if (!control_ || !control_->is_connected()) {
+        log().warn("Cannot announce routes: not connected");
+        co_return;
+    }
+
+    co_await control_->send_route_announce(routes);
+}
+
+asio::awaitable<void> Client::withdraw_routes(const std::vector<RouteInfo>& routes) {
+    if (!control_ || !control_->is_connected()) {
+        log().warn("Cannot withdraw routes: not connected");
+        co_return;
+    }
+
+    co_await control_->send_route_withdraw(routes);
+}
+
+asio::awaitable<void> Client::announce_configured_routes() {
+    std::vector<RouteInfo> routes;
+
+    // 解析配置中的路由 (CIDR 格式)
+    for (const auto& cidr : config_.advertise_routes) {
+        auto slash_pos = cidr.find('/');
+        if (slash_pos == std::string::npos) {
+            log().warn("Invalid route CIDR format: {}", cidr);
+            continue;
+        }
+
+        RouteInfo route;
+        route.ip_type = IpType::IPv4;
+        route.gateway_node = node_id();
+        route.metric = 100;
+        route.flags = RouteFlags::ENABLED;
+
+        // 解析 IP 地址
+        auto ip_str = cidr.substr(0, slash_pos);
+        auto ip = IPv4Address::from_string(ip_str);
+        std::copy(ip.bytes.begin(), ip.bytes.end(), route.prefix.begin());
+
+        // 解析前缀长度
+        try {
+            route.prefix_len = static_cast<uint8_t>(std::stoi(cidr.substr(slash_pos + 1)));
+        } catch (...) {
+            log().warn("Invalid prefix length in route: {}", cidr);
+            continue;
+        }
+
+        routes.push_back(route);
+        log().info("Will announce route: {}", cidr);
+    }
+
+    // 如果是出口节点，添加默认路由
+    if (config_.exit_node) {
+        RouteInfo default_route;
+        default_route.ip_type = IpType::IPv4;
+        default_route.prefix = {};  // 0.0.0.0
+        default_route.prefix_len = 0;  // /0
+        default_route.gateway_node = node_id();
+        default_route.metric = 100;
+        default_route.flags = RouteFlags::ENABLED | RouteFlags::EXIT_NODE;
+        routes.push_back(default_route);
+        log().info("Will announce exit node route: 0.0.0.0/0");
+    }
+
+    if (!routes.empty()) {
+        co_await announce_routes(routes);
+    }
+}
+
+// ============================================================================
+// Configuration Hot-Reload Operations
+// ============================================================================
+
+void Client::request_reconnect() {
+    log().info("Reconnect requested via hot-reload");
+
+    // 在 io_context 中异步执行重连操作
+    asio::co_spawn(ioc_, [this, self = shared_from_this()]() -> asio::awaitable<void> {
+        // 先停止当前连接
+        if (control_) {
+            co_await control_->close();
+            control_.reset();
+        }
+        if (relay_) {
+            co_await relay_->close();
+            relay_.reset();
+        }
+
+        state_ = ClientState::RECONNECTING;
+
+        // 重建 SSL 上下文
+        request_ssl_context_rebuild();
+
+        // 等待一小段时间后重连
+        asio::steady_timer timer(ioc_);
+        timer.expires_after(std::chrono::milliseconds(100));
+        co_await timer.async_wait(asio::use_awaitable);
+
+        // 重新启动
+        co_await start();
+    }, asio::detached);
+}
+
+void Client::request_tun_rebuild() {
+    log().info("TUN device rebuild requested via hot-reload");
+
+    // 在 io_context 中异步执行
+    asio::post(ioc_, [this, self = shared_from_this()]() {
+        // 先关闭现有的 TUN 设备
+        teardown_tun();
+
+        // 如果配置启用了 TUN，重新创建
+        if (config_.enable_tun) {
+            if (setup_tun()) {
+                log().info("TUN device rebuilt successfully");
+            } else {
+                log().error("Failed to rebuild TUN device");
+            }
+        } else {
+            log().info("TUN device disabled");
+        }
+    });
+}
+
+void Client::request_ipc_restart() {
+    log().info("IPC server restart requested via hot-reload");
+
+    // 在 io_context 中异步执行
+    asio::post(ioc_, [this, self = shared_from_this()]() {
+        // 先停止现有的 IPC 服务器
+        teardown_ipc();
+
+        // 如果配置启用了 IPC，重新启动
+        if (config_.enable_ipc) {
+            if (setup_ipc()) {
+                log().info("IPC server restarted successfully");
+            } else {
+                log().error("Failed to restart IPC server");
+            }
+        } else {
+            log().info("IPC server disabled");
+        }
+    });
+}
+
+void Client::request_route_reannounce() {
+    log().info("Route re-announcement requested via hot-reload");
+
+    // 在 io_context 中异步执行
+    asio::co_spawn(ioc_, [this, self = shared_from_this()]() -> asio::awaitable<void> {
+        if (!control_ || !control_->is_connected()) {
+            log().warn("Cannot reannounce routes: not connected");
+            co_return;
+        }
+
+        // 重新公告配置中的路由
+        co_await announce_configured_routes();
+        log().info("Routes reannounced successfully");
+    }, asio::detached);
+}
+
+void Client::request_ssl_context_rebuild() {
+    log().info("Rebuilding SSL context with new configuration");
+
+    try {
+        // 重新配置 SSL 上下文
+        ssl_ctx_.set_default_verify_paths();
+
+        if (config_.ssl_verify) {
+            ssl_ctx_.set_verify_mode(ssl::verify_peer);
+        } else {
+            ssl_ctx_.set_verify_mode(ssl::verify_none);
+        }
+
+        if (!config_.ssl_ca_file.empty()) {
+            ssl_ctx_.load_verify_file(config_.ssl_ca_file);
+        }
+
+        log().info("SSL context rebuilt successfully");
+    } catch (const std::exception& e) {
+        log().error("Failed to rebuild SSL context: {}", e.what());
+    }
+}
+
+std::string Client::get_config_value(const std::string& key) const {
+    // 根据 key 返回对应的配置值
+    if (key == "controller.url") {
+        return config_.current_controller_host();
+    } else if (key == "controller.tls") {
+        return config_.tls ? "true" : "false";
+    } else if (key == "controller.authkey") {
+        return "***";  // 不返回实际密钥
+    } else if (key == "connection.auto_reconnect") {
+        return config_.auto_reconnect ? "true" : "false";
+    } else if (key == "connection.reconnect_interval") {
+        return std::to_string(config_.reconnect_interval.count());
+    } else if (key == "connection.ping_interval") {
+        return std::to_string(config_.ping_interval.count());
+    } else if (key == "connection.dns_refresh_interval") {
+        return std::to_string(config_.dns_refresh_interval.count());
+    } else if (key == "connection.latency_measure_interval") {
+        return std::to_string(config_.latency_measure_interval.count());
+    } else if (key == "ssl.verify") {
+        return config_.ssl_verify ? "true" : "false";
+    } else if (key == "ssl.ca_file") {
+        return config_.ssl_ca_file;
+    } else if (key == "ssl.allow_self_signed") {
+        return config_.ssl_allow_self_signed ? "true" : "false";
+    } else if (key == "storage.state_dir") {
+        return config_.state_dir;
+    } else if (key == "tun.enable") {
+        return config_.enable_tun ? "true" : "false";
+    } else if (key == "tun.name") {
+        return config_.tun_name;
+    } else if (key == "tun.mtu") {
+        return std::to_string(config_.tun_mtu);
+    } else if (key == "ipc.enable") {
+        return config_.enable_ipc ? "true" : "false";
+    } else if (key == "ipc.socket_path") {
+        return config_.ipc_socket_path;
+    } else if (key == "routing.accept_routes") {
+        return config_.accept_routes ? "true" : "false";
+    } else if (key == "routing.advertise_routes") {
+        // 序列化为 JSON 数组
+        nlohmann::json arr = config_.advertise_routes;
+        return arr.dump();
+    } else if (key == "routing.exit_node") {
+        return config_.exit_node ? "true" : "false";
+    } else if (key == "log.level") {
+        return config_.log_level;
+    } else if (key == "log.file") {
+        return config_.log_file;
+    }
+    return "";
+}
+
+void Client::enable_config_watch() {
+    if (config_path_.empty()) {
+        log().warn("Cannot enable config watch: config path not set");
+        return;
+    }
+
+    if (config_watcher_) {
+        log().debug("Config watcher already enabled");
+        return;
+    }
+
+    config_watcher_ = std::make_unique<ConfigWatcher>(ioc_, config_path_);
+
+    // 设置配置变更回调
+    config_watcher_->start([this](const ClientConfig& new_config) {
+        log().info("Configuration file changed, applying changes...");
+
+        if (config_applier_) {
+            auto changes = config_applier_->apply(config_, new_config);
+
+            for (const auto& change : changes) {
+                if (change.applied) {
+                    log().info("Config applied: {} = {}", change.key, change.new_value);
+                } else if (!change.message.empty()) {
+                    log().info("Config change: {} - {}", change.key, change.message);
+                }
+            }
+
+            // 更新配置
+            config_ = new_config;
+        }
+    });
+
+    log().info("Config file watching enabled: {}", config_path_);
+}
+
+void Client::disable_config_watch() {
+    if (config_watcher_) {
+        config_watcher_->stop();
+        config_watcher_.reset();
+        log().info("Config file watching disabled");
+    }
+}
+
+void Client::clear_system_routes() {
+    if (route_mgr_) {
+        log().info("Clearing all system routes");
+        route_mgr_->cleanup_all();
+    }
 }
 
 } // namespace edgelink::client

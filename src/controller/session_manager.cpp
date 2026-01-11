@@ -1,6 +1,7 @@
 #include "controller/session_manager.hpp"
 #include "controller/session.hpp"
 #include "common/logger.hpp"
+#include "common/message.hpp"
 
 namespace edgelink::controller {
 
@@ -121,39 +122,44 @@ std::shared_ptr<ISession> SessionManager::get_relay_session(NodeId node_id) {
 asio::awaitable<void> SessionManager::broadcast_config_update(NetworkId network_id, NodeId except_node) {
     auto sessions = get_network_control_sessions(network_id);
 
-    // Build CONFIG_UPDATE message
-    ConfigUpdate update;
-    update.version = next_config_version();
-    update.update_flags = ConfigUpdateFlags::PEER_CHANGED;
-
     // Get all nodes in the network
     auto nodes = db_.get_nodes_by_network(network_id);
     if (!nodes) {
         co_return;
     }
 
-    // Add all peers
-    for (const auto& node : *nodes) {
-        PeerInfo peer;
-        peer.node_id = node.id;
-        peer.virtual_ip = node.virtual_ip;
-        peer.node_key = node.node_key;
-        peer.online = node.online;
-        peer.name = node.hostname;
-        update.add_peers.push_back(peer);
-    }
-
-    auto payload = update.serialize();
-    auto frame_data = FrameCodec::encode(FrameType::CONFIG_UPDATE, payload);
+    auto version = next_config_version();
+    int sent_count = 0;
 
     for (const auto& session : sessions) {
-        if (session->node_id() != except_node) {
-            co_await session->send_raw(frame_data);
+        if (session->node_id() == except_node) {
+            continue;
         }
+
+        // Build CONFIG_UPDATE message for each session (excluding self)
+        ConfigUpdate update;
+        update.version = version;
+        update.update_flags = ConfigUpdateFlags::PEER_CHANGED;
+
+        // Add peers (excluding self)
+        for (const auto& node : *nodes) {
+            if (node.id == session->node_id()) continue;
+
+            PeerInfo peer;
+            peer.node_id = node.id;
+            peer.virtual_ip = node.virtual_ip;
+            peer.node_key = node.node_key;
+            peer.online = node.online;
+            peer.name = node.hostname;
+            update.add_peers.push_back(peer);
+        }
+
+        co_await session->send_frame(FrameType::CONFIG_UPDATE, update.serialize());
+        ++sent_count;
     }
 
     log().debug("Broadcast CONFIG_UPDATE to {} sessions in network {}",
-                  sessions.size() - (except_node ? 1 : 0), network_id);
+                  sent_count, network_id);
 }
 
 asio::awaitable<void> SessionManager::notify_peer_status(NodeId target_node, NodeId peer_node, bool online) {
@@ -182,6 +188,38 @@ asio::awaitable<void> SessionManager::notify_peer_status(NodeId target_node, Nod
 
     auto payload = update.serialize();
     co_await session->send_frame(FrameType::CONFIG_UPDATE, payload);
+}
+
+asio::awaitable<void> SessionManager::broadcast_route_update(
+    NetworkId network_id, NodeId except_node,
+    const std::vector<RouteInfo>& add_routes,
+    const std::vector<RouteInfo>& del_routes) {
+
+    if (add_routes.empty() && del_routes.empty()) {
+        co_return;
+    }
+
+    auto sessions = get_network_control_sessions(network_id);
+    auto version = next_config_version();
+    int sent_count = 0;
+
+    RouteUpdate update;
+    update.version = version;
+    update.add_routes = add_routes;
+    update.del_routes = del_routes;
+    auto payload = update.serialize();
+
+    for (const auto& session : sessions) {
+        if (session->node_id() == except_node) {
+            continue;
+        }
+
+        co_await session->send_frame(FrameType::ROUTE_UPDATE, payload);
+        ++sent_count;
+    }
+
+    log().debug("Broadcast ROUTE_UPDATE to {} sessions in network {} (+{} routes, -{} routes)",
+                sent_count, network_id, add_routes.size(), del_routes.size());
 }
 
 // ============================================================================

@@ -23,10 +23,15 @@ class Client;
 enum class IpcRequestType {
     STATUS,         // Get client status
     PEERS,          // List all peers
+    ROUTES,         // List all routes
     PING,           // Ping a peer
     SEND,           // Send data to a peer
     LOG_LEVEL,      // Get/set log level
     SHUTDOWN,       // Request shutdown
+    CONFIG_GET,     // Get config value
+    CONFIG_SET,     // Set config value
+    CONFIG_LIST,    // List all config
+    CONFIG_RELOAD,  // Reload config from file
 };
 
 // IPC response status
@@ -43,7 +48,7 @@ struct IpcStatusResponse {
     std::string state;
     std::string node_id;
     std::string virtual_ip;
-    std::string controller_url;
+    std::string controller_host;  // 当前连接的 controller (host:port)
     uint64_t network_id = 0;
     size_t peer_count = 0;
     size_t online_peer_count = 0;
@@ -58,6 +63,36 @@ struct IpcPeerInfo {
     bool online = false;
     std::string connection_status;  // "disconnected", "p2p", "relay"
     uint16_t latency_ms = 0;
+};
+
+// Route info for IPC response
+struct IpcRouteInfo {
+    std::string prefix;           // CIDR format, e.g., "192.168.1.0/24"
+    std::string gateway_node_id;  // Node ID of the gateway
+    std::string gateway_ip;       // Virtual IP of the gateway node
+    std::string gateway_name;     // Name of the gateway node
+    uint16_t metric = 100;
+    bool exit_node = false;       // Is this an exit node route (0.0.0.0/0)
+};
+
+// Config item info for IPC response
+struct IpcConfigItem {
+    std::string key;            // 配置路径
+    std::string value;          // 当前值
+    std::string type;           // 类型 (string, int, bool, string_array)
+    std::string description;    // 描述
+    bool hot_reloadable;        // 是否可热重载
+    std::string default_value;  // 默认值
+};
+
+// Config change result
+struct IpcConfigChange {
+    std::string key;
+    std::string old_value;
+    std::string new_value;
+    bool applied;
+    bool restart_required;
+    std::string message;
 };
 
 // IPC Server configuration
@@ -106,13 +141,23 @@ private:
     // Request handlers
     std::string handle_status();
     std::string handle_peers(bool online_only);
+    std::string handle_routes();
     std::string handle_ping(const std::string& target);
     std::string handle_log_level(const std::string& module, const std::string& level);
     std::string handle_shutdown();
+    std::string handle_config_get(const std::string& key);
+    std::string handle_config_set(const std::string& key, const std::string& value);
+    std::string handle_config_list();
+    std::string handle_config_reload();
 
     // JSON encoding helpers
     std::string encode_status_response(IpcStatus status, const IpcStatusResponse& data);
     std::string encode_peers_response(IpcStatus status, const std::vector<IpcPeerInfo>& peers);
+    std::string encode_routes_response(IpcStatus status, const std::vector<IpcRouteInfo>& routes);
+    std::string encode_config_response(IpcStatus status, const IpcConfigItem& item);
+    std::string encode_config_list_response(IpcStatus status, const std::vector<IpcConfigItem>& items);
+    std::string encode_config_change_response(IpcStatus status, const IpcConfigChange& change);
+    std::string encode_config_reload_response(IpcStatus status, const std::vector<IpcConfigChange>& changes);
     std::string encode_error(IpcStatus status, const std::string& message);
     std::string encode_ok(const std::string& message = "");
 
@@ -150,9 +195,14 @@ public:
     // High-level commands
     std::string get_status();
     std::string get_peers(bool online_only = false);
+    std::string get_routes();
     std::string ping_peer(const std::string& target);
     std::string set_log_level(const std::string& module, const std::string& level);
     std::string request_shutdown();
+    std::string config_get(const std::string& key);
+    std::string config_set(const std::string& key, const std::string& value);
+    std::string config_list();
+    std::string config_reload();
 
 private:
     std::string socket_path_;

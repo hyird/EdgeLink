@@ -37,6 +37,25 @@ auth_token_hours = 24
 # Relay token validity in minutes (default: 90)
 relay_token_minutes = 90
 
+[builtin_relay]
+# Built-in relay server configuration
+# enabled = true
+name = "main-relay"
+region = "cn-east-1"
+priority = 100
+
+[builtin_stun]
+# Built-in STUN server configuration
+# Set enabled = true and provide public_ip to enable STUN service
+enabled = false
+
+# Public IP address (required if enabled)
+# Clients will use this IP to connect to the STUN server
+# public_ip = "203.0.113.1"
+
+# STUN server port (default: 3478)
+port = 3478
+
 [log]
 # Log level: trace, debug, info, warn, error
 level = "debug"

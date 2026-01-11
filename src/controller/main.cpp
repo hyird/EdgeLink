@@ -2,6 +2,7 @@
 #include "controller/database.hpp"
 #include "controller/jwt_util.hpp"
 #include "controller/session_manager.hpp"
+#include "controller/stun_server.hpp"
 #include "common/crypto.hpp"
 #include "common/config.hpp"
 #include "common/logger.hpp"
@@ -252,6 +253,8 @@ int cmd_authkey(int argc, char* argv[]) {
         if (expires_hours > 0) {
             std::cout << "  Expires: " << format_time(expires_at) << "\n";
         }
+        db.close();
+        LogManager::instance().shutdown();
         return 0;
 
     } else if (action == "list") {
@@ -263,6 +266,8 @@ int cmd_authkey(int argc, char* argv[]) {
 
         if (keys->empty()) {
             std::cout << "No authkeys found.\n";
+            db.close();
+            LogManager::instance().shutdown();
             return 0;
         }
 
@@ -285,6 +290,8 @@ int cmd_authkey(int argc, char* argv[]) {
                       << std::setw(20) << format_time(k.created_at)
                       << exp_str << "\n";
         }
+        db.close();
+        LogManager::instance().shutdown();
         return 0;
 
     } else if (action == "revoke") {
@@ -300,6 +307,8 @@ int cmd_authkey(int argc, char* argv[]) {
         }
 
         std::cout << "Revoked authkey: " << key_to_revoke << "\n";
+        db.close();
+        LogManager::instance().shutdown();
         return 0;
 
     } else {
@@ -357,6 +366,8 @@ int cmd_node(int argc, char* argv[]) {
 
         if (nodes->empty()) {
             std::cout << "No nodes registered.\n";
+            db.close();
+            LogManager::instance().shutdown();
             return 0;
         }
 
@@ -381,6 +392,8 @@ int cmd_node(int argc, char* argv[]) {
                       << std::setw(8) << status
                       << last_seen << "\n";
         }
+        db.close();
+        LogManager::instance().shutdown();
         return 0;
 
     } else if (action == "delete") {
@@ -396,6 +409,8 @@ int cmd_node(int argc, char* argv[]) {
         }
 
         std::cout << "Deleted node: " << node_id << "\n";
+        db.close();
+        LogManager::instance().shutdown();
         return 0;
 
     } else {
@@ -462,6 +477,8 @@ int cmd_user(int argc, char* argv[]) {
 
         if (users->empty()) {
             std::cout << "No users found.\n";
+            db.close();
+            LogManager::instance().shutdown();
             return 0;
         }
 
@@ -486,6 +503,8 @@ int cmd_user(int argc, char* argv[]) {
                       << std::setw(20) << format_time(u.created_at)
                       << last_login << "\n";
         }
+        db.close();
+        LogManager::instance().shutdown();
         return 0;
 
     } else if (action == "add") {
@@ -511,6 +530,8 @@ int cmd_user(int argc, char* argv[]) {
         std::cout << "Created user: " << username << "\n";
         std::cout << "  ID:   " << user->id << "\n";
         std::cout << "  Role: " << role << "\n";
+        db.close();
+        LogManager::instance().shutdown();
         return 0;
 
     } else if (action == "delete") {
@@ -526,6 +547,8 @@ int cmd_user(int argc, char* argv[]) {
         }
 
         std::cout << "Deleted user: " << user_id << "\n";
+        db.close();
+        LogManager::instance().shutdown();
         return 0;
 
     } else {
@@ -657,6 +680,10 @@ int cmd_serve(int argc, char* argv[]) {
         // Create session manager
         SessionManager manager(ioc, db, jwt);
 
+        // Set builtin relay/stun config
+        manager.set_builtin_relay_config(cfg.builtin_relay);
+        manager.set_builtin_stun_config(cfg.builtin_stun);
+
         // Create server config
         ServerConfig server_cfg;
         server_cfg.bind_address = cfg.bind_address;
@@ -680,13 +707,33 @@ int cmd_serve(int argc, char* argv[]) {
         // Start server
         asio::co_spawn(ioc, server.run(), asio::detached);
 
+        // Start STUN server (if enabled)
+        std::unique_ptr<StunServer> stun_server;
+        if (cfg.builtin_stun.enabled) {
+            if (cfg.builtin_stun.public_ip.empty()) {
+                Logger::get("controller").error("builtin_stun.enabled=true but builtin_stun.ip is empty");
+                Logger::get("controller").warn("STUN server will NOT be started");
+            } else {
+                stun_server = std::make_unique<StunServer>(
+                    ioc, cfg.bind_address, cfg.builtin_stun.port);
+                stun_server->set_public_ip(cfg.builtin_stun.public_ip);
+                asio::co_spawn(ioc, stun_server->start(), asio::detached);
+            }
+        }
+
         std::string scheme = cfg.tls ? "wss" : "ws";
         Logger::get("controller").info("Controller ready");
         Logger::get("controller").info("  Control endpoint: {}://{}:{}/api/v1/control", scheme, cfg.bind_address, cfg.port);
         Logger::get("controller").info("  Relay endpoint:   {}://{}:{}/api/v1/relay", scheme, cfg.bind_address, cfg.port);
+        if (stun_server) {
+            Logger::get("controller").info("  STUN endpoint:    udp://{}:{}", cfg.builtin_stun.public_ip, cfg.builtin_stun.port);
+        }
         Logger::get("controller").info("  Database: {}", cfg.database_path);
         Logger::get("controller").info("  TLS: {}", cfg.tls ? "enabled" : "disabled");
         Logger::get("controller").info("  IO threads: {}", cfg.num_threads);
+        Logger::get("controller").info("  Builtin Relay: {} (name={}, region={})",
+            cfg.builtin_relay.enabled ? "enabled" : "disabled",
+            cfg.builtin_relay.name, cfg.builtin_relay.region);
 
         // Run IO threads
         std::vector<std::thread> threads;
@@ -721,9 +768,10 @@ int cmd_serve(int argc, char* argv[]) {
 // ============================================================================
 
 int main(int argc, char* argv[]) {
-    // No arguments: default to serve
+    // No arguments: show help
     if (argc < 2) {
-        return cmd_serve(0, nullptr);
+        print_usage();
+        return 0;
     }
 
     std::string command = argv[1];

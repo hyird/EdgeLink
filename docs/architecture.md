@@ -1,7 +1,7 @@
 # EdgeLink 架构设计文档
 
-> **版本**: 2.9
-> **更新日期**: 2026-01-10
+> **版本**: 3.0
+> **更新日期**: 2026-01-11
 > **协议版本**: 0x02
 
 ## 目录
@@ -3949,9 +3949,13 @@ controller_url = "wss://controller.example.com:8080/api/v1/control"  # 禁止
 | jwt.auth_token_ttl       | uint32 | 1440      | Auth Token 有效期(分钟)  |
 | jwt.relay_token_ttl      | uint32 | 90        | Relay Token 有效期(分钟) |
 | database.path            | string | -         | 数据库路径               |
-| builtin_relay.enabled    | bool   | false     | 启用内置 Relay (不参与 Mesh) |
+| builtin_relay.enabled    | bool   | true      | 启用内置 Relay (不参与 Mesh) |
+| builtin_relay.name       | string | "builtin" | Relay 名称 (显示给客户端)  |
+| builtin_relay.region     | string | "local"   | Relay 区域标识            |
+| builtin_relay.priority   | uint16 | 100       | Relay 优先级 (越小越优先)  |
 | builtin_stun.enabled     | bool   | false     | 启用内置 STUN            |
-| builtin_stun.ip          | string | ""        | 公网 IP (NAT 检测)       |
+| builtin_stun.public_ip   | string | ""        | STUN 公网 IP (必填)       |
+| builtin_stun.port        | uint16 | 3478      | STUN 监听端口            |
 | log.level                | string | "info"    | 全局日志等级             |
 | log.format               | string | 见 9.4    | 日志格式模板             |
 | log.console.enabled      | bool   | true      | 启用控制台输出           |
@@ -4025,21 +4029,30 @@ level = "info"  # 全局默认等级
 
 ### 12.3 Client 配置
 
-| 配置项                   | 类型     | 默认值    | 说明                       |
-| ------------------------ | -------- | --------- | -------------------------- |
-| controller_url           | string   | -         | Controller WSS URL         |
-| auth_key                 | string   | ""        | 认证密钥 (见 12.4)         |
-| data_dir                 | string   | -         | 数据目录                   |
-| routes.advertise         | []string | []        | 通告的子网路由             |
-| routes.accept            | []string | ["*"]     | 接受的子网路由             |
-| exit_node.enabled        | bool     | false     | 启用 Exit Node             |
-| exit_node.use            | string   | ""        | 使用指定 Exit Node         |
-| log.level                | string   | "info"    | 全局日志等级               |
-| log.console.enabled      | bool     | true      | 启用控制台输出             |
-| log.console.color        | bool     | true      | 启用彩色输出               |
-| log.file.enabled         | bool     | false     | 启用文件输出               |
-| log.file.path            | string   | -         | 日志文件路径               |
-| log.modules.<name>       | string   | 继承全局  | 指定模块的日志等级         |
+| 配置项                         | 类型     | 默认值    | 说明                         |
+| ------------------------------ | -------- | --------- | ---------------------------- |
+| controller.url                 | string   | -         | Controller 地址 (host:port)  |
+| controller.tls                 | bool     | false     | 启用 TLS (wss://)            |
+| controller.authkey             | string   | ""        | 认证密钥 (见 12.4)           |
+| connection.auto_reconnect      | bool     | true      | 自动重连                     |
+| connection.reconnect_interval  | uint32   | 5         | 重连间隔 (秒)                |
+| connection.ping_interval       | uint32   | 5         | Keepalive 间隔 (秒)          |
+| connection.dns_refresh_interval| uint32   | 60        | DNS 刷新间隔 (秒，0=禁用)    |
+| connection.latency_measure_interval | uint32 | 30     | 延迟测量间隔 (秒，0=禁用)    |
+| ssl.verify                     | bool     | false     | 验证 SSL 证书                |
+| ssl.ca_file                    | string   | ""        | 自定义 CA 证书文件           |
+| ssl.allow_self_signed          | bool     | false     | 允许自签名证书               |
+| storage.state_dir              | string   | -         | 数据目录                     |
+| tun.enable                     | bool     | false     | 启用 TUN 设备                |
+| tun.name                       | string   | ""        | TUN 设备名称                 |
+| tun.mtu                        | uint32   | 1420      | TUN MTU 大小                 |
+| ipc.enable                     | bool     | true      | 启用 IPC 控制接口            |
+| ipc.socket_path                | string   | ""        | IPC Socket 路径              |
+| routing.advertise_routes       | []string | []        | 通告的子网路由 (CIDR)        |
+| routing.exit_node              | bool     | false     | 作为出口节点 (通告 0.0.0.0/0)|
+| routing.accept_routes          | bool     | true      | 接受路由并应用到系统路由表   |
+| log.level                      | string   | "info"    | 全局日志等级                 |
+| log.file                       | string   | ""        | 日志文件路径                 |
 | worker_threads           | uint32   | 0         | 工作线程数 (0=CPU核心数)   |
 | control_heartbeat.interval | uint32 | 5         | 控制通道心跳发送间隔 (秒)  |
 | control_heartbeat.timeout  | uint32 | 10        | 控制通道心跳超时时间 (秒)  |
@@ -4047,14 +4060,14 @@ level = "info"  # 全局默认等级
 | reconnect.max_delay      | uint32   | 60000     | 重连最大延迟 (毫秒)        |
 | reconnect.multiplier     | float    | 2.0       | 重连延迟倍数               |
 | p2p.enabled              | bool     | true      | 启用 P2P 直连              |
+| p2p.bind_port            | uint16   | 0         | UDP 绑定端口 (0=随机)      |
 | p2p.keepalive_interval   | uint32   | 15        | P2P keepalive 间隔 (秒)    |
 | p2p.keepalive_timeout    | uint32   | 45        | P2P keepalive 超时 (秒)    |
-| p2p.keepalive_miss_limit | uint32   | 3         | P2P keepalive 丢失次数阈值 |
+| p2p.punch_timeout        | uint32   | 10        | 打洞超时时间 (秒)          |
+| p2p.punch_attempts       | uint32   | 5         | 打洞尝试次数               |
+| p2p.punch_interval       | uint32   | 200       | 打洞尝试间隔 (毫秒)        |
+| p2p.retry_interval       | uint32   | 60        | 失败后重试间隔 (秒)        |
 | p2p.stun_timeout         | uint32   | 5000      | STUN 探测超时 (毫秒)       |
-| p2p.hole_punch_attempts  | uint32   | 5         | 打洞尝试次数               |
-| p2p.hole_punch_interval  | uint32   | 200       | 打洞尝试间隔 (毫秒)        |
-| dns_refresh_interval     | uint32   | 60        | DNS 解析刷新间隔 (秒, 0=禁用) |
-| latency_measure_interval | uint32   | 30        | 延迟测量间隔 (秒, 0=禁用)    |
 | queue.capacity           | uint32   | 65536     | 消息队列最大容量           |
 | queue.high_watermark     | float    | 0.8       | 高水位线 (触发背压)        |
 | queue.low_watermark      | float    | 0.5       | 低水位线 (恢复正常)        |
@@ -4412,15 +4425,23 @@ Ping 指定对端节点。
 | `<目标>`  | 目标 IP、节点名称或节点 ID |
 | `--count` | Ping 次数 (默认 4)         |
 
-##### `edgelink-client route`
+##### `edgelink-client routes`
 
-路由管理命令。
+列出网络中所有节点通告的子网路由。
 
-| 操作        | 说明           |
-| ----------- | -------------- |
-| `list`      | 列出当前路由表 |
-| `advertise` | 通告本地子网   |
-| `withdraw`  | 撤销子网通告   |
+| 选项     | 说明          |
+| -------- | ------------- |
+| `--json` | JSON 格式输出 |
+
+**输出示例**：
+
+```
+PREFIX              GATEWAY_IP      GATEWAY_NAME        METRIC  TYPE
+---------------------------------------------------------------------------
+192.168.1.0/24      100.64.0.3      home-server         100     subnet
+10.0.0.0/8          100.64.0.5      office-gateway      100     subnet
+0.0.0.0/0           100.64.0.10     exit-node           100     exit
+```
 
 ##### `edgelink-client exit-node`
 
@@ -4442,6 +4463,98 @@ Exit Node 管理。
 | `level`                 | 显示当前日志等级       |
 | `level <level>`         | 设置全局日志等级       |
 | `level <module> <level>`| 设置指定模块日志等级   |
+
+##### `edgelink-client config`
+
+配置管理命令。支持查看和修改配置，部分配置支持热重载。
+
+| 操作                    | 说明                           |
+| ----------------------- | ------------------------------ |
+| `get <key>`             | 获取指定配置项的值             |
+| `set <key> <value>`     | 设置配置项 (自动保存到文件)    |
+| `list`                  | 列出所有配置项                 |
+| `show`                  | 同 `list`                      |
+| `reload`                | 从文件重新加载配置             |
+
+| 选项     | 说明          |
+| -------- | ------------- |
+| `--json` | JSON 格式输出 |
+
+**可热重载的配置项**：
+
+所有配置项均支持热重载（`storage.state_dir` 除外），修改后自动触发相应操作：
+
+| 配置分类                           | 热重载行为                           |
+| ---------------------------------- | ------------------------------------ |
+| `log.level`、`log.file`            | 立即生效                             |
+| `connection.*`                     | 下次循环生效                         |
+| `controller.url`、`controller.tls`、`controller.authkey` | 触发重新连接到 Controller |
+| `ssl.*`                            | 重建 SSL 上下文后重新连接            |
+| `tun.*`                            | 重建 TUN 设备                        |
+| `ipc.*`                            | 重启 IPC 服务器                      |
+| `routing.advertise_routes`、`routing.exit_node` | 重新向 Controller 公告路由 |
+| `routing.accept_routes`            | 立即生效                             |
+| `storage.state_dir`                | **不可热重载**（需重启）             |
+
+**使用示例**：
+
+```bash
+# 获取配置值
+edgelink-client config get log.level
+
+# 设置配置值 (热重载)
+edgelink-client config set log.level debug
+
+# 列出所有配置
+edgelink-client config list
+
+# 从文件重新加载配置
+edgelink-client config reload
+```
+
+**输出示例** (`config list`):
+
+```
+[controller]
+  url                        = localhost:8080       [*] → reconnect
+  tls                        = false                [*] → reconnect
+  authkey                    = ***                  [*] → reconnect
+
+[connection]
+  auto_reconnect             = true                 [*]
+  reconnect_interval         = 5                    [*]
+  ping_interval              = 5                    [*]
+  dns_refresh_interval       = 60                   [*]
+  latency_measure_interval   = 30                   [*]
+
+[ssl]
+  verify                     = false                [*] → reconnect
+  ca_file                    =                      [*] → reconnect
+  allow_self_signed          = false                [*] → reconnect
+
+[tun]
+  enable                     = false                [*] → rebuild
+  name                       =                      [*] → rebuild
+  mtu                        = 1420                 [*] → rebuild
+
+[ipc]
+  enable                     = true                 [*] → restart
+  socket_path                =                      [*] → restart
+
+[routing]
+  accept_routes              = true                 [*]
+  advertise_routes           = []                   [*] → reannounce
+  exit_node                  = false                [*] → reannounce
+
+[log]
+  level                      = debug                [*]
+  file                       =                      [*]
+
+[storage]
+  state_dir                  =                      [需重启]
+
+[*] = hot-reloadable
+```
 
 ##### `edgelink-client logout`
 
@@ -4791,11 +4904,15 @@ relay_token_ttl = 90
 path = "/var/lib/edgelink/db.sqlite"
 
 [builtin_relay]
-enabled = false                        # 内置 Relay 不参与 Mesh 网络
+enabled = true                         # 启用内置 Relay
+name = "main-relay"                    # Relay 名称 (显示给客户端)
+region = "cn-east-1"                   # 区域标识
+priority = 100                         # 优先级 (越小越优先)
 
 [builtin_stun]
-enabled = false
-ip = ""
+enabled = false                        # 启用后需要配置公网 IP
+# public_ip = "203.0.113.1"            # STUN 服务的公网 IP (必填)
+port = 3478                            # STUN 监听端口
 
 [log]
 level = "info"
@@ -4863,35 +4980,57 @@ max_files = 10
 "relay.forward" = "debug"
 ```
 
-#### Client 配置 (config.toml)
+#### Client 配置 (client.toml)
 
 ```toml
-controller_url = "wss://controller.example.com:8080"
-data_dir = "~/.local/share/edgelink"
+[controller]
+url = "wss://controller.example.com:8080"
+tls = true
+authkey = "tskey-reusable-a7Bn4Kp9zQwX2mLj8RvC6"  # 仅用于首次注册
 
-# AuthKey 仅用于首次注册，注册成功后可移除
-# auth_key = "tskey-reusable-a7Bn4Kp9zQwX2mLj8RvC6"
+[connection]
+auto_reconnect = true
+reconnect_interval = 5
+ping_interval = 5
+dns_refresh_interval = 60
+latency_measure_interval = 30
 
-[routes]
-advertise = ["192.168.1.0/24"]
-accept = ["*"]
+[ssl]
+verify = false
+allow_self_signed = false
 
-[exit_node]
-enabled = false
-use = ""
+[storage]
+# state_dir = "/var/lib/edgelink"
+
+[tun]
+enable = false
+# name = "edgelink0"
+# mtu = 1420
+
+[ipc]
+enable = true
+# socket_path = ""
+
+[routing]
+# 通告本地子网路由，允许其他节点访问
+# advertise_routes = ["192.168.1.0/24", "10.0.0.0/8"]
+# 作为出口节点，通告 0.0.0.0/0
+# exit_node = false
+
+[p2p]
+enabled = true                         # 启用 P2P NAT 穿透
+bind_port = 0                          # UDP 绑定端口 (0=随机)
+keepalive_interval = 15                # Keepalive 间隔 (秒)
+keepalive_timeout = 45                 # Keepalive 超时 (秒)
+punch_timeout = 10                     # 打洞超时 (秒)
+punch_attempts = 5                     # 打洞尝试次数
+punch_interval = 200                   # 打洞间隔 (毫秒)
+retry_interval = 60                    # 失败后重试间隔 (秒)
+stun_timeout = 5000                    # STUN 查询超时 (毫秒)
 
 [log]
 level = "info"
-
-[log.console]
-enabled = true
-color = true
-
-[log.file]
-enabled = false
-
-[log.modules]
-"client.p2p" = "debug"
+# file = "/var/log/edgelink-client.log"
 ```
 
 ### 附录 J: 数据库表定义

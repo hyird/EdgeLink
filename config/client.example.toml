@@ -1,76 +1,157 @@
 # EdgeLink Client Configuration
 # Copy this file to client.toml and modify as needed
+#
+# 热重载说明：
+# - 大多数配置项支持热重载，修改后通过 `edgelink-client config reload` 生效
+# - 标记 [热重载: 重连] 的配置项修改后会触发重新连接到 Controller
+# - 标记 [热重载: 重建] 的配置项修改后会触发组件重建
+# - 仅 [storage] 的 state_dir 不支持热重载，需要重启客户端
 
 [controller]
 # Controller server address (API paths are appended automatically)
+# [热重载: 重连]
 url = "localhost:8080"
 
 # Enable TLS (wss://), default: disabled
+# [热重载: 重连]
 tls = false
 
 # Authentication key (required)
 # Get this from your network administrator
+# [热重载: 重连]
 authkey = "tskey-dev-test123"
 
 [connection]
 # Automatically reconnect on disconnect
+# [热重载: 立即生效]
 auto_reconnect = true
 
 # Reconnection interval in seconds
+# [热重载: 立即生效]
 reconnect_interval = 5
 
 # Keepalive ping interval in seconds (keep low to avoid CDN idle timeout)
+# [热重载: 下次循环生效]
 ping_interval = 5
 
 # DNS refresh interval in seconds (detect server IP changes, 0 = disabled)
+# [热重载: 下次循环生效]
 dns_refresh_interval = 60
 
 # Automatic peer latency measurement interval in seconds (0 = disabled)
+# [热重载: 下次循环生效]
 latency_measure_interval = 30
 
 [ssl]
 # Enable SSL certificate verification (default: false for development)
 # Set to true in production environments
+# [热重载: 重连]
 verify = false
 
 # Custom CA certificate file (PEM format)
 # Leave empty to use system default CA store
+# [热重载: 重连]
 # ca_file = "/path/to/ca.pem"
 
 # Allow self-signed certificates (only effective when verify = true)
+# [热重载: 重连]
 allow_self_signed = false
 
 [storage]
 # Directory for storing client state (keys, etc.)
 # If not specified, uses platform-specific default
+# [不支持热重载 - 需要重启]
 # state_dir = "/var/lib/edgelink"
 
 [tun]
 # Enable TUN device for IP-level routing (allows ping between virtual IPs)
 # Requires administrator/root privileges
+# [热重载: 重建 TUN 设备]
 enable = false
 
 # TUN device name (empty = auto-generate)
 # Linux: e.g., "edgelink0"
 # Windows: e.g., "EdgeLink"
+# [热重载: 重建 TUN 设备]
 # name = ""
 
 # MTU for TUN device (default: 1420)
+# [热重载: 重建 TUN 设备]
 # mtu = 1420
 
 [ipc]
 # Enable IPC control interface for CLI commands (status, peers, down)
+# [热重载: 重启 IPC 服务器]
 enable = true
 
 # IPC socket path (empty = platform default)
 # Linux: $XDG_RUNTIME_DIR/edgelink-client.sock or /tmp/edgelink-client.sock
 # macOS: $TMPDIR/edgelink-client.sock or /tmp/edgelink-client.sock
 # Windows: %TEMP%\edgelink-client.sock
+# [热重载: 重启 IPC 服务器]
 # socket_path = ""
+
+[routing]
+# Subnet routes to advertise to other peers
+# This allows other peers to reach subnets behind this node
+# Format: CIDR notation (e.g., "192.168.1.0/24")
+# [热重载: 重新公告路由]
+# advertise_routes = ["192.168.1.0/24", "10.0.0.0/8"]
+
+# Enable exit node mode (advertise 0.0.0.0/0)
+# Other peers can use this node as their default gateway
+# [热重载: 重新公告路由]
+# exit_node = false
+
+# Accept routes from other peers and apply to system routing table
+# Requires TUN mode to be enabled
+# [热重载: 立即生效]
+# accept_routes = true
+
+[p2p]
+# P2P NAT traversal configuration
+# When enabled, the client will attempt direct peer-to-peer connections
+# Falls back to relay if P2P connection fails
+# [热重载: 下次连接生效]
+enabled = true
+
+# Local UDP port for P2P connections (0 = random port)
+# [热重载: 下次启动生效]
+bind_port = 0
+
+# Keepalive interval in seconds (P2P connection health check)
+# [热重载: 下次循环生效]
+keepalive_interval = 15
+
+# Keepalive timeout in seconds (connection considered dead after this)
+# [热重载: 下次循环生效]
+keepalive_timeout = 45
+
+# Hole punching timeout in seconds
+# [热重载: 立即生效]
+punch_timeout = 10
+
+# Number of hole punching attempts per endpoint
+# [热重载: 立即生效]
+punch_attempts = 5
+
+# Interval between punch attempts in milliseconds
+# [热重载: 立即生效]
+punch_interval = 200
+
+# Retry interval in seconds (after P2P fails, retry after this)
+# [热重载: 下次循环生效]
+retry_interval = 60
+
+# STUN query timeout in milliseconds
+# [热重载: 立即生效]
+stun_timeout = 5000
 
 [log]
 # Log level: trace, debug, info, warn, error
+# [热重载: 立即生效]
 level = "debug"
 
 # Log file (optional, logs to console if not specified)
+# [热重载: 下次启动生效]
 # file = "/var/log/edgelink-client.log"

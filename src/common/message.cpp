@@ -644,6 +644,53 @@ std::expected<Ping, ParseError> Ping::parse(std::span<const uint8_t> data) {
 }
 
 // ============================================================================
+// LatencyReport
+// ============================================================================
+
+std::vector<uint8_t> LatencyReport::serialize() const {
+    BinaryWriter writer;
+    writer.write_u64_be(timestamp);
+    writer.write_u16_be(static_cast<uint16_t>(entries.size()));
+
+    for (const auto& entry : entries) {
+        writer.write_u32_be(entry.peer_node_id);
+        writer.write_u16_be(entry.latency_ms);
+        writer.write_u8(entry.path_type);
+    }
+
+    return writer.take();
+}
+
+std::expected<LatencyReport, ParseError> LatencyReport::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    LatencyReport report;
+
+    auto timestamp = reader.read_u64_be();
+    auto count = reader.read_u16_be();
+
+    if (!timestamp || !count) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    report.timestamp = *timestamp;
+    report.entries.reserve(*count);
+
+    for (uint16_t i = 0; i < *count; ++i) {
+        auto node_id = reader.read_u32_be();
+        auto latency = reader.read_u16_be();
+        auto path_type = reader.read_u8();
+
+        if (!node_id || !latency || !path_type) {
+            return std::unexpected(ParseError::INSUFFICIENT_DATA);
+        }
+
+        report.entries.push_back({*node_id, *latency, *path_type});
+    }
+
+    return report;
+}
+
+// ============================================================================
 // ErrorPayload
 // ============================================================================
 
@@ -896,6 +943,351 @@ std::expected<ConfigUpdate, ParseError> ConfigUpdate::parse(std::span<const uint
     }
 
     return update;
+}
+
+// ============================================================================
+// RouteAnnounce
+// ============================================================================
+
+std::vector<uint8_t> RouteAnnounce::serialize() const {
+    BinaryWriter writer;
+    writer.write_u32_be(request_id);
+    writer.write_u16_be(static_cast<uint16_t>(routes.size()));
+
+    for (const auto& route : routes) {
+        serialization::write_route_info(writer, route);
+    }
+
+    return writer.take();
+}
+
+std::expected<RouteAnnounce, ParseError> RouteAnnounce::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    RouteAnnounce announce;
+
+    auto req_id = reader.read_u32_be();
+    auto route_count = reader.read_u16_be();
+
+    if (!req_id || !route_count) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    announce.request_id = *req_id;
+    announce.routes.reserve(*route_count);
+
+    for (uint16_t i = 0; i < *route_count; ++i) {
+        auto route = serialization::read_route_info(reader);
+        if (!route) return std::unexpected(route.error());
+        announce.routes.push_back(*route);
+    }
+
+    return announce;
+}
+
+// ============================================================================
+// RouteUpdate
+// ============================================================================
+
+std::vector<uint8_t> RouteUpdate::serialize() const {
+    BinaryWriter writer;
+    writer.write_u64_be(version);
+    writer.write_u16_be(static_cast<uint16_t>(add_routes.size()));
+    writer.write_u16_be(static_cast<uint16_t>(del_routes.size()));
+
+    for (const auto& route : add_routes) {
+        serialization::write_route_info(writer, route);
+    }
+
+    for (const auto& route : del_routes) {
+        serialization::write_route_info(writer, route);
+    }
+
+    return writer.take();
+}
+
+std::expected<RouteUpdate, ParseError> RouteUpdate::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    RouteUpdate update;
+
+    auto ver = reader.read_u64_be();
+    auto add_count = reader.read_u16_be();
+    auto del_count = reader.read_u16_be();
+
+    if (!ver || !add_count || !del_count) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    update.version = *ver;
+
+    update.add_routes.reserve(*add_count);
+    for (uint16_t i = 0; i < *add_count; ++i) {
+        auto route = serialization::read_route_info(reader);
+        if (!route) return std::unexpected(route.error());
+        update.add_routes.push_back(*route);
+    }
+
+    update.del_routes.reserve(*del_count);
+    for (uint16_t i = 0; i < *del_count; ++i) {
+        auto route = serialization::read_route_info(reader);
+        if (!route) return std::unexpected(route.error());
+        update.del_routes.push_back(*route);
+    }
+
+    return update;
+}
+
+// ============================================================================
+// RouteWithdraw
+// ============================================================================
+
+std::vector<uint8_t> RouteWithdraw::serialize() const {
+    BinaryWriter writer;
+    writer.write_u32_be(request_id);
+    writer.write_u16_be(static_cast<uint16_t>(routes.size()));
+
+    for (const auto& route : routes) {
+        serialization::write_route_info(writer, route);
+    }
+
+    return writer.take();
+}
+
+std::expected<RouteWithdraw, ParseError> RouteWithdraw::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    RouteWithdraw withdraw;
+
+    auto req_id = reader.read_u32_be();
+    auto route_count = reader.read_u16_be();
+
+    if (!req_id || !route_count) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    withdraw.request_id = *req_id;
+    withdraw.routes.reserve(*route_count);
+
+    for (uint16_t i = 0; i < *route_count; ++i) {
+        auto route = serialization::read_route_info(reader);
+        if (!route) return std::unexpected(route.error());
+        withdraw.routes.push_back(*route);
+    }
+
+    return withdraw;
+}
+
+// ============================================================================
+// RouteAck
+// ============================================================================
+
+std::vector<uint8_t> RouteAck::serialize() const {
+    BinaryWriter writer;
+    writer.write_u32_be(request_id);
+    writer.write_u8(success ? 1 : 0);
+    writer.write_u16_be(error_code);
+    writer.write_string(error_msg);
+    return writer.take();
+}
+
+std::expected<RouteAck, ParseError> RouteAck::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    RouteAck ack;
+
+    auto req_id = reader.read_u32_be();
+    auto succ = reader.read_u8();
+    auto err_code = reader.read_u16_be();
+    auto err_msg = reader.read_string();
+
+    if (!req_id || !succ || !err_code || !err_msg) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    ack.request_id = *req_id;
+    ack.success = (*succ != 0);
+    ack.error_code = *err_code;
+    ack.error_msg = *err_msg;
+
+    return ack;
+}
+
+// ============================================================================
+// P2P Messages
+// ============================================================================
+
+// P2PInit
+std::vector<uint8_t> P2PInit::serialize() const {
+    BinaryWriter writer;
+    writer.write_u32_be(target_node);
+    writer.write_u32_be(init_seq);
+    return writer.take();
+}
+
+std::expected<P2PInit, ParseError> P2PInit::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    P2PInit init;
+
+    auto target = reader.read_u32_be();
+    auto seq = reader.read_u32_be();
+
+    if (!target || !seq) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    init.target_node = *target;
+    init.init_seq = *seq;
+    return init;
+}
+
+// P2PEndpointMsg
+std::vector<uint8_t> P2PEndpointMsg::serialize() const {
+    BinaryWriter writer;
+    writer.write_u32_be(init_seq);
+    writer.write_u32_be(peer_node);
+    writer.write_bytes(peer_key);
+    writer.write_u16_be(static_cast<uint16_t>(endpoints.size()));
+    for (const auto& ep : endpoints) {
+        serialization::write_endpoint(writer, ep);
+    }
+    return writer.take();
+}
+
+std::expected<P2PEndpointMsg, ParseError> P2PEndpointMsg::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    P2PEndpointMsg msg;
+
+    auto seq = reader.read_u32_be();
+    auto node = reader.read_u32_be();
+    auto key = reader.read_bytes(X25519_KEY_SIZE);
+    auto ep_count = reader.read_u16_be();
+
+    if (!seq || !node || !key || !ep_count) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    msg.init_seq = *seq;
+    msg.peer_node = *node;
+    std::copy(key->begin(), key->end(), msg.peer_key.begin());
+
+    msg.endpoints.reserve(*ep_count);
+    for (uint16_t i = 0; i < *ep_count; ++i) {
+        auto ep = serialization::read_endpoint(reader);
+        if (!ep) return std::unexpected(ep.error());
+        msg.endpoints.push_back(*ep);
+    }
+
+    return msg;
+}
+
+// P2PPing / P2PPong
+std::vector<uint8_t> P2PPing::serialize() const {
+    BinaryWriter writer;
+    writer.write_u32_be(magic);
+    writer.write_u32_be(src_node);
+    writer.write_u32_be(dst_node);
+    writer.write_u64_be(timestamp);
+    writer.write_u32_be(seq_num);
+    writer.write_bytes(nonce);
+    writer.write_bytes(signature);
+    return writer.take();
+}
+
+std::expected<P2PPing, ParseError> P2PPing::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    P2PPing ping;
+
+    auto m = reader.read_u32_be();
+    auto src = reader.read_u32_be();
+    auto dst = reader.read_u32_be();
+    auto ts = reader.read_u64_be();
+    auto seq = reader.read_u32_be();
+    auto n = reader.read_bytes(CHACHA20_NONCE_SIZE);
+    auto sig = reader.read_bytes(ED25519_SIGNATURE_SIZE);
+
+    if (!m || !src || !dst || !ts || !seq || !n || !sig) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    ping.magic = *m;
+    ping.src_node = *src;
+    ping.dst_node = *dst;
+    ping.timestamp = *ts;
+    ping.seq_num = *seq;
+    std::copy(n->begin(), n->end(), ping.nonce.begin());
+    std::copy(sig->begin(), sig->end(), ping.signature.begin());
+
+    return ping;
+}
+
+std::vector<uint8_t> P2PPing::get_sign_data() const {
+    BinaryWriter writer;
+    writer.write_u32_be(magic);
+    writer.write_u32_be(src_node);
+    writer.write_u32_be(dst_node);
+    writer.write_u64_be(timestamp);
+    writer.write_u32_be(seq_num);
+    writer.write_bytes(nonce);
+    return writer.take();
+}
+
+// P2PKeepalive
+std::vector<uint8_t> P2PKeepalive::serialize() const {
+    BinaryWriter writer;
+    writer.write_u64_be(timestamp);
+    writer.write_u32_be(seq_num);
+    writer.write_u8(flags);
+    writer.write_bytes(mac);
+    return writer.take();
+}
+
+std::expected<P2PKeepalive, ParseError> P2PKeepalive::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    P2PKeepalive ka;
+
+    auto ts = reader.read_u64_be();
+    auto seq = reader.read_u32_be();
+    auto f = reader.read_u8();
+    auto m = reader.read_bytes(POLY1305_TAG_SIZE);
+
+    if (!ts || !seq || !f || !m) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    ka.timestamp = *ts;
+    ka.seq_num = *seq;
+    ka.flags = *f;
+    std::copy(m->begin(), m->end(), ka.mac.begin());
+
+    return ka;
+}
+
+// P2PStatusMsg
+std::vector<uint8_t> P2PStatusMsg::serialize() const {
+    BinaryWriter writer;
+    writer.write_u32_be(peer_node);
+    writer.write_u8(static_cast<uint8_t>(status));
+    writer.write_u16_be(latency_ms);
+    writer.write_u8(static_cast<uint8_t>(path_type));
+    return writer.take();
+}
+
+std::expected<P2PStatusMsg, ParseError> P2PStatusMsg::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    P2PStatusMsg msg;
+
+    auto node = reader.read_u32_be();
+    auto st = reader.read_u8();
+    auto lat = reader.read_u16_be();
+    auto pt = reader.read_u8();
+
+    if (!node || !st || !lat || !pt) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    msg.peer_node = *node;
+    msg.status = static_cast<P2PStatus>(*st);
+    msg.latency_ms = *lat;
+    msg.path_type = static_cast<PathType>(*pt);
+
+    return msg;
 }
 
 } // namespace edgelink

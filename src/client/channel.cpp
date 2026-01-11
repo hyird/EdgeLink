@@ -413,6 +413,11 @@ asio::awaitable<void> ControlChannel::send_ping() {
     co_await send_frame(FrameType::PING, ping.serialize());
 }
 
+asio::awaitable<void> ControlChannel::send_latency_report(const LatencyReport& report) {
+    co_await send_frame(FrameType::LATENCY_REPORT, report.serialize());
+    log().debug("Sent latency report with {} entries", report.entries.size());
+}
+
 asio::awaitable<void> ControlChannel::read_loop() {
     try {
         beast::flat_buffer buffer;
@@ -500,6 +505,12 @@ asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
             break;
         case FrameType::CONFIG_UPDATE:
             co_await handle_config_update(frame);
+            break;
+        case FrameType::ROUTE_UPDATE:
+            co_await handle_route_update(frame);
+            break;
+        case FrameType::ROUTE_ACK:
+            co_await handle_route_ack(frame);
             break;
         case FrameType::PONG:
             co_await handle_pong(frame);
@@ -599,6 +610,62 @@ asio::awaitable<void> ControlChannel::handle_config_update(const Frame& frame) {
     if (callbacks_.on_config_update) {
         callbacks_.on_config_update(*update);
     }
+}
+
+asio::awaitable<void> ControlChannel::handle_route_update(const Frame& frame) {
+    auto update = RouteUpdate::parse(frame.payload);
+    if (!update) {
+        log().error("Failed to parse ROUTE_UPDATE");
+        co_return;
+    }
+
+    log().debug("Received ROUTE_UPDATE v{}: +{} routes, -{} routes",
+                update->version, update->add_routes.size(), update->del_routes.size());
+
+    if (callbacks_.on_route_update) {
+        callbacks_.on_route_update(*update);
+    }
+}
+
+asio::awaitable<void> ControlChannel::handle_route_ack(const Frame& frame) {
+    auto ack = RouteAck::parse(frame.payload);
+    if (!ack) {
+        log().error("Failed to parse ROUTE_ACK");
+        co_return;
+    }
+
+    if (ack->success) {
+        log().debug("Route operation {} succeeded", ack->request_id);
+    } else {
+        log().error("Route operation {} failed: {} (code {})",
+                    ack->request_id, ack->error_msg, ack->error_code);
+    }
+}
+
+asio::awaitable<void> ControlChannel::send_route_announce(const std::vector<RouteInfo>& routes) {
+    if (routes.empty()) {
+        co_return;
+    }
+
+    RouteAnnounce announce;
+    announce.request_id = ++route_request_id_;
+    announce.routes = routes;
+
+    co_await send_frame(FrameType::ROUTE_ANNOUNCE, announce.serialize());
+    log().info("Announced {} routes (request_id={})", routes.size(), announce.request_id);
+}
+
+asio::awaitable<void> ControlChannel::send_route_withdraw(const std::vector<RouteInfo>& routes) {
+    if (routes.empty()) {
+        co_return;
+    }
+
+    RouteWithdraw withdraw;
+    withdraw.request_id = ++route_request_id_;
+    withdraw.routes = routes;
+
+    co_await send_frame(FrameType::ROUTE_WITHDRAW, withdraw.serialize());
+    log().info("Withdrew {} routes (request_id={})", routes.size(), withdraw.request_id);
 }
 
 asio::awaitable<void> ControlChannel::handle_pong(const Frame& frame) {

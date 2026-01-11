@@ -212,6 +212,40 @@ std::expected<void, DbError> Database::init_schema() {
         CREATE INDEX IF NOT EXISTS idx_nodes_network ON nodes(network_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_virtual_ip ON nodes(network_id, virtual_ip);
         CREATE INDEX IF NOT EXISTS idx_authkeys_network ON authkeys(network_id);
+
+        CREATE TABLE IF NOT EXISTS latency_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            src_node_id INTEGER NOT NULL,
+            dst_node_id INTEGER NOT NULL,
+            latency_ms INTEGER NOT NULL,
+            path_type INTEGER DEFAULT 0,
+            reported_at INTEGER NOT NULL,
+            FOREIGN KEY (src_node_id) REFERENCES nodes(id),
+            FOREIGN KEY (dst_node_id) REFERENCES nodes(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_latency_src ON latency_reports(src_node_id);
+        CREATE INDEX IF NOT EXISTS idx_latency_time ON latency_reports(reported_at);
+
+        -- 节点公告的路由表
+        CREATE TABLE IF NOT EXISTS announced_routes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id INTEGER NOT NULL,
+            network_id INTEGER NOT NULL,
+            ip_type INTEGER NOT NULL DEFAULT 4,
+            prefix BLOB NOT NULL,
+            prefix_len INTEGER NOT NULL,
+            metric INTEGER DEFAULT 100,
+            flags INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
+            FOREIGN KEY (network_id) REFERENCES networks(id) ON DELETE CASCADE,
+            UNIQUE (node_id, ip_type, prefix, prefix_len)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_routes_node ON announced_routes(node_id);
+        CREATE INDEX IF NOT EXISTS idx_routes_network ON announced_routes(network_id);
     )";
 
     auto result = execute(schema);
@@ -976,6 +1010,315 @@ std::expected<IPv4Address, DbError> Database::allocate_virtual_ip(NetworkId netw
     }
 
     return IPv4Address::from_u32(next_ip);
+}
+
+// ============================================================================
+// Latency Reports
+// ============================================================================
+
+std::expected<void, DbError> Database::save_latency_report(
+    NodeId src_node_id, NodeId dst_node_id,
+    uint16_t latency_ms, uint8_t path_type, uint64_t timestamp) {
+
+    auto stmt = prepare(
+        "INSERT INTO latency_reports (src_node_id, dst_node_id, latency_ms, path_type, reported_at) "
+        "VALUES (?, ?, ?, ?, ?)");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_int(1, static_cast<int>(src_node_id));
+    stmt->bind_int(2, static_cast<int>(dst_node_id));
+    stmt->bind_int(3, static_cast<int>(latency_ms));
+    stmt->bind_int(4, static_cast<int>(path_type));
+    stmt->bind_int64(5, static_cast<int64_t>(timestamp));
+
+    if (stmt->step() != SQLITE_DONE) {
+        return std::unexpected(DbError::QUERY_FAILED);
+    }
+
+    return {};
+}
+
+std::expected<void, DbError> Database::save_latency_reports(
+    NodeId src_node_id,
+    const std::vector<std::tuple<NodeId, uint16_t, uint8_t>>& entries,
+    uint64_t timestamp) {
+
+    // 使用事务批量插入
+    auto begin_result = execute("BEGIN TRANSACTION");
+    if (!begin_result) return std::unexpected(begin_result.error());
+
+    auto stmt = prepare(
+        "INSERT INTO latency_reports (src_node_id, dst_node_id, latency_ms, path_type, reported_at) "
+        "VALUES (?, ?, ?, ?, ?)");
+    if (!stmt) {
+        execute("ROLLBACK");
+        return std::unexpected(stmt.error());
+    }
+
+    for (const auto& [dst_node_id, latency_ms, path_type] : entries) {
+        stmt->reset();
+        stmt->bind_int(1, static_cast<int>(src_node_id));
+        stmt->bind_int(2, static_cast<int>(dst_node_id));
+        stmt->bind_int(3, static_cast<int>(latency_ms));
+        stmt->bind_int(4, static_cast<int>(path_type));
+        stmt->bind_int64(5, static_cast<int64_t>(timestamp));
+
+        if (stmt->step() != SQLITE_DONE) {
+            execute("ROLLBACK");
+            return std::unexpected(DbError::QUERY_FAILED);
+        }
+    }
+
+    auto commit_result = execute("COMMIT");
+    if (!commit_result) return std::unexpected(commit_result.error());
+
+    return {};
+}
+
+std::expected<size_t, DbError> Database::cleanup_old_latency_reports(uint64_t max_age_ms) {
+    uint64_t cutoff = now_ms() - max_age_ms;
+
+    auto stmt = prepare("DELETE FROM latency_reports WHERE reported_at < ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_int64(1, static_cast<int64_t>(cutoff));
+
+    if (stmt->step() != SQLITE_DONE) {
+        return std::unexpected(DbError::QUERY_FAILED);
+    }
+
+    // 获取删除的行数
+    return static_cast<size_t>(sqlite3_changes(db_));
+}
+
+std::expected<size_t, DbError> Database::cleanup_excess_latency_reports(size_t max_per_node) {
+    // 首先获取所有有记录的源节点
+    auto nodes_stmt = prepare("SELECT DISTINCT src_node_id FROM latency_reports");
+    if (!nodes_stmt) return std::unexpected(nodes_stmt.error());
+
+    std::vector<NodeId> src_nodes;
+    while (nodes_stmt->step() == SQLITE_ROW) {
+        src_nodes.push_back(static_cast<NodeId>(nodes_stmt->column_int(0)));
+    }
+
+    size_t total_deleted = 0;
+
+    // 对每个源节点，删除超出上限的旧记录
+    for (NodeId src_id : src_nodes) {
+        // 删除该源节点超出 max_per_node 条的旧记录
+        // 保留最新的 max_per_node 条
+        auto del_stmt = prepare(
+            "DELETE FROM latency_reports "
+            "WHERE src_node_id = ? AND id NOT IN ("
+            "  SELECT id FROM latency_reports "
+            "  WHERE src_node_id = ? "
+            "  ORDER BY reported_at DESC "
+            "  LIMIT ?"
+            ")");
+        if (!del_stmt) return std::unexpected(del_stmt.error());
+
+        del_stmt->bind_int(1, static_cast<int>(src_id));
+        del_stmt->bind_int(2, static_cast<int>(src_id));
+        del_stmt->bind_int(3, static_cast<int>(max_per_node));
+
+        if (del_stmt->step() != SQLITE_DONE) {
+            return std::unexpected(DbError::QUERY_FAILED);
+        }
+
+        total_deleted += static_cast<size_t>(sqlite3_changes(db_));
+    }
+
+    return total_deleted;
+}
+
+std::expected<uint16_t, DbError> Database::get_avg_latency(NodeId src, NodeId dst, size_t sample_count) {
+    auto stmt = prepare(
+        "SELECT AVG(latency_ms) FROM ("
+        "  SELECT latency_ms FROM latency_reports "
+        "  WHERE src_node_id = ? AND dst_node_id = ? "
+        "  ORDER BY reported_at DESC "
+        "  LIMIT ?"
+        ")");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_int(1, static_cast<int>(src));
+    stmt->bind_int(2, static_cast<int>(dst));
+    stmt->bind_int(3, static_cast<int>(sample_count));
+
+    if (stmt->step() == SQLITE_ROW && !stmt->column_is_null(0)) {
+        return static_cast<uint16_t>(stmt->column_int(0));
+    }
+
+    return std::unexpected(DbError::NOT_FOUND);
+}
+
+// ============================================================================
+// Route Announcements
+// ============================================================================
+
+std::expected<void, DbError> Database::upsert_route(
+    NodeId node_id, NetworkId network_id, const RouteInfo& route) {
+
+    uint64_t now = now_ms();
+
+    // 使用 INSERT OR REPLACE (SQLite UPSERT)
+    auto stmt = prepare(
+        "INSERT INTO announced_routes "
+        "(node_id, network_id, ip_type, prefix, prefix_len, metric, flags, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (node_id, ip_type, prefix, prefix_len) "
+        "DO UPDATE SET metric = excluded.metric, flags = excluded.flags, updated_at = excluded.updated_at");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    // 提取 prefix 数据
+    size_t prefix_bytes = (route.ip_type == IpType::IPv4) ? 4 : 16;
+    std::span<const uint8_t> prefix_span(route.prefix.data(), prefix_bytes);
+
+    stmt->bind_int(1, static_cast<int>(node_id));
+    stmt->bind_int(2, static_cast<int>(network_id));
+    stmt->bind_int(3, static_cast<int>(route.ip_type));
+    stmt->bind_blob(4, prefix_span);
+    stmt->bind_int(5, static_cast<int>(route.prefix_len));
+    stmt->bind_int(6, static_cast<int>(route.metric));
+    stmt->bind_int(7, static_cast<int>(route.flags));
+    stmt->bind_int64(8, static_cast<int64_t>(now));
+    stmt->bind_int64(9, static_cast<int64_t>(now));
+
+    if (stmt->step() != SQLITE_DONE) {
+        return std::unexpected(DbError::QUERY_FAILED);
+    }
+
+    return {};
+}
+
+std::expected<void, DbError> Database::upsert_routes(
+    NodeId node_id, NetworkId network_id, const std::vector<RouteInfo>& routes) {
+
+    auto begin_result = execute("BEGIN TRANSACTION");
+    if (!begin_result) return std::unexpected(begin_result.error());
+
+    for (const auto& route : routes) {
+        auto result = upsert_route(node_id, network_id, route);
+        if (!result) {
+            execute("ROLLBACK");
+            return result;
+        }
+    }
+
+    auto commit_result = execute("COMMIT");
+    if (!commit_result) return std::unexpected(commit_result.error());
+
+    return {};
+}
+
+std::expected<void, DbError> Database::delete_route(
+    NodeId node_id, const RouteInfo& route) {
+
+    auto stmt = prepare(
+        "DELETE FROM announced_routes "
+        "WHERE node_id = ? AND ip_type = ? AND prefix = ? AND prefix_len = ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    size_t prefix_bytes = (route.ip_type == IpType::IPv4) ? 4 : 16;
+    std::span<const uint8_t> prefix_span(route.prefix.data(), prefix_bytes);
+
+    stmt->bind_int(1, static_cast<int>(node_id));
+    stmt->bind_int(2, static_cast<int>(route.ip_type));
+    stmt->bind_blob(3, prefix_span);
+    stmt->bind_int(4, static_cast<int>(route.prefix_len));
+
+    if (stmt->step() != SQLITE_DONE) {
+        return std::unexpected(DbError::QUERY_FAILED);
+    }
+
+    return {};
+}
+
+std::expected<void, DbError> Database::delete_routes(
+    NodeId node_id, const std::vector<RouteInfo>& routes) {
+
+    auto begin_result = execute("BEGIN TRANSACTION");
+    if (!begin_result) return std::unexpected(begin_result.error());
+
+    for (const auto& route : routes) {
+        auto result = delete_route(node_id, route);
+        if (!result) {
+            execute("ROLLBACK");
+            return result;
+        }
+    }
+
+    auto commit_result = execute("COMMIT");
+    if (!commit_result) return std::unexpected(commit_result.error());
+
+    return {};
+}
+
+std::expected<void, DbError> Database::delete_node_routes(NodeId node_id) {
+    auto stmt = prepare("DELETE FROM announced_routes WHERE node_id = ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_int(1, static_cast<int>(node_id));
+
+    if (stmt->step() != SQLITE_DONE) {
+        return std::unexpected(DbError::QUERY_FAILED);
+    }
+
+    return {};
+}
+
+std::expected<std::vector<RouteInfo>, DbError> Database::get_node_routes(NodeId node_id) {
+    auto stmt = prepare(
+        "SELECT ip_type, prefix, prefix_len, node_id, metric, flags "
+        "FROM announced_routes WHERE node_id = ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_int(1, static_cast<int>(node_id));
+
+    std::vector<RouteInfo> routes;
+    while (stmt->step() == SQLITE_ROW) {
+        RouteInfo route;
+        route.ip_type = static_cast<IpType>(stmt->column_int(0));
+        auto prefix_blob = stmt->column_blob(1);
+        if (!prefix_blob.empty()) {
+            size_t copy_len = std::min(prefix_blob.size(), route.prefix.size());
+            std::copy_n(prefix_blob.begin(), copy_len, route.prefix.begin());
+        }
+        route.prefix_len = static_cast<uint8_t>(stmt->column_int(2));
+        route.gateway_node = static_cast<NodeId>(stmt->column_int(3));
+        route.metric = static_cast<uint16_t>(stmt->column_int(4));
+        route.flags = static_cast<RouteFlags>(stmt->column_int(5));
+        routes.push_back(route);
+    }
+
+    return routes;
+}
+
+std::expected<std::vector<RouteInfo>, DbError> Database::get_network_routes(NetworkId network_id) {
+    auto stmt = prepare(
+        "SELECT ip_type, prefix, prefix_len, node_id, metric, flags "
+        "FROM announced_routes WHERE network_id = ?");
+    if (!stmt) return std::unexpected(stmt.error());
+
+    stmt->bind_int(1, static_cast<int>(network_id));
+
+    std::vector<RouteInfo> routes;
+    while (stmt->step() == SQLITE_ROW) {
+        RouteInfo route;
+        route.ip_type = static_cast<IpType>(stmt->column_int(0));
+        auto prefix_blob = stmt->column_blob(1);
+        if (!prefix_blob.empty()) {
+            size_t copy_len = std::min(prefix_blob.size(), route.prefix.size());
+            std::copy_n(prefix_blob.begin(), copy_len, route.prefix.begin());
+        }
+        route.prefix_len = static_cast<uint8_t>(stmt->column_int(2));
+        route.gateway_node = static_cast<NodeId>(stmt->column_int(3));
+        route.metric = static_cast<uint16_t>(stmt->column_int(4));
+        route.flags = static_cast<RouteFlags>(stmt->column_int(5));
+        routes.push_back(route);
+    }
+
+    return routes;
 }
 
 } // namespace edgelink::controller

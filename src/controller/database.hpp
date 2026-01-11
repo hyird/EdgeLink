@@ -198,6 +198,59 @@ public:
         const std::string& version);
 
     // ========================================================================
+    // Latency Reports
+    // ========================================================================
+
+    // 存储延迟报告
+    std::expected<void, DbError> save_latency_report(
+        NodeId src_node_id, NodeId dst_node_id,
+        uint16_t latency_ms, uint8_t path_type, uint64_t timestamp);
+
+    // 批量存储延迟报告
+    std::expected<void, DbError> save_latency_reports(
+        NodeId src_node_id,
+        const std::vector<std::tuple<NodeId, uint16_t, uint8_t>>& entries,
+        uint64_t timestamp);
+
+    // 清理过期的延迟记录（保留最近 max_age_ms 毫秒的数据）
+    std::expected<size_t, DbError> cleanup_old_latency_reports(uint64_t max_age_ms);
+
+    // 清理超出上限的延迟记录（每个 src_node 最多保留 max_per_node 条）
+    std::expected<size_t, DbError> cleanup_excess_latency_reports(size_t max_per_node);
+
+    // 获取两个节点之间的平均延迟（最近 N 条记录）
+    std::expected<uint16_t, DbError> get_avg_latency(NodeId src, NodeId dst, size_t sample_count = 10);
+
+    // ========================================================================
+    // Route Announcements
+    // ========================================================================
+
+    // 添加或更新路由公告
+    std::expected<void, DbError> upsert_route(
+        NodeId node_id, NetworkId network_id, const RouteInfo& route);
+
+    // 批量添加或更新路由公告
+    std::expected<void, DbError> upsert_routes(
+        NodeId node_id, NetworkId network_id, const std::vector<RouteInfo>& routes);
+
+    // 删除路由公告
+    std::expected<void, DbError> delete_route(
+        NodeId node_id, const RouteInfo& route);
+
+    // 批量删除路由公告
+    std::expected<void, DbError> delete_routes(
+        NodeId node_id, const std::vector<RouteInfo>& routes);
+
+    // 删除节点的所有路由公告
+    std::expected<void, DbError> delete_node_routes(NodeId node_id);
+
+    // 获取节点公告的路由
+    std::expected<std::vector<RouteInfo>, DbError> get_node_routes(NodeId node_id);
+
+    // 获取网络中所有节点公告的路由
+    std::expected<std::vector<RouteInfo>, DbError> get_network_routes(NetworkId network_id);
+
+    // ========================================================================
     // Utility
     // ========================================================================
 

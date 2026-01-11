@@ -152,9 +152,24 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::run() {
         this->manager_.unregister_control_session(this->node_id_);
         this->manager_.database().update_node_online(this->node_id_, false);
 
-        // Notify other nodes
+        // Get node's routes before deleting them (for broadcasting withdrawal)
+        auto node_routes = this->manager_.database().get_node_routes(this->node_id_);
+
+        // Delete node's announced routes from database
+        this->manager_.database().delete_node_routes(this->node_id_);
+
+        // Notify other nodes about peer status change
         co_await this->manager_.broadcast_config_update(this->network_id_, this->node_id_);
-        log().info("Node {} disconnected from control channel", this->node_id_);
+
+        // Notify other nodes about route withdrawal
+        if (node_routes && !node_routes->empty()) {
+            co_await this->manager_.broadcast_route_update(
+                this->network_id_, this->node_id_, {}, *node_routes);
+            log().info("Node {} disconnected, withdrew {} routes",
+                       this->node_id_, node_routes->size());
+        } else {
+            log().info("Node {} disconnected from control channel", this->node_id_);
+        }
     }
 }
 
@@ -173,6 +188,18 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& 
 
         case FrameType::PING:
             co_await handle_ping(frame);
+            break;
+
+        case FrameType::LATENCY_REPORT:
+            co_await handle_latency_report(frame);
+            break;
+
+        case FrameType::ROUTE_ANNOUNCE:
+            co_await handle_route_announce(frame);
+            break;
+
+        case FrameType::ROUTE_WITHDRAW:
+            co_await handle_route_withdraw(frame);
             break;
 
         default:
@@ -340,12 +367,30 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::send_config() {
     }
 
     // Add relay info (built-in relay = this controller)
-    RelayInfo relay;
-    relay.server_id = 0; // Built-in relay
-    relay.hostname = "builtin";
-    relay.priority = 100;
-    relay.region = "local";
-    config.relays.push_back(relay);
+    const auto& relay_cfg = this->manager_.builtin_relay_config();
+    if (relay_cfg.enabled) {
+        RelayInfo relay;
+        relay.server_id = 0; // Built-in relay
+        relay.hostname = relay_cfg.name;
+        relay.priority = relay_cfg.priority;
+        relay.region = relay_cfg.region;
+        config.relays.push_back(relay);
+    }
+
+    // Add built-in STUN server (if enabled)
+    const auto& stun_cfg = this->manager_.builtin_stun_config();
+    if (stun_cfg.enabled && !stun_cfg.public_ip.empty()) {
+        StunInfo stun;
+        stun.hostname = stun_cfg.public_ip;
+        stun.port = stun_cfg.port;
+        config.stuns.push_back(stun);
+    }
+
+    // Add announced routes from all nodes in the network
+    auto routes = this->manager_.database().get_network_routes(this->network_id_);
+    if (routes) {
+        config.routes = std::move(*routes);
+    }
 
     // Create new relay token
     auto relay_token = this->manager_.jwt().create_relay_token(this->node_id_, this->network_id_);
@@ -358,7 +403,8 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::send_config() {
     config_version_ = config.version;
     co_await this->send_frame(FrameType::CONFIG, config.serialize());
 
-    log().debug("Sent CONFIG to node {} with {} peers", this->node_id_, config.peers.size());
+    log().debug("Sent CONFIG to node {} with {} peers, {} routes",
+                this->node_id_, config.peers.size(), config.routes.size());
 }
 
 template<typename StreamType>
@@ -389,6 +435,129 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_ping(const Frame& f
     if (this->authenticated_) {
         this->manager_.database().update_node_last_seen(this->node_id_, Database::now_ms());
     }
+}
+
+template<typename StreamType>
+asio::awaitable<void> ControlSessionImpl<StreamType>::handle_latency_report(const Frame& frame) {
+    if (!this->authenticated_) {
+        co_await this->send_error(1001, "Not authenticated", FrameType::LATENCY_REPORT);
+        co_return;
+    }
+
+    auto report = LatencyReport::parse(frame.payload);
+    if (!report) {
+        log().warn("Invalid LATENCY_REPORT from node {}", this->node_id_);
+        co_return;
+    }
+
+    log().debug("Received latency report from node {} with {} entries",
+                this->node_id_, report->entries.size());
+
+    // 记录延迟数据（可用于路由优化、P2P 决策等）
+    for (const auto& entry : report->entries) {
+        log().trace("  Node {} -> Node {}: {}ms (path={})",
+                    this->node_id_, entry.peer_node_id,
+                    entry.latency_ms, entry.path_type == 0 ? "relay" : "p2p");
+    }
+
+    // 构建存储条目
+    if (!report->entries.empty()) {
+        std::vector<std::tuple<NodeId, uint16_t, uint8_t>> entries;
+        entries.reserve(report->entries.size());
+        for (const auto& entry : report->entries) {
+            entries.emplace_back(entry.peer_node_id, entry.latency_ms, entry.path_type);
+        }
+
+        // 存储到数据库
+        auto result = this->manager_.database().save_latency_reports(
+            this->node_id_, entries, report->timestamp);
+        if (!result) {
+            log().warn("Failed to save latency report from node {}", this->node_id_);
+        }
+
+        // 定期清理旧数据（每个节点最多保留 1000 条记录）
+        static thread_local uint32_t cleanup_counter = 0;
+        if (++cleanup_counter % 100 == 0) {  // 每 100 次上报执行一次清理
+            auto cleaned = this->manager_.database().cleanup_excess_latency_reports(1000);
+            if (cleaned && *cleaned > 0) {
+                log().debug("Cleaned up {} old latency records", *cleaned);
+            }
+        }
+    }
+}
+
+template<typename StreamType>
+asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_announce(const Frame& frame) {
+    if (!this->authenticated_) {
+        co_await this->send_error(1001, "Not authenticated", FrameType::ROUTE_ANNOUNCE);
+        co_return;
+    }
+
+    auto announce = RouteAnnounce::parse(frame.payload);
+    if (!announce) {
+        co_await send_route_ack(0, false, 2001, "Invalid ROUTE_ANNOUNCE format");
+        co_return;
+    }
+
+    log().info("Node {} announcing {} routes", this->node_id_, announce->routes.size());
+
+    // 存储路由到数据库
+    auto result = this->manager_.database().upsert_routes(
+        this->node_id_, this->network_id_, announce->routes);
+
+    if (!result) {
+        co_await send_route_ack(announce->request_id, false, 2002, "Failed to store routes");
+        co_return;
+    }
+
+    // 发送成功 ACK
+    co_await send_route_ack(announce->request_id, true);
+
+    // 通知其他节点路由更新
+    co_await this->manager_.broadcast_route_update(this->network_id_, this->node_id_, announce->routes, {});
+}
+
+template<typename StreamType>
+asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_withdraw(const Frame& frame) {
+    if (!this->authenticated_) {
+        co_await this->send_error(1001, "Not authenticated", FrameType::ROUTE_WITHDRAW);
+        co_return;
+    }
+
+    auto withdraw = RouteWithdraw::parse(frame.payload);
+    if (!withdraw) {
+        co_await send_route_ack(0, false, 2001, "Invalid ROUTE_WITHDRAW format");
+        co_return;
+    }
+
+    log().info("Node {} withdrawing {} routes", this->node_id_, withdraw->routes.size());
+
+    // 从数据库删除路由
+    auto result = this->manager_.database().delete_routes(this->node_id_, withdraw->routes);
+
+    if (!result) {
+        co_await send_route_ack(withdraw->request_id, false, 2003, "Failed to delete routes");
+        co_return;
+    }
+
+    // 发送成功 ACK
+    co_await send_route_ack(withdraw->request_id, true);
+
+    // 通知其他节点路由更新
+    co_await this->manager_.broadcast_route_update(this->network_id_, this->node_id_, {}, withdraw->routes);
+}
+
+template<typename StreamType>
+asio::awaitable<void> ControlSessionImpl<StreamType>::send_route_ack(
+    uint32_t request_id, bool success, uint16_t error_code, const std::string& error_msg) {
+
+    RouteAck ack;
+    ack.request_id = request_id;
+    ack.success = success;
+    ack.error_code = error_code;
+    ack.error_msg = error_msg;
+
+    co_await this->send_frame(FrameType::ROUTE_ACK, ack.serialize());
 }
 
 // ============================================================================

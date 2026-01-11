@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/types.hpp"
+#include "common/config.hpp"
 #include "controller/database.hpp"
 #include "controller/jwt_util.hpp"
 #include <boost/asio.hpp>
@@ -47,6 +48,11 @@ public:
     // Broadcast CONFIG_UPDATE to all nodes in a network (except sender)
     asio::awaitable<void> broadcast_config_update(NetworkId network_id, NodeId except_node = 0);
 
+    // Broadcast ROUTE_UPDATE to all nodes in a network (except sender)
+    asio::awaitable<void> broadcast_route_update(NetworkId network_id, NodeId except_node,
+                                                  const std::vector<RouteInfo>& add_routes,
+                                                  const std::vector<RouteInfo>& del_routes);
+
     // Notify a specific node that a peer came online/offline
     asio::awaitable<void> notify_peer_status(NodeId target_node, NodeId peer_node, bool online);
 
@@ -72,6 +78,24 @@ public:
     uint64_t current_config_version() const { return config_version_.load(); }
     uint64_t next_config_version() { return ++config_version_; }
 
+    // ========================================================================
+    // Builtin Relay/STUN 配置
+    // ========================================================================
+
+    void set_builtin_relay_config(const ControllerConfig::BuiltinRelayConfig& config) {
+        builtin_relay_ = config;
+    }
+    const ControllerConfig::BuiltinRelayConfig& builtin_relay_config() const {
+        return builtin_relay_;
+    }
+
+    void set_builtin_stun_config(const ControllerConfig::BuiltinStunConfig& config) {
+        builtin_stun_ = config;
+    }
+    const ControllerConfig::BuiltinStunConfig& builtin_stun_config() const {
+        return builtin_stun_;
+    }
+
 private:
     asio::io_context& ioc_;
     Database& db_;
@@ -91,6 +115,10 @@ private:
 
     // Config version counter
     std::atomic<uint64_t> config_version_{1};
+
+    // Builtin Relay/STUN 配置
+    ControllerConfig::BuiltinRelayConfig builtin_relay_;
+    ControllerConfig::BuiltinStunConfig builtin_stun_;
 };
 
 } // namespace edgelink::controller

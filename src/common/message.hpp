@@ -176,6 +176,21 @@ struct Ping {
 
 using Pong = Ping; // Same structure
 
+// LATENCY_REPORT (0x32) - 节点上报到 Controller 的延迟测量结果
+struct LatencyReportEntry {
+    NodeId peer_node_id = 0;     // 目标节点 ID
+    uint16_t latency_ms = 0;     // 延迟毫秒数 (0 = 超时/不可达)
+    uint8_t path_type = 0;       // 0 = relay, 1 = p2p
+};
+
+struct LatencyReport {
+    uint64_t timestamp = 0;                      // 测量时间戳
+    std::vector<LatencyReportEntry> entries;     // 延迟条目列表
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<LatencyReport, ParseError> parse(std::span<const uint8_t> data);
+};
+
 // ============================================================================
 // Error Messages
 // ============================================================================
@@ -199,6 +214,114 @@ struct GenericAck {
 
     std::vector<uint8_t> serialize() const;
     static std::expected<GenericAck, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// ============================================================================
+// Routing Messages
+// ============================================================================
+
+// ROUTE_ANNOUNCE (0x80) - 节点公告自己可路由的子网
+struct RouteAnnounce {
+    uint32_t request_id = 0;               // 请求 ID，用于 ACK 匹配
+    std::vector<RouteInfo> routes;         // 公告的路由列表
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<RouteAnnounce, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// ROUTE_UPDATE (0x81) - Controller 推送路由更新给节点
+struct RouteUpdate {
+    uint64_t version = 0;                  // 路由表版本号
+    std::vector<RouteInfo> add_routes;     // 新增路由
+    std::vector<RouteInfo> del_routes;     // 删除路由
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<RouteUpdate, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// ROUTE_WITHDRAW (0x82) - 节点撤销路由公告
+struct RouteWithdraw {
+    uint32_t request_id = 0;               // 请求 ID
+    std::vector<RouteInfo> routes;         // 撤销的路由列表
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<RouteWithdraw, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// ROUTE_ACK (0x83) - 路由操作确认
+struct RouteAck {
+    uint32_t request_id = 0;
+    bool success = false;
+    uint16_t error_code = 0;
+    std::string error_msg;
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<RouteAck, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// ============================================================================
+// P2P Messages
+// ============================================================================
+
+// P2P_INIT (0x40) - 请求 Controller 返回对端端点
+struct P2PInit {
+    NodeId target_node = 0;         // 目标节点 ID
+    uint32_t init_seq = 0;          // 请求序列号
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<P2PInit, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// P2P_ENDPOINT (0x41) - Controller 返回对端端点列表
+struct P2PEndpointMsg {
+    uint32_t init_seq = 0;          // 对应的请求序列号
+    NodeId peer_node = 0;           // 对端节点 ID
+    std::array<uint8_t, X25519_KEY_SIZE> peer_key{};  // 对端公钥
+    std::vector<Endpoint> endpoints; // 对端端点列表
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<P2PEndpointMsg, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// P2P_PING (0x42) / P2P_PONG (0x43) - UDP 打洞探测
+struct P2PPing {
+    uint32_t magic = P2P_MAGIC;     // "ELNK" (0x454C4E4B)
+    NodeId src_node = 0;            // 源节点 ID
+    NodeId dst_node = 0;            // 目标节点 ID
+    uint64_t timestamp = 0;         // 发送时间戳（微秒）
+    uint32_t seq_num = 0;           // 序列号
+    std::array<uint8_t, CHACHA20_NONCE_SIZE> nonce{};  // 随机数
+    std::array<uint8_t, ED25519_SIGNATURE_SIZE> signature{};  // Ed25519 签名
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<P2PPing, ParseError> parse(std::span<const uint8_t> data);
+
+    // 获取待签名数据
+    std::vector<uint8_t> get_sign_data() const;
+};
+
+using P2PPong = P2PPing;  // 结构相同
+
+// P2P_KEEPALIVE (0x44) - P2P 连接保活
+struct P2PKeepalive {
+    uint64_t timestamp = 0;         // 时间戳
+    uint32_t seq_num = 0;           // 序列号
+    uint8_t flags = 0;              // 0x01 = 请求响应, 0x02 = 响应
+    std::array<uint8_t, POLY1305_TAG_SIZE> mac{};  // Poly1305 MAC
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<P2PKeepalive, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// P2P_STATUS (0x45) - 上报 P2P 状态给 Controller
+struct P2PStatusMsg {
+    NodeId peer_node = 0;           // 对端节点 ID
+    P2PStatus status = P2PStatus::DISCONNECTED;  // 连接状态
+    uint16_t latency_ms = 0;        // 往返延迟（毫秒）
+    PathType path_type = PathType::RELAY;  // 路径类型
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<P2PStatusMsg, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ============================================================================

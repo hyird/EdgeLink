@@ -1,6 +1,9 @@
 #include "client/ipc_server.hpp"
 #include "client/client.hpp"
 #include "common/logger.hpp"
+#include "common/config.hpp"
+#include "common/config_metadata.hpp"
+#include "common/config_writer.hpp"
 
 #include <boost/json.hpp>
 #include <filesystem>
@@ -207,6 +210,8 @@ std::string IpcServer::process_request(const std::string& request) {
                 online_only = obj.at("online_only").as_bool();
             }
             return handle_peers(online_only);
+        } else if (cmd == "routes") {
+            return handle_routes();
         } else if (cmd == "ping") {
             std::string target = json::value_to<std::string>(obj.at("target"));
             return handle_ping(target);
@@ -218,6 +223,17 @@ std::string IpcServer::process_request(const std::string& request) {
             return handle_log_level(module, level);
         } else if (cmd == "shutdown") {
             return handle_shutdown();
+        } else if (cmd == "config_get") {
+            std::string key = json::value_to<std::string>(obj.at("key"));
+            return handle_config_get(key);
+        } else if (cmd == "config_set") {
+            std::string key = json::value_to<std::string>(obj.at("key"));
+            std::string value = json::value_to<std::string>(obj.at("value"));
+            return handle_config_set(key, value);
+        } else if (cmd == "config_list") {
+            return handle_config_list();
+        } else if (cmd == "config_reload") {
+            return handle_config_reload();
         } else {
             return encode_error(IpcStatus::INVALID_REQUEST, "Unknown command: " + cmd);
         }
@@ -272,6 +288,48 @@ std::string IpcServer::handle_peers(bool online_only) {
     }
 
     return encode_peers_response(IpcStatus::OK, peers);
+}
+
+std::string IpcServer::handle_routes() {
+    std::vector<IpcRouteInfo> routes;
+
+    // 获取路由列表
+    auto route_list = client_.routes();
+
+    for (const auto& r : route_list) {
+        IpcRouteInfo info;
+
+        // 格式化 prefix 为 CIDR 格式
+        std::string prefix_str;
+        if (r.ip_type == IpType::IPv4) {
+            prefix_str = std::to_string(r.prefix[0]) + "." +
+                         std::to_string(r.prefix[1]) + "." +
+                         std::to_string(r.prefix[2]) + "." +
+                         std::to_string(r.prefix[3]);
+        } else {
+            // IPv6 简化处理
+            prefix_str = "ipv6";
+        }
+        info.prefix = prefix_str + "/" + std::to_string(r.prefix_len);
+
+        info.gateway_node_id = std::to_string(r.gateway_node);
+        info.metric = r.metric;
+        info.exit_node = has_flag(r.flags, RouteFlags::EXIT_NODE);
+
+        // 查找网关节点的信息
+        auto peer = client_.peers().get_peer(r.gateway_node);
+        if (peer) {
+            info.gateway_ip = peer->info.virtual_ip.to_string();
+            info.gateway_name = peer->info.name;
+        } else {
+            info.gateway_ip = "";
+            info.gateway_name = "";
+        }
+
+        routes.push_back(std::move(info));
+    }
+
+    return encode_routes_response(IpcStatus::OK, routes);
 }
 
 std::string IpcServer::handle_ping(const std::string& target) {
@@ -378,6 +436,233 @@ std::string IpcServer::handle_shutdown() {
     return encode_ok("Shutdown initiated");
 }
 
+std::string IpcServer::handle_config_get(const std::string& key) {
+    auto meta = edgelink::get_config_metadata(key);
+    if (!meta.has_value()) {
+        return encode_error(IpcStatus::INVALID_REQUEST, "Unknown config key: " + key);
+    }
+
+    // 获取当前值
+    IpcConfigItem item;
+    item.key = key;
+    item.type = edgelink::config_type_to_string(meta->type);
+    item.description = meta->description;
+    item.hot_reloadable = meta->hot_reloadable;
+    item.default_value = meta->default_value;
+    item.value = client_.get_config_value(key);
+
+    return encode_config_response(IpcStatus::OK, item);
+}
+
+std::string IpcServer::handle_config_set(const std::string& key, const std::string& value) {
+    auto meta = edgelink::get_config_metadata(key);
+    if (!meta.has_value()) {
+        return encode_error(IpcStatus::INVALID_REQUEST, "Unknown config key: " + key);
+    }
+
+    // 验证值
+    if (!edgelink::validate_config_value(key, value)) {
+        return encode_error(IpcStatus::INVALID_REQUEST, "Invalid value for " + key);
+    }
+
+    IpcConfigChange change;
+    change.key = key;
+    change.old_value = client_.get_config_value(key);
+    change.new_value = value;
+    change.restart_required = !meta->hot_reloadable;
+
+    // 如果可热重载，尝试应用
+    if (meta->hot_reloadable && client_.config_applier()) {
+        auto result = client_.config_applier()->apply_single(key, value);
+        change.applied = result.applied;
+        change.message = result.message;
+        change.restart_required = result.restart_required;
+    } else if (!meta->hot_reloadable) {
+        change.applied = false;
+        change.message = "此配置需要重启才能生效";
+    }
+
+    // 写入配置文件
+    const auto& config_path = client_.config_path();
+    if (!config_path.empty()) {
+        edgelink::TomlConfigWriter writer(config_path);
+        if (writer.load()) {
+            writer.set_value(key, value);
+            if (writer.save()) {
+                log().info("Config saved to file: {} = {}", key, value);
+            } else {
+                log().warn("Failed to save config to file");
+            }
+        }
+    }
+
+    return encode_config_change_response(IpcStatus::OK, change);
+}
+
+std::string IpcServer::handle_config_list() {
+    std::vector<IpcConfigItem> items;
+
+    for (const auto& meta : edgelink::get_all_config_metadata()) {
+        IpcConfigItem item;
+        item.key = meta.key;
+        item.type = edgelink::config_type_to_string(meta.type);
+        item.description = meta.description;
+        item.hot_reloadable = meta.hot_reloadable;
+        item.default_value = meta.default_value;
+        item.value = client_.get_config_value(meta.key);
+        items.push_back(std::move(item));
+    }
+
+    return encode_config_list_response(IpcStatus::OK, items);
+}
+
+std::string IpcServer::handle_config_reload() {
+    std::vector<IpcConfigChange> changes;
+
+    log().info("Config reload requested via IPC");
+
+    // 调用 ConfigWatcher 的 reload 方法
+    auto* watcher = client_.config_watcher();
+    if (watcher) {
+        if (watcher->reload()) {
+            // ConfigWatcher 的 reload 会触发回调，配置会自动应用
+            // 但我们无法直接获取变更列表，所以返回空列表
+            log().info("Config reloaded from file");
+        } else {
+            return encode_error(IpcStatus::ERROR, "Failed to reload config");
+        }
+    } else {
+        // 没有 ConfigWatcher，尝试手动加载
+        const auto& config_path = client_.config_path();
+        if (config_path.empty()) {
+            return encode_error(IpcStatus::ERROR, "Config path not set");
+        }
+
+        auto result = edgelink::ClientConfig::load(config_path);
+        if (!result.has_value()) {
+            return encode_error(IpcStatus::ERROR, "Failed to load config: " +
+                edgelink::config_error_message(result.error()));
+        }
+
+        // 转换并应用配置
+        ClientConfig new_config;
+        new_config.controller_hosts = result->controller_hosts;
+        new_config.authkey = result->authkey;
+        new_config.tls = result->tls;
+        new_config.failover_timeout = result->failover_timeout;
+        new_config.auto_reconnect = result->auto_reconnect;
+        new_config.reconnect_interval = result->reconnect_interval;
+        new_config.ping_interval = result->ping_interval;
+        new_config.dns_refresh_interval = result->dns_refresh_interval;
+        new_config.latency_measure_interval = result->latency_measure_interval;
+        new_config.ssl_verify = result->ssl_verify;
+        new_config.ssl_ca_file = result->ssl_ca_file;
+        new_config.ssl_allow_self_signed = result->ssl_allow_self_signed;
+        new_config.state_dir = result->state_dir;
+        new_config.enable_tun = result->enable_tun;
+        new_config.tun_name = result->tun_name;
+        new_config.tun_mtu = result->tun_mtu;
+        new_config.advertise_routes = result->advertise_routes;
+        new_config.exit_node = result->exit_node;
+        new_config.accept_routes = result->accept_routes;
+        new_config.log_level = result->log_level;
+        new_config.log_file = result->log_file;
+
+        if (client_.config_applier()) {
+            auto applied_changes = client_.config_applier()->apply(client_.config(), new_config);
+            for (const auto& c : applied_changes) {
+                IpcConfigChange ipc_change;
+                ipc_change.key = c.key;
+                ipc_change.old_value = c.old_value;
+                ipc_change.new_value = c.new_value;
+                ipc_change.applied = c.applied;
+                ipc_change.restart_required = c.restart_required;
+                ipc_change.message = c.message;
+                changes.push_back(std::move(ipc_change));
+            }
+            // 更新配置
+            client_.config() = new_config;
+        }
+    }
+
+    return encode_config_reload_response(IpcStatus::OK, changes);
+}
+
+std::string IpcServer::encode_config_response(IpcStatus status, const IpcConfigItem& item) {
+    json::object obj;
+    obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+    obj["key"] = item.key;
+    obj["value"] = item.value;
+    obj["type"] = item.type;
+    obj["description"] = item.description;
+    obj["hot_reloadable"] = item.hot_reloadable;
+    obj["default_value"] = item.default_value;
+    return json::serialize(obj);
+}
+
+std::string IpcServer::encode_config_list_response(IpcStatus status, const std::vector<IpcConfigItem>& items) {
+    json::object obj;
+    obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+
+    json::array arr;
+    for (const auto& item : items) {
+        arr.push_back({
+            {"key", item.key},
+            {"value", item.value},
+            {"type", item.type},
+            {"description", item.description},
+            {"hot_reloadable", item.hot_reloadable},
+            {"default_value", item.default_value}
+        });
+    }
+    obj["config"] = arr;
+
+    // 列出可热重载的配置项
+    json::array hot_reloadable;
+    for (const auto& item : items) {
+        if (item.hot_reloadable) {
+            hot_reloadable.push_back(json::value(item.key));
+        }
+    }
+    obj["hot_reloadable_keys"] = hot_reloadable;
+
+    return json::serialize(obj);
+}
+
+std::string IpcServer::encode_config_change_response(IpcStatus status, const IpcConfigChange& change) {
+    json::object obj;
+    obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+    obj["key"] = change.key;
+    obj["old_value"] = change.old_value;
+    obj["new_value"] = change.new_value;
+    obj["applied"] = change.applied;
+    obj["restart_required"] = change.restart_required;
+    if (!change.message.empty()) {
+        obj["message"] = change.message;
+    }
+    return json::serialize(obj);
+}
+
+std::string IpcServer::encode_config_reload_response(IpcStatus status, const std::vector<IpcConfigChange>& changes) {
+    json::object obj;
+    obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+
+    json::array arr;
+    for (const auto& c : changes) {
+        arr.push_back({
+            {"key", c.key},
+            {"old_value", c.old_value},
+            {"new_value", c.new_value},
+            {"applied", c.applied},
+            {"restart_required", c.restart_required},
+            {"message", c.message}
+        });
+    }
+    obj["changes"] = arr;
+
+    return json::serialize(obj);
+}
+
 std::string IpcServer::encode_status_response(IpcStatus status, const IpcStatusResponse& data) {
     json::object obj;
     obj["status"] = status == IpcStatus::OK ? "ok" : "error";
@@ -409,6 +694,26 @@ std::string IpcServer::encode_peers_response(IpcStatus status, const std::vector
         });
     }
     obj["peers"] = arr;
+
+    return json::serialize(obj);
+}
+
+std::string IpcServer::encode_routes_response(IpcStatus status, const std::vector<IpcRouteInfo>& routes) {
+    json::object obj;
+    obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+
+    json::array arr;
+    for (const auto& r : routes) {
+        arr.push_back({
+            {"prefix", r.prefix},
+            {"gateway_node_id", r.gateway_node_id},
+            {"gateway_ip", r.gateway_ip},
+            {"gateway_name", r.gateway_name},
+            {"metric", r.metric},
+            {"exit_node", r.exit_node}
+        });
+    }
+    obj["routes"] = arr;
 
     return json::serialize(obj);
 }
@@ -496,6 +801,10 @@ std::string IpcClient::get_peers(bool online_only) {
     return send_request(R"({"cmd":"peers"})");
 }
 
+std::string IpcClient::get_routes() {
+    return send_request(R"({"cmd":"routes"})");
+}
+
 std::string IpcClient::ping_peer(const std::string& target) {
     return send_request(R"({"cmd":"ping","target":")" + target + "\"}");
 }
@@ -510,6 +819,29 @@ std::string IpcClient::set_log_level(const std::string& module, const std::strin
 
 std::string IpcClient::request_shutdown() {
     return send_request(R"({"cmd":"shutdown"})");
+}
+
+std::string IpcClient::config_get(const std::string& key) {
+    json::object obj;
+    obj["cmd"] = "config_get";
+    obj["key"] = key;
+    return send_request(json::serialize(obj));
+}
+
+std::string IpcClient::config_set(const std::string& key, const std::string& value) {
+    json::object obj;
+    obj["cmd"] = "config_set";
+    obj["key"] = key;
+    obj["value"] = value;
+    return send_request(json::serialize(obj));
+}
+
+std::string IpcClient::config_list() {
+    return send_request(R"({"cmd":"config_list"})");
+}
+
+std::string IpcClient::config_reload() {
+    return send_request(R"({"cmd":"config_reload"})");
 }
 
 } // namespace edgelink::client
