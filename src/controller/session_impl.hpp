@@ -326,8 +326,14 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
     log().info("Node {} authenticated: {} ({})",
                  this->node_id_, node->hostname, node->virtual_ip.to_string());
 
+    // 通知状态机认证成功
+    this->manager_.handle_session_event(this->node_id_, SessionEvent::AUTH_SUCCESS);
+
     // Send CONFIG
     co_await send_config();
+
+    // 通知状态机配置已发送
+    this->manager_.handle_session_event(this->node_id_, SessionEvent::CONFIG_SENT);
 
     // Notify other nodes about new peer
     co_await this->manager_.broadcast_config_update(this->network_id_, this->node_id_);
@@ -424,6 +430,9 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_config_ack(const Fr
     }
 
     log().debug("Node {} acknowledged config version {}", this->node_id_, ack->version);
+
+    // 通知状态机配置已确认
+    this->manager_.handle_session_event(this->node_id_, SessionEvent::CONFIG_ACK);
 }
 
 template<typename StreamType>
@@ -522,6 +531,9 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_announce(cons
     // 发送成功 ACK
     co_await send_route_ack(announce->request_id, true);
 
+    // 通知状态机路由公告
+    this->manager_.handle_route_announce(this->node_id_, announce->routes);
+
     // 通知其他节点路由更新
     co_await this->manager_.broadcast_route_update(this->network_id_, this->node_id_, announce->routes, {});
 }
@@ -552,6 +564,9 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_withdraw(cons
     // 发送成功 ACK
     co_await send_route_ack(withdraw->request_id, true);
 
+    // 通知状态机路由撤销
+    this->manager_.handle_route_withdraw(this->node_id_, withdraw->routes);
+
     // 通知其他节点路由更新
     co_await this->manager_.broadcast_route_update(this->network_id_, this->node_id_, {}, withdraw->routes);
 }
@@ -571,6 +586,9 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Fram
 
     log().debug("P2P_INIT from node {} targeting node {}, seq={}",
                 this->node_id_, init->target_node, init->init_seq);
+
+    // 通知状态机 P2P 初始化
+    this->manager_.handle_p2p_init(this->node_id_, init->target_node, init->init_seq);
 
     // 查找目标节点的 Control Session
     auto target_session = this->manager_.get_control_session(init->target_node);
@@ -662,8 +680,8 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_endpoint_update(con
                     ep.port, static_cast<int>(ep.type));
     }
 
-    // 存储端点到 SessionManager
-    this->manager_.update_node_endpoints(this->node_id_, update->endpoints);
+    // 存储端点到 SessionManager 并通知状态机
+    this->manager_.handle_endpoint_update(this->node_id_, update->endpoints);
 
     // 发送确认
     EndpointAck ack;

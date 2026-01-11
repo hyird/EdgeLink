@@ -243,112 +243,134 @@ void ConnectionStateMachine::handle_event(StateEvent event) {
 void ConnectionStateMachine::handle_peer_event(NodeId peer_id, StateEvent event) {
     log().debug("Peer {} event: {}", peer_id, state_event_name(event));
 
-    std::unique_lock lock(peers_mutex_);
-    auto* state = get_peer_state_mut(peer_id);
-    if (!state) {
-        // 对于 PEER_ONLINE 事件，自动创建状态
-        if (event == StateEvent::PEER_ONLINE) {
-            peer_states_[peer_id] = PeerState{.peer_id = peer_id};
-            state = &peer_states_[peer_id];
-        } else {
-            return;
+    // 用于在锁外触发回调
+    PeerP2PNegotiationState old_negotiation;
+    PeerDataPath old_data_path;
+    PeerLinkState old_link_state;
+    PeerP2PNegotiationState new_negotiation;
+    PeerDataPath new_data_path;
+    PeerLinkState new_link_state;
+    bool state_changed = false;
+
+    {
+        std::unique_lock lock(peers_mutex_);
+        auto* state = get_peer_state_mut(peer_id);
+        if (!state) {
+            // 对于 PEER_ONLINE 事件，自动创建状态
+            if (event == StateEvent::PEER_ONLINE) {
+                peer_states_[peer_id] = PeerState{.peer_id = peer_id};
+                state = &peer_states_[peer_id];
+            } else {
+                return;
+            }
         }
-    }
 
-    // 保存旧状态
-    auto old_negotiation = state->negotiation_state;
-    auto old_data_path = state->data_path;
+        // 保存旧状态
+        old_negotiation = state->negotiation_state;
+        old_data_path = state->data_path;
+        old_link_state = state->link_state;
 
-    switch (event) {
-        // ========== 对端在线/离线事件 ==========
-        case StateEvent::PEER_ONLINE:
-            if (state->data_path == PeerDataPath::UNREACHABLE) {
-                // 对端重新上线，通过 Relay 可达
-                state->data_path = PeerDataPath::RELAY;
-            } else if (state->data_path == PeerDataPath::UNKNOWN) {
-                // 首次上线，默认通过 Relay
-                state->data_path = has_connected_relay_internal() ? PeerDataPath::RELAY : PeerDataPath::UNKNOWN;
-            }
-            break;
-
-        case StateEvent::PEER_OFFLINE:
-            state->negotiation_state = PeerP2PNegotiationState::IDLE;
-            state->data_path = PeerDataPath::UNREACHABLE;
-            break;
-
-        // ========== 控制面事件（P2P 协商）==========
-        case StateEvent::P2P_INIT_SENT:
-            if (state->negotiation_state == PeerP2PNegotiationState::IDLE ||
-                state->negotiation_state == PeerP2PNegotiationState::FAILED) {
-                state->negotiation_state = PeerP2PNegotiationState::RESOLVING;
-                state->last_resolve_time = now_us();
-                state->init_seq = ++init_seq_;
-            }
-            break;
-
-        case StateEvent::P2P_ENDPOINT_RECEIVED:
-            if (state->negotiation_state == PeerP2PNegotiationState::RESOLVING ||
-                state->negotiation_state == PeerP2PNegotiationState::IDLE) {
-                state->negotiation_state = PeerP2PNegotiationState::PUNCHING;
-                state->last_endpoint_time = now_us();
-                state->last_punch_time = now_us();
-                state->punch_count = 0;
-            }
-            break;
-
-        // ========== 数据面事件（P2P 连接）==========
-        case StateEvent::PUNCH_STARTED:
-            if (state->negotiation_state == PeerP2PNegotiationState::PUNCHING) {
-                state->last_punch_time = now_us();
-                state->punch_count++;
-            }
-            break;
-
-        case StateEvent::PUNCH_SUCCESS:
-            state->negotiation_state = PeerP2PNegotiationState::ESTABLISHED;
-            state->data_path = PeerDataPath::P2P;
-            state->last_recv_time = now_us();
-            state->punch_failures = 0;
-            break;
-
-        case StateEvent::PUNCH_TIMEOUT:
-            if (state->negotiation_state == PeerP2PNegotiationState::PUNCHING ||
-                state->negotiation_state == PeerP2PNegotiationState::RESOLVING) {
-                state->negotiation_state = PeerP2PNegotiationState::FAILED;
-                state->punch_failures++;
-                state->next_retry_time = now_us() + retry_interval_ms_ * 1000ULL;
-                // 回退到 Relay（如果可用）
-                if (has_connected_relay_internal()) {
+        switch (event) {
+            // ========== 对端在线/离线事件 ==========
+            case StateEvent::PEER_ONLINE:
+                if (state->data_path == PeerDataPath::UNREACHABLE) {
+                    // 对端重新上线，通过 Relay 可达
                     state->data_path = PeerDataPath::RELAY;
+                } else if (state->data_path == PeerDataPath::UNKNOWN) {
+                    // 首次上线，默认通过 Relay
+                    state->data_path = has_connected_relay_internal() ? PeerDataPath::RELAY : PeerDataPath::UNKNOWN;
                 }
-            }
-            break;
+                break;
 
-        case StateEvent::P2P_KEEPALIVE_TIMEOUT:
-            if (state->data_path == PeerDataPath::P2P) {
-                state->negotiation_state = PeerP2PNegotiationState::FAILED;
-                // 回退到 Relay（如果可用）
-                state->data_path = has_connected_relay_internal() ? PeerDataPath::RELAY : PeerDataPath::UNREACHABLE;
-            }
-            break;
+            case StateEvent::PEER_OFFLINE:
+                state->negotiation_state = PeerP2PNegotiationState::IDLE;
+                state->data_path = PeerDataPath::UNREACHABLE;
+                break;
 
-        default:
-            break;
+            // ========== 控制面事件（P2P 协商）==========
+            case StateEvent::P2P_INIT_SENT:
+                if (state->negotiation_state == PeerP2PNegotiationState::IDLE ||
+                    state->negotiation_state == PeerP2PNegotiationState::FAILED) {
+                    state->negotiation_state = PeerP2PNegotiationState::RESOLVING;
+                    state->last_resolve_time = now_us();
+                    state->init_seq = ++init_seq_;
+                }
+                break;
+
+            case StateEvent::P2P_ENDPOINT_RECEIVED:
+                if (state->negotiation_state == PeerP2PNegotiationState::RESOLVING ||
+                    state->negotiation_state == PeerP2PNegotiationState::IDLE) {
+                    state->negotiation_state = PeerP2PNegotiationState::PUNCHING;
+                    state->last_endpoint_time = now_us();
+                    state->last_punch_time = now_us();
+                    state->punch_count = 0;
+                }
+                break;
+
+            // ========== 数据面事件（P2P 连接）==========
+            case StateEvent::PUNCH_STARTED:
+                if (state->negotiation_state == PeerP2PNegotiationState::PUNCHING) {
+                    state->last_punch_time = now_us();
+                    state->punch_count++;
+                }
+                break;
+
+            case StateEvent::PUNCH_SUCCESS:
+                state->negotiation_state = PeerP2PNegotiationState::ESTABLISHED;
+                state->data_path = PeerDataPath::P2P;
+                state->last_recv_time = now_us();
+                state->punch_failures = 0;
+                break;
+
+            case StateEvent::PUNCH_TIMEOUT:
+                if (state->negotiation_state == PeerP2PNegotiationState::PUNCHING ||
+                    state->negotiation_state == PeerP2PNegotiationState::RESOLVING) {
+                    state->negotiation_state = PeerP2PNegotiationState::FAILED;
+                    state->punch_failures++;
+                    state->next_retry_time = now_us() + retry_interval_ms_ * 1000ULL;
+                    // 回退到 Relay（如果可用）
+                    if (has_connected_relay_internal()) {
+                        state->data_path = PeerDataPath::RELAY;
+                    }
+                }
+                break;
+
+            case StateEvent::P2P_KEEPALIVE_TIMEOUT:
+                if (state->data_path == PeerDataPath::P2P) {
+                    state->negotiation_state = PeerP2PNegotiationState::FAILED;
+                    // 回退到 Relay（如果可用）
+                    state->data_path = has_connected_relay_internal() ? PeerDataPath::RELAY : PeerDataPath::UNREACHABLE;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        // 更新组合 link_state（在锁内）
+        update_peer_link_state(peer_id);
+
+        // 保存新状态用于锁外回调
+        new_negotiation = state->negotiation_state;
+        new_data_path = state->data_path;
+        new_link_state = state->link_state;
+        state_changed = (new_negotiation != old_negotiation ||
+                         new_data_path != old_data_path ||
+                         new_link_state != old_link_state);
     }
+    // 锁已释放
 
-    // 更新组合 link_state
-    update_peer_link_state(peer_id);
-    lock.unlock();
-
-    // 触发回调
-    if (state->negotiation_state != old_negotiation ||
-        state->data_path != old_data_path) {
-
+    // 触发回调（在锁外，避免死锁）
+    if (state_changed) {
         // 更新数据面状态
         update_data_plane_state();
 
-        if (callbacks_.on_peer_data_path_change && state->data_path != old_data_path) {
-            callbacks_.on_peer_data_path_change(peer_id, old_data_path, state->data_path);
+        if (callbacks_.on_peer_state_change && new_link_state != old_link_state) {
+            callbacks_.on_peer_state_change(peer_id, old_link_state, new_link_state);
+        }
+
+        if (callbacks_.on_peer_data_path_change && new_data_path != old_data_path) {
+            callbacks_.on_peer_data_path_change(peer_id, old_data_path, new_data_path);
         }
     }
 }
@@ -949,6 +971,7 @@ void ConnectionStateMachine::update_data_plane_state() {
 
 void ConnectionStateMachine::update_peer_link_state(NodeId peer_id) {
     // 注意：调用者应该已经持有 peers_mutex_ 锁
+    // 此函数只更新状态，不调用回调（回调由调用者在锁外处理）
     auto* state = get_peer_state_mut(peer_id);
     if (!state) {
         return;
@@ -1003,10 +1026,8 @@ void ConnectionStateMachine::update_peer_link_state(NodeId peer_id) {
         log().info("Peer {} link state: {} -> {}",
                    peer_id, peer_link_state_name(old_link), peer_link_state_name(new_link));
 
-        // 注意：回调在锁内调用，如果回调需要获取其他锁要小心死锁
-        if (callbacks_.on_peer_state_change) {
-            callbacks_.on_peer_state_change(peer_id, old_link, new_link);
-        }
+        // 注意：不在此处调用回调，由调用者在锁外处理
+        // on_peer_state_change 回调已由 handle_peer_event 负责
     }
 }
 
