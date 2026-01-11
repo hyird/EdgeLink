@@ -337,27 +337,10 @@ void SessionManager::remove_state_machine(NodeId node_id) {
 }
 
 void SessionManager::setup_state_machine_callbacks(NodeStateMachine* sm, NodeId node_id) {
+    // 简化后只保留有业务逻辑的回调（状态变更日志由状态机内部输出）
     NodeStateCallbacks cbs;
 
-    // 会话状态变更
-    cbs.on_session_state_change = [this](NodeId nid, ClientSessionState old_state,
-                                          ClientSessionState new_state) {
-        log().info("Client {} session state: {} -> {}",
-                   nid,
-                   client_session_state_name(old_state),
-                   client_session_state_name(new_state));
-    };
-
-    // Relay 状态变更
-    cbs.on_relay_state_change = [this](NodeId nid, RelaySessionState old_state,
-                                        RelaySessionState new_state) {
-        log().debug("Client {} relay state: {} -> {}",
-                   nid,
-                   relay_session_state_name(old_state),
-                   relay_session_state_name(new_state));
-    };
-
-    // 客户端上线
+    // 客户端上线（通知其他客户端、更新数据库）
     cbs.on_client_online = [this](NodeId nid, NetworkId network_id) {
         log().info("Client {} online in network {}", nid, network_id);
 
@@ -375,7 +358,7 @@ void SessionManager::setup_state_machine_callbacks(NodeStateMachine* sm, NodeId 
         db_.update_node_online(nid, true);
     };
 
-    // 客户端下线
+    // 客户端下线（通知其他客户端、更新数据库、清除缓存）
     cbs.on_client_offline = [this](NodeId nid, NetworkId network_id) {
         log().info("Client {} offline from network {}", nid, network_id);
 
@@ -396,31 +379,21 @@ void SessionManager::setup_state_machine_callbacks(NodeStateMachine* sm, NodeId 
         clear_node_endpoints(nid);
     };
 
-    // 端点更新
+    // 端点更新（更新内部缓存）
     cbs.on_endpoint_update = [this](NodeId nid, const std::vector<Endpoint>& endpoints) {
-        // 同步更新内部端点缓存
         update_node_endpoints(nid, endpoints);
     };
 
-    // 路由更新
+    // 路由更新（广播路由变更）
     cbs.on_route_change = [this](NodeId nid, const std::vector<RouteInfo>& added,
                                   const std::vector<RouteInfo>& removed) {
-        // 获取客户端所属网络
         auto state = get_client_state(nid);
         if (state) {
-            // 广播路由更新
             asio::co_spawn(ioc_, [this, network_id = state->network_id, nid,
                                    added, removed]() -> asio::awaitable<void> {
                 co_await broadcast_route_update(network_id, nid, added, removed);
             }, asio::detached);
         }
-    };
-
-    // P2P 协商状态变更
-    cbs.on_p2p_negotiation_change = [this](NodeId initiator, NodeId responder,
-                                            P2PNegotiationPhase phase) {
-        log().debug("P2P negotiation {} <-> {}: {}",
-                    initiator, responder, p2p_negotiation_phase_name(phase));
     };
 
     sm->set_callbacks(std::move(cbs));

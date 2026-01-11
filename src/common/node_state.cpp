@@ -153,15 +153,10 @@ void NodeStateMachine::handle_event(NodeId node_id, NodeEvent event) {
                 auto old_state = state->connection_state;
                 state->connection_state = NodeConnectionState::OFFLINE;
                 state->data_channel = DataChannelState::NONE;
-                lock.unlock();
 
                 if (old_state != NodeConnectionState::OFFLINE) {
-                    if (callbacks_.on_connection_state_change) {
-                        callbacks_.on_connection_state_change(node_id, old_state, NodeConnectionState::OFFLINE);
-                    }
-                    if (callbacks_.on_node_status_change) {
-                        callbacks_.on_node_status_change(node_id, false);
-                    }
+                    log().info("Node {} disconnected: {} -> OFFLINE",
+                               node_id, node_connection_state_name(old_state));
                 }
             }
             return;
@@ -308,11 +303,11 @@ void NodeStateMachine::handle_p2p_event(NodeId node_id, NodeId peer_id, NodeEven
     // 更新数据通道状态
     update_data_channel_state(node_id);
 
-    lock.unlock();
-
-    // 触发回调
-    if (link.state != old_p2p_state && callbacks_.on_p2p_state_change) {
-        callbacks_.on_p2p_state_change(node_id, peer_id, old_p2p_state, link.state);
+    if (link.state != old_p2p_state) {
+        log().info("Node {} P2P with {}: {} -> {}",
+                   node_id, peer_id,
+                   p2p_connection_state_name(old_p2p_state),
+                   p2p_connection_state_name(link.state));
     }
 }
 
@@ -408,30 +403,23 @@ void NodeStateMachine::handle_self_p2p_event(NodeId peer_id, NodeEvent event) {
         self_state_.data_plane = new_data_state;
     }
 
-    lock.unlock();
-
-    // 触发回调（在锁外）
     if (link.state != old_p2p_state) {
         log().info("Self P2P with {}: {} -> {}",
                    peer_id,
                    p2p_connection_state_name(old_p2p_state),
                    p2p_connection_state_name(link.state));
-
-        if (callbacks_.on_p2p_state_change) {
-            callbacks_.on_p2p_state_change(self_id_, peer_id, old_p2p_state, link.state);
-        }
     }
 
     if (data_state_changed) {
         log().info("Data plane: {} -> {}",
                    data_plane_state_name(old_data_state),
                    data_plane_state_name(new_data_state));
+    }
 
-        if (callbacks_.on_data_plane_change) {
-            callbacks_.on_data_plane_change(old_data_state, new_data_state);
-        }
+    lock.unlock();
 
-        // 更新连接阶段
+    // 更新连接阶段（在锁外，因为它可能触发回调）
+    if (data_state_changed) {
         update_connection_phase();
     }
 }
@@ -458,15 +446,13 @@ void NodeStateMachine::remove_node(NodeId node_id) {
     std::unique_lock lock(nodes_mutex_);
     auto it = node_states_.find(node_id);
     if (it != node_states_.end()) {
-        auto old_state = it->second.connection_state;
         bool was_online = it->second.is_online();
         node_states_.erase(it);
-        lock.unlock();
 
-        log().debug("Removed node {}", node_id);
-
-        if (was_online && callbacks_.on_node_status_change) {
-            callbacks_.on_node_status_change(node_id, false);
+        if (was_online) {
+            log().info("Removed online node {}", node_id);
+        } else {
+            log().debug("Removed node {}", node_id);
         }
     }
 }
@@ -589,11 +575,9 @@ void NodeStateMachine::mark_config_sent(NodeId node_id, uint64_t config_version)
         auto old_session = state->session_state;
         if (old_session == ClientSessionState::AUTHENTICATED) {
             state->session_state = ClientSessionState::CONFIGURING;
-            lock.unlock();
 
-            if (callbacks_.on_session_state_change) {
-                callbacks_.on_session_state_change(node_id, old_session, ClientSessionState::CONFIGURING);
-            }
+            log().info("Node {} session: {} -> CONFIGURING",
+                       node_id, client_session_state_name(old_session));
         }
     }
 }
@@ -648,11 +632,9 @@ void NodeStateMachine::handle_p2p_init_request(NodeId initiator, NodeId responde
         negotiation.phase = P2PNegotiationPhase::INITIATED;
         negotiation.init_seq = seq;
         negotiation.init_time = now_us();
-        lock.unlock();
 
-        if (callbacks_.on_p2p_negotiation_change) {
-            callbacks_.on_p2p_negotiation_change(initiator, responder, P2PNegotiationPhase::INITIATED);
-        }
+        log().debug("P2P negotiation {} -> {}: INITIATED (seq={})",
+                   initiator, responder, seq);
     }
 }
 
@@ -664,11 +646,9 @@ void NodeStateMachine::mark_p2p_endpoint_sent(NodeId node_id, NodeId peer_id) {
         if (it != state->p2p_negotiations.end()) {
             it->second.phase = P2PNegotiationPhase::ENDPOINTS_SENT;
             it->second.endpoint_send_time = now_us();
-            lock.unlock();
 
-            if (callbacks_.on_p2p_negotiation_change) {
-                callbacks_.on_p2p_negotiation_change(node_id, peer_id, P2PNegotiationPhase::ENDPOINTS_SENT);
-            }
+            log().debug("P2P negotiation {} -> {}: ENDPOINTS_SENT",
+                       node_id, peer_id);
         }
     }
 }
@@ -681,11 +661,9 @@ void NodeStateMachine::handle_p2p_status(NodeId node_id, NodeId peer_id, bool su
         if (it != state->p2p_negotiations.end()) {
             auto new_phase = success ? P2PNegotiationPhase::ESTABLISHED : P2PNegotiationPhase::FAILED;
             it->second.phase = new_phase;
-            lock.unlock();
 
-            if (callbacks_.on_p2p_negotiation_change) {
-                callbacks_.on_p2p_negotiation_change(node_id, peer_id, new_phase);
-            }
+            log().debug("P2P negotiation {} -> {}: {}",
+                       node_id, peer_id, p2p_negotiation_phase_name(new_phase));
         }
     }
 }
@@ -957,26 +935,11 @@ void NodeStateMachine::set_connection_state(NodeId node_id, NodeConnectionState 
     auto old_state = state->connection_state;
     if (old_state != new_state) {
         state->connection_state = new_state;
-        lock.unlock();
 
         log().info("Node {} connection: {} -> {}",
                    node_id,
                    node_connection_state_name(old_state),
                    node_connection_state_name(new_state));
-
-        if (callbacks_.on_connection_state_change) {
-            callbacks_.on_connection_state_change(node_id, old_state, new_state);
-        }
-
-        // 节点上线/下线通知
-        bool was_online = (old_state == NodeConnectionState::ONLINE ||
-                           old_state == NodeConnectionState::DEGRADED);
-        bool is_online = (new_state == NodeConnectionState::ONLINE ||
-                          new_state == NodeConnectionState::DEGRADED);
-
-        if (was_online != is_online && callbacks_.on_node_status_change) {
-            callbacks_.on_node_status_change(node_id, is_online);
-        }
     }
 }
 
@@ -990,16 +953,11 @@ void NodeStateMachine::set_data_channel_state(NodeId node_id, DataChannelState n
     auto old_state = state->data_channel;
     if (old_state != new_state) {
         state->data_channel = new_state;
-        lock.unlock();
 
         log().debug("Node {} data channel: {} -> {}",
                    node_id,
                    data_channel_state_name(old_state),
                    data_channel_state_name(new_state));
-
-        if (callbacks_.on_data_channel_change) {
-            callbacks_.on_data_channel_change(node_id, old_state, new_state);
-        }
     }
 }
 
@@ -1014,16 +972,11 @@ void NodeStateMachine::set_p2p_state(NodeId node_id, NodeId peer_id, P2PConnecti
     auto old_state = link.state;
     if (old_state != new_state) {
         link.state = new_state;
-        lock.unlock();
 
         log().info("Node {} P2P with {}: {} -> {}",
                    node_id, peer_id,
                    p2p_connection_state_name(old_state),
                    p2p_connection_state_name(new_state));
-
-        if (callbacks_.on_p2p_state_change) {
-            callbacks_.on_p2p_state_change(node_id, peer_id, old_state, new_state);
-        }
     }
 }
 
@@ -1044,10 +997,6 @@ void NodeStateMachine::set_session_state_internal(NodeId node_id, ClientSessionS
                    node_id,
                    client_session_state_name(old_state),
                    client_session_state_name(new_state));
-
-        if (callbacks_.on_session_state_change) {
-            callbacks_.on_session_state_change(node_id, old_state, new_state);
-        }
 
         // 客户端上线/下线通知
         bool was_online = (old_state == ClientSessionState::ONLINE);
@@ -1078,10 +1027,6 @@ void NodeStateMachine::set_relay_state_internal(NodeId node_id, RelaySessionStat
                    relay_session_state_name(old_state),
                    relay_session_state_name(new_state));
 
-        if (callbacks_.on_relay_state_change) {
-            callbacks_.on_relay_state_change(node_id, old_state, new_state);
-        }
-
         // 更新会话状态
         update_session_state(node_id);
     }
@@ -1097,11 +1042,9 @@ void NodeStateMachine::set_p2p_negotiation_phase(NodeId node_id, NodeId peer_id,
     auto& negotiation = state->p2p_negotiations[peer_id];
     negotiation.peer_id = peer_id;
     negotiation.phase = phase;
-    lock.unlock();
 
-    if (callbacks_.on_p2p_negotiation_change) {
-        callbacks_.on_p2p_negotiation_change(node_id, peer_id, phase);
-    }
+    log().debug("P2P negotiation {} -> {}: {}",
+               node_id, peer_id, p2p_negotiation_phase_name(phase));
 }
 
 void NodeStateMachine::update_data_channel_state(NodeId node_id) {
@@ -1135,9 +1078,8 @@ void NodeStateMachine::update_data_channel_state(NodeId node_id) {
         auto old_channel = state->data_channel;
         state->data_channel = new_channel;
 
-        if (callbacks_.on_data_channel_change) {
-            callbacks_.on_data_channel_change(node_id, old_channel, new_channel);
-        }
+        log().debug("Node {} data channel: {} -> {}",
+                   node_id, data_channel_state_name(old_channel), data_channel_state_name(new_channel));
     }
 }
 
@@ -1168,11 +1110,7 @@ void NodeStateMachine::update_session_state(NodeId node_id) {
                    client_session_state_name(old_state),
                    client_session_state_name(new_state));
 
-        if (callbacks_.on_session_state_change) {
-            callbacks_.on_session_state_change(node_id, old_state, new_state);
-        }
-
-        // 客户端上线/下线通知
+        // 客户端上线/下线通知（这是有业务逻辑的回调，需要保留）
         bool was_online = (old_state == ClientSessionState::ONLINE);
         bool is_online = (new_state == ClientSessionState::ONLINE);
 
@@ -1292,10 +1230,6 @@ void NodeStateMachine::set_control_plane_state_internal(ControlPlaneState new_st
                    control_plane_state_name(old_state),
                    control_plane_state_name(new_state));
 
-        if (callbacks_.on_control_plane_change) {
-            callbacks_.on_control_plane_change(old_state, new_state);
-        }
-
         // 更新连接阶段
         update_connection_phase();
     }
@@ -1309,10 +1243,6 @@ void NodeStateMachine::set_data_plane_state_internal(DataPlaneState new_state) {
         log().info("Data plane: {} -> {}",
                    data_plane_state_name(old_state),
                    data_plane_state_name(new_state));
-
-        if (callbacks_.on_data_plane_change) {
-            callbacks_.on_data_plane_change(old_state, new_state);
-        }
 
         // 更新连接阶段
         update_connection_phase();
@@ -1328,6 +1258,7 @@ void NodeStateMachine::set_connection_phase_internal(ConnectionPhase new_phase) 
                    connection_phase_name(old_phase),
                    connection_phase_name(new_phase));
 
+        // 保留此回调（有业务逻辑：更新 ClientState 兼容状态）
         if (callbacks_.on_connection_phase_change) {
             callbacks_.on_connection_phase_change(old_phase, new_phase);
         }
@@ -1342,10 +1273,6 @@ void NodeStateMachine::set_endpoint_sync_state_internal(ClientEndpointSyncState 
         log().debug("Endpoint sync: {} -> {}",
                    client_endpoint_sync_state_name(old_state),
                    client_endpoint_sync_state_name(new_state));
-
-        if (callbacks_.on_endpoint_sync_change) {
-            callbacks_.on_endpoint_sync_change(old_state, new_state);
-        }
     }
 }
 
@@ -1357,10 +1284,6 @@ void NodeStateMachine::set_route_sync_state_internal(RouteSyncState new_state) {
         log().debug("Route sync: {} -> {}",
                    route_sync_state_name(old_state),
                    route_sync_state_name(new_state));
-
-        if (callbacks_.on_route_sync_change) {
-            callbacks_.on_route_sync_change(old_state, new_state);
-        }
     }
 }
 
@@ -1469,18 +1392,14 @@ void NodeStateMachine::set_relay_connection_state_internal(const std::string& re
             relay->reconnect_count++;
         }
 
-        lock.unlock();
-
         log().info("Relay {}: {} -> {}",
                    relay_id,
                    relay_connection_state_name(old_state),
                    relay_connection_state_name(new_state));
 
-        if (callbacks_.on_relay_connection_change) {
-            callbacks_.on_relay_connection_change(relay_id, old_state, new_state);
-        }
+        lock.unlock();
 
-        // 更新数据面状态
+        // 更新数据面状态（在锁外）
         update_data_plane_state_client();
     }
 }
@@ -1588,18 +1507,15 @@ void NodeStateMachine::update_peer_active_connection(NodeId peer_id,
 
     if (old_path != new_path) {
         link->data_path = new_path;
-        lock.unlock();
 
         log().info("Peer {} data path: {} -> {}",
                    peer_id,
                    peer_data_path_name(old_path),
                    peer_data_path_name(new_path));
 
-        if (callbacks_.on_peer_data_path_change) {
-            callbacks_.on_peer_data_path_change(peer_id, old_path, new_path);
-        }
+        lock.unlock();
 
-        // 更新数据面状态
+        // 更新数据面状态（在锁外）
         update_data_plane_state_client();
     }
 }
@@ -1669,7 +1585,16 @@ void NodeStateMachine::update_peer_link_state(NodeId peer_id) {
             break;
     }
 
-    set_peer_link_state_internal(peer_id, new_state);
+    // 直接内联更新链路状态（避免调用 set_peer_link_state_internal 导致递归锁）
+    auto old_state = link->link_state;
+    if (old_state != new_state) {
+        link->link_state = new_state;
+
+        log().debug("Peer {} link: {} -> {}",
+                   peer_id,
+                   peer_link_state_name(old_state),
+                   peer_link_state_name(new_state));
+    }
 }
 
 void NodeStateMachine::set_peer_link_state_internal(NodeId peer_id, PeerLinkState new_state) {
@@ -1690,16 +1615,11 @@ void NodeStateMachine::set_peer_link_state_internal(NodeId peer_id, PeerLinkStat
     auto old_state = link->link_state;
     if (old_state != new_state) {
         link->link_state = new_state;
-        lock.unlock();
 
         log().debug("Peer {} link: {} -> {}",
                    peer_id,
                    peer_link_state_name(old_state),
                    peer_link_state_name(new_state));
-
-        if (callbacks_.on_peer_link_state_change) {
-            callbacks_.on_peer_link_state_change(peer_id, old_state, new_state);
-        }
     }
 }
 
@@ -1721,21 +1641,51 @@ void NodeStateMachine::set_peer_data_path_internal(NodeId peer_id, PeerDataPath 
     auto old_path = link->data_path;
     if (old_path != new_path) {
         link->data_path = new_path;
-        lock.unlock();
 
         log().info("Peer {} data path: {} -> {}",
                    peer_id,
                    peer_data_path_name(old_path),
                    peer_data_path_name(new_path));
 
-        if (callbacks_.on_peer_data_path_change) {
-            callbacks_.on_peer_data_path_change(peer_id, old_path, new_path);
+        // 内联更新对端链路状态（避免递归锁）
+        PeerLinkState new_link_state = PeerLinkState::UNKNOWN;
+        switch (link->state) {
+            case P2PConnectionState::NONE:
+                if (new_path == PeerDataPath::RELAY) {
+                    new_link_state = PeerLinkState::RELAY_FALLBACK;
+                } else if (new_path == PeerDataPath::UNREACHABLE) {
+                    new_link_state = PeerLinkState::OFFLINE;
+                }
+                break;
+            case P2PConnectionState::INITIATING:
+            case P2PConnectionState::WAITING_ENDPOINT:
+                new_link_state = PeerLinkState::RESOLVING;
+                break;
+            case P2PConnectionState::PUNCHING:
+                new_link_state = PeerLinkState::PUNCHING;
+                break;
+            case P2PConnectionState::CONNECTED:
+                new_link_state = PeerLinkState::P2P_ACTIVE;
+                break;
+            case P2PConnectionState::FAILED:
+                if (self_state_.has_connected_relay()) {
+                    new_link_state = PeerLinkState::RELAY_FALLBACK;
+                } else {
+                    new_link_state = PeerLinkState::OFFLINE;
+                }
+                break;
+        }
+        if (link->link_state != new_link_state) {
+            link->link_state = new_link_state;
+            log().debug("Peer {} link: {} -> {}",
+                       peer_id,
+                       peer_link_state_name(link->link_state),
+                       peer_link_state_name(new_link_state));
         }
 
-        // 更新对端链路状态
-        update_peer_link_state(peer_id);
+        lock.unlock();
 
-        // 更新数据面状态
+        // 更新数据面状态（在锁外）
         update_data_plane_state_client();
     }
 }

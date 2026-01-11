@@ -351,88 +351,31 @@ enum class NodeEvent : uint8_t {
 const char* node_event_name(NodeEvent event);
 
 // ============================================================================
-// 状态变更回调
+// 状态变更回调（简化版：仅保留有业务逻辑的回调，日志改用内部 log()）
 // ============================================================================
 struct NodeStateCallbacks {
-    // ========== 通用回调 ==========
+    // ========== Controller 端回调（有实际业务逻辑）==========
 
-    // 连接状态变更
-    std::function<void(NodeId node_id, NodeConnectionState old_state, NodeConnectionState new_state)>
-        on_connection_state_change;
+    // 客户端上线（Controller 端使用：通知其他客户端）
+    std::function<void(NodeId node_id, NetworkId network_id)> on_client_online;
 
-    // 节点上线/下线
-    std::function<void(NodeId node_id, bool online)> on_node_status_change;
+    // 客户端下线（Controller 端使用：通知其他客户端）
+    std::function<void(NodeId node_id, NetworkId network_id)> on_client_offline;
 
-    // 端点更新
+    // 端点更新（Controller 端使用：更新端点缓存）
     std::function<void(NodeId node_id, const std::vector<Endpoint>& endpoints)>
         on_endpoint_update;
 
-    // 路由变更
+    // 路由变更（Controller 端使用：广播路由）
     std::function<void(NodeId node_id, const std::vector<RouteInfo>& added,
                        const std::vector<RouteInfo>& removed)>
         on_route_change;
 
-    // P2P 状态变更
-    std::function<void(NodeId node_id, NodeId peer_id, P2PConnectionState old_state, P2PConnectionState new_state)>
-        on_p2p_state_change;
+    // ========== Client 端回调（有实际业务逻辑）==========
 
-    // ========== Controller 端回调 ==========
-
-    // 会话状态变更（Controller 端使用）
-    std::function<void(NodeId node_id, ClientSessionState old_state, ClientSessionState new_state)>
-        on_session_state_change;
-
-    // Relay 会话状态变更（Controller 视角）
-    std::function<void(NodeId node_id, RelaySessionState old_state, RelaySessionState new_state)>
-        on_relay_state_change;
-
-    // 数据通道变更
-    std::function<void(NodeId node_id, DataChannelState old_state, DataChannelState new_state)>
-        on_data_channel_change;
-
-    // 客户端上线（Controller 端使用）
-    std::function<void(NodeId node_id, NetworkId network_id)> on_client_online;
-
-    // 客户端下线（Controller 端使用）
-    std::function<void(NodeId node_id, NetworkId network_id)> on_client_offline;
-
-    // P2P 协商状态变更（Controller 端使用）
-    std::function<void(NodeId initiator, NodeId responder, P2PNegotiationPhase phase)>
-        on_p2p_negotiation_change;
-
-    // ========== Client 端回调 ==========
-
-    // 全局连接阶段变更（Client 端使用）
+    // 全局连接阶段变更（Client 端使用：更新 ClientState 兼容状态）
     std::function<void(ConnectionPhase old_phase, ConnectionPhase new_phase)>
         on_connection_phase_change;
-
-    // 控制面状态变更（Client 端使用）
-    std::function<void(ControlPlaneState old_state, ControlPlaneState new_state)>
-        on_control_plane_change;
-
-    // 数据面状态变更（Client 端使用）
-    std::function<void(DataPlaneState old_state, DataPlaneState new_state)>
-        on_data_plane_change;
-
-    // Relay 连接状态变更（Client 端使用，支持多 Relay）
-    std::function<void(const std::string& relay_id, RelayConnectionState old_state, RelayConnectionState new_state)>
-        on_relay_connection_change;
-
-    // 端点同步状态变更（Client 端使用）
-    std::function<void(ClientEndpointSyncState old_state, ClientEndpointSyncState new_state)>
-        on_endpoint_sync_change;
-
-    // 路由同步状态变更（Client 端使用）
-    std::function<void(RouteSyncState old_state, RouteSyncState new_state)>
-        on_route_sync_change;
-
-    // 对端连接状态变更（Client 端使用，组合视图）
-    std::function<void(NodeId peer_id, PeerLinkState old_state, PeerLinkState new_state)>
-        on_peer_link_state_change;
-
-    // 对端数据路径变更（Client 端使用）
-    std::function<void(NodeId peer_id, PeerDataPath old_path, PeerDataPath new_path)>
-        on_peer_data_path_change;
 };
 
 // ============================================================================

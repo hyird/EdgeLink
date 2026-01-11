@@ -1700,10 +1700,10 @@ void Client::setup_state_machine() {
     state_machine_.set_p2p_keepalive_timeout(config_.p2p.keepalive_timeout * 1000);
     state_machine_.set_p2p_retry_interval(config_.p2p.retry_interval * 1000);
 
-    // 设置状态机回调
+    // 设置状态机回调（简化后只保留有业务逻辑的回调）
     NodeStateCallbacks callbacks;
 
-    // 连接阶段变更回调（Client 端）
+    // 连接阶段变更回调（更新旧的 ClientState 以保持兼容）
     callbacks.on_connection_phase_change = [this](ConnectionPhase old_phase, ConnectionPhase new_phase) {
         log().info("Connection phase: {} -> {}",
                    connection_phase_name(old_phase), connection_phase_name(new_phase));
@@ -1731,68 +1731,8 @@ void Client::setup_state_machine() {
         }
     };
 
-    // 控制面状态变更回调（Client 端）
-    callbacks.on_control_plane_change = [this](ControlPlaneState old_state, ControlPlaneState new_state) {
-        log().debug("Control plane: {} -> {}",
-                    control_plane_state_name(old_state), control_plane_state_name(new_state));
-    };
-
-    // 数据面状态变更回调（Client 端）
-    callbacks.on_data_plane_change = [this](DataPlaneState old_state, DataPlaneState new_state) {
-        log().debug("Data plane: {} -> {}",
-                    data_plane_state_name(old_state), data_plane_state_name(new_state));
-    };
-
-    // Relay 连接状态变更回调（Client 端）
-    callbacks.on_relay_connection_change = [this](const std::string& relay_id,
-                                                    RelayConnectionState old_state,
-                                                    RelayConnectionState new_state) {
-        log().info("Relay {}: {} -> {}",
-                   relay_id,
-                   relay_connection_state_name(old_state),
-                   relay_connection_state_name(new_state));
-    };
-
-    // 对端链接状态变更回调（Client 端）
-    callbacks.on_peer_link_state_change = [this](NodeId peer_id,
-                                                   PeerLinkState old_state,
-                                                   PeerLinkState new_state) {
-        log().info("Peer {} link state: {} -> {}",
-                   peers_.get_peer_ip_str(peer_id),
-                   peer_link_state_name(old_state),
-                   peer_link_state_name(new_state));
-    };
-
-    // 对端数据路径变更回调（Client 端）
-    callbacks.on_peer_data_path_change = [this](NodeId peer_id,
-                                                  PeerDataPath old_path,
-                                                  PeerDataPath new_path) {
-        log().debug("Peer {} data path: {} -> {}",
-                    peers_.get_peer_ip_str(peer_id),
-                    peer_data_path_name(old_path),
-                    peer_data_path_name(new_path));
-
-        // 更新 PeerManager 的连接状态
-        P2PStatus status = P2PStatus::DISCONNECTED;
-        switch (new_path) {
-            case PeerDataPath::P2P:
-                status = P2PStatus::P2P;
-                break;
-            case PeerDataPath::RELAY:
-                status = P2PStatus::RELAY_ONLY;
-                break;
-            default:
-                status = P2PStatus::DISCONNECTED;
-                break;
-        }
-        peers_.set_connection_status(peer_id, status);
-    };
-
-    // 路由同步状态变更回调（Client 端）
-    callbacks.on_route_sync_change = [this](RouteSyncState old_state, RouteSyncState new_state) {
-        log().debug("Route sync: {} -> {}",
-                    route_sync_state_name(old_state), route_sync_state_name(new_state));
-    };
+    // 其他状态变更通过状态机内部日志输出，无需回调
+    // PeerManager 更新已移至 p2p_state_handler() 协程
 
     state_machine_.set_callbacks(std::move(callbacks));
 }
