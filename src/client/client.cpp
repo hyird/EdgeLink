@@ -319,6 +319,15 @@ void Client::setup_callbacks() {
         p2p_cbs.on_state_change = [this](NodeId peer_id, P2PState state) {
             log().info("P2P state changed: peer={}, state={}",
                        peers_.get_peer_ip_str(peer_id), p2p_state_name(state));
+
+            // 更新 PeerManager 的连接状态
+            P2PStatus status = P2PStatus::DISCONNECTED;
+            if (state == P2PState::CONNECTED) {
+                status = P2PStatus::P2P;
+            } else if (state == P2PState::RELAY_ONLY || state == P2PState::PUNCHING || state == P2PState::RESOLVING) {
+                status = P2PStatus::RELAY_ONLY;
+            }
+            peers_.set_connection_status(peer_id, status);
         };
 
         p2p_cbs.on_data = [this](NodeId peer_id, std::span<const uint8_t> data) {
