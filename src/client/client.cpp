@@ -298,17 +298,29 @@ void Client::setup_callbacks() {
             asio::co_spawn(ioc_, announce_configured_routes(), asio::detached);
         }
 
-        // Start P2P manager and report endpoints
+        // Start P2P manager
         if (p2p_mgr_) {
             auto self = shared_from_this();
             asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
                 try {
-                    bool started = co_await self->p2p_mgr_->start();
-                    if (started) {
-                        // 获取 control_ 的本地拷贝，避免 TOCTOU 问题
+                    co_await self->p2p_mgr_->start();
+                } catch (const std::exception& e) {
+                    log().error("P2P manager failed: {}", e.what());
+                }
+            }(), asio::detached);
+
+            // 延迟上报端点，确保 P2P manager 完全启动
+            asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
+                try {
+                    // 等待一小段时间让 P2P manager 启动
+                    asio::steady_timer timer(self->ioc_);
+                    timer.expires_after(std::chrono::milliseconds(100));
+                    co_await timer.async_wait(asio::use_awaitable);
+
+                    // 检查状态并上报端点
+                    if (self->p2p_mgr_ && self->p2p_mgr_->is_running()) {
                         auto ctrl = self->control_;
                         if (ctrl && ctrl->is_connected()) {
-                            // 上报端点给 Controller
                             auto endpoints = self->p2p_mgr_->our_endpoints();
                             log().debug("Reporting {} endpoints to controller", endpoints.size());
                             if (!endpoints.empty()) {
@@ -318,7 +330,7 @@ void Client::setup_callbacks() {
                         }
                     }
                 } catch (const std::exception& e) {
-                    log().error("P2P manager failed: {}", e.what());
+                    log().debug("Endpoint report failed: {}", e.what());
                 }
             }(), asio::detached);
         }
