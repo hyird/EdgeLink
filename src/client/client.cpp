@@ -159,6 +159,19 @@ void Client::setup_callbacks() {
             }
         }
 
+        // 重连后重发端点（如果之前有上报过的端点）
+        {
+            std::lock_guard lock(endpoints_mutex_);
+            if (control_ && control_->is_connected() && !last_reported_endpoints_.empty()) {
+                auto endpoints = last_reported_endpoints_;
+                auto self = shared_from_this();
+                asio::co_spawn(ioc_, [self, endpoints]() -> asio::awaitable<void> {
+                    co_await self->control_->send_endpoint_update(endpoints);
+                    log().info("Resent {} endpoints after reconnect", endpoints.size());
+                }(), asio::detached);
+            }
+        }
+
         // P2P 打洞延迟到首次发送数据时触发
     };
 
@@ -402,6 +415,12 @@ void Client::setup_callbacks() {
         };
 
         p2p_cbs.on_endpoints_ready = [this](const std::vector<Endpoint>& endpoints) {
+            // 保存端点（用于重连后重发）
+            {
+                std::lock_guard lock(endpoints_mutex_);
+                last_reported_endpoints_ = endpoints;
+            }
+
             // 上报端点给 Controller
             if (control_ && control_->is_connected()) {
                 log().debug("Sending endpoint update: {} endpoints", endpoints.size());

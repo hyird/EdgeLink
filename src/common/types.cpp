@@ -59,6 +59,8 @@ const char* frame_type_name(FrameType type) {
         case FrameType::P2P_PONG: return "P2P_PONG";
         case FrameType::P2P_KEEPALIVE: return "P2P_KEEPALIVE";
         case FrameType::P2P_STATUS: return "P2P_STATUS";
+        case FrameType::ENDPOINT_UPDATE: return "ENDPOINT_UPDATE";
+        case FrameType::ENDPOINT_ACK: return "ENDPOINT_ACK";
         case FrameType::SERVER_REGISTER: return "SERVER_REGISTER";
         case FrameType::SERVER_REGISTER_RESP: return "SERVER_REGISTER_RESP";
         case FrameType::SERVER_NODE_LOC: return "SERVER_NODE_LOC";

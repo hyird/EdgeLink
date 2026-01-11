@@ -108,9 +108,9 @@ enable = true
 # accept_routes = true
 
 # Route announcement refresh interval in seconds
-# Periodically re-announce routes to handle packet loss (0 = announce only at startup)
+# Periodically re-announce routes to ensure sync (Controller will ACK)
 # [热重载: 下次循环生效]
-announce_interval = 30
+announce_interval = 60
 
 [p2p]
 # P2P NAT traversal configuration
@@ -123,13 +123,13 @@ enabled = true
 # [热重载: 下次启动生效]
 bind_port = 0
 
-# Keepalive interval in seconds (P2P connection health check)
+# Keepalive interval in seconds (fast detection for seamless switching)
 # [热重载: 下次循环生效]
-keepalive_interval = 15
+keepalive_interval = 1
 
-# Keepalive timeout in seconds (connection considered dead after this)
+# Keepalive timeout in seconds (switch to relay immediately when P2P fails)
 # [热重载: 下次循环生效]
-keepalive_timeout = 45
+keepalive_timeout = 3
 
 # Hole punching timeout in seconds
 # [热重载: 立即生效]
@@ -156,9 +156,9 @@ retry_interval = 60
 stun_timeout = 5000
 
 # Endpoint refresh interval in seconds (re-query STUN and report endpoints)
-# Helps maintain accurate endpoint info when NAT mappings change
+# Controller will ACK each update to ensure delivery
 # [热重载: 下次循环生效]
-endpoint_refresh_interval = 30
+endpoint_refresh_interval = 60
 
 [log]
 # Log level: trace, debug, info, warn, error

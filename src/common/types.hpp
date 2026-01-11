@@ -75,6 +75,7 @@ enum class FrameType : uint8_t {
     P2P_KEEPALIVE = 0x44,
     P2P_STATUS = 0x45,
     ENDPOINT_UPDATE = 0x46,  // 客户端上报自己的端点
+    ENDPOINT_ACK = 0x47,     // 端点上报确认
 
     // Server (0x50-0x5F)
     SERVER_REGISTER = 0x50,

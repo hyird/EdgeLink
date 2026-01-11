@@ -326,10 +326,21 @@ struct P2PStatusMsg {
 
 // ENDPOINT_UPDATE (0x46) - 客户端上报自己的端点
 struct EndpointUpdate {
+    uint32_t request_id = 0;          // 请求 ID，用于确认匹配
     std::vector<Endpoint> endpoints;  // 本节点的端点列表
 
     std::vector<uint8_t> serialize() const;
     static std::expected<EndpointUpdate, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// ENDPOINT_ACK (0x47) - 端点上报确认
+struct EndpointAck {
+    uint32_t request_id = 0;          // 对应的请求 ID
+    bool success = true;              // 是否成功
+    uint8_t endpoint_count = 0;       // 收到的端点数量
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<EndpointAck, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ============================================================================

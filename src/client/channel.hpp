@@ -98,7 +98,17 @@ public:
     asio::awaitable<void> send_p2p_init(const P2PInit& init);
 
     // Send ENDPOINT_UPDATE (report our endpoints to Controller)
-    asio::awaitable<void> send_endpoint_update(const std::vector<Endpoint>& endpoints);
+    // Returns request_id for tracking acknowledgement
+    asio::awaitable<uint32_t> send_endpoint_update(const std::vector<Endpoint>& endpoints);
+
+    // Check if last endpoint update was acknowledged
+    bool is_endpoint_ack_pending() const { return endpoint_ack_pending_; }
+
+    // Get last reported endpoints (for resend on reconnect)
+    const std::vector<Endpoint>& pending_endpoints() const { return pending_endpoints_; }
+
+    // Resend pending endpoints (called after reconnect)
+    asio::awaitable<void> resend_pending_endpoints();
 
     // Set callbacks
     void set_callbacks(ControlChannelCallbacks callbacks);
@@ -124,6 +134,7 @@ private:
     asio::awaitable<void> handle_route_update(const Frame& frame);
     asio::awaitable<void> handle_route_ack(const Frame& frame);
     asio::awaitable<void> handle_p2p_endpoint(const Frame& frame);
+    asio::awaitable<void> handle_endpoint_ack(const Frame& frame);
     asio::awaitable<void> handle_pong(const Frame& frame);
     asio::awaitable<void> handle_error(const Frame& frame);
 
@@ -164,6 +175,12 @@ private:
 
     // Route request tracking
     uint32_t route_request_id_ = 0;
+
+    // Endpoint update tracking
+    std::atomic<uint32_t> endpoint_request_id_{0};  // 下一个请求 ID
+    uint32_t pending_endpoint_request_id_ = 0;       // 待确认的请求 ID
+    std::atomic<bool> endpoint_ack_pending_{false};  // 是否有待确认的请求
+    std::vector<Endpoint> pending_endpoints_;        // 最后上报的端点（用于重发）
 
     ControlChannelCallbacks callbacks_;
 };

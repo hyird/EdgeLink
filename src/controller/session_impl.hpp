@@ -654,7 +654,8 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_endpoint_update(con
         co_return;
     }
 
-    log().debug("Node {} reported {} endpoints", this->node_id_, update->endpoints.size());
+    log().debug("Node {} reported {} endpoints (request_id={})",
+                this->node_id_, update->endpoints.size(), update->request_id);
     for (const auto& ep : update->endpoints) {
         log().debug("  - {}.{}.{}.{}:{} (type={})",
                     ep.address[0], ep.address[1], ep.address[2], ep.address[3],
@@ -663,6 +664,13 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_endpoint_update(con
 
     // 存储端点到 SessionManager
     this->manager_.update_node_endpoints(this->node_id_, update->endpoints);
+
+    // 发送确认
+    EndpointAck ack;
+    ack.request_id = update->request_id;
+    ack.success = true;
+    ack.endpoint_count = static_cast<uint8_t>(std::min(update->endpoints.size(), size_t(255)));
+    co_await this->send_frame(FrameType::ENDPOINT_ACK, ack.serialize());
 }
 
 template<typename StreamType>

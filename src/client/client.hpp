@@ -58,7 +58,7 @@ struct ClientConfig {
     std::vector<std::string> advertise_routes;  // CIDR格式，如 "192.168.1.0/24", "10.0.0.0/8"
     bool exit_node = false;                     // 作为出口节点，公告 0.0.0.0/0
     bool accept_routes = true;                  // 是否接受其他节点的路由并应用到系统
-    std::chrono::seconds route_announce_interval{30};  // 路由公告刷新间隔（0 = 仅启动时公告一次）
+    std::chrono::seconds route_announce_interval{60};  // 路由公告刷新间隔（秒，定期广播确保同步）
 
     // Logging settings (for hot-reload)
     std::string log_level = "debug";    // 日志级别
@@ -68,15 +68,15 @@ struct ClientConfig {
     struct P2PConfig {
         bool enabled = true;                    // 启用 P2P 直连
         uint16_t bind_port = 0;                 // UDP 绑定端口（0 = 随机）
-        uint32_t keepalive_interval = 15;       // Keepalive 间隔（秒）
-        uint32_t keepalive_timeout = 45;        // Keepalive 超时（秒）
+        uint32_t keepalive_interval = 1;        // Keepalive 间隔（秒，无感知切换需要快速检测）
+        uint32_t keepalive_timeout = 3;         // Keepalive 超时（秒，不通立马切回 Relay）
         uint32_t punch_timeout = 10;            // 打洞超时（秒）
         uint32_t punch_batch_count = 5;         // 打洞批次数 (EasyTier: 5)
         uint32_t punch_batch_size = 2;          // 每批发送包数 (EasyTier: 2)
         uint32_t punch_batch_interval = 400;    // 批次间隔（毫秒, EasyTier: 400）
         uint32_t retry_interval = 60;           // 失败后重试间隔（秒）
         uint32_t stun_timeout = 5000;           // STUN 查询超时（毫秒）
-        uint32_t endpoint_refresh_interval = 30; // 端点刷新间隔（秒，定期重新查询 STUN 并上报）
+        uint32_t endpoint_refresh_interval = 60; // 端点刷新间隔（秒，定期广播确保同步）
     } p2p;
 
     // 获取当前使用的controller host
@@ -299,6 +299,10 @@ private:
     // P2P support
     std::unique_ptr<EndpointManager> endpoint_mgr_;
     std::unique_ptr<P2PManager> p2p_mgr_;
+
+    // 保存最后上报的端点（用于重连后重发）
+    std::vector<Endpoint> last_reported_endpoints_;
+    std::mutex endpoints_mutex_;
 
     ClientCallbacks callbacks_;
 };

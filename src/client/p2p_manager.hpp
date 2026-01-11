@@ -35,15 +35,15 @@ const char* p2p_state_name(P2PState state);
 struct P2PConfig {
     bool enabled = true;
     uint16_t bind_port = 0;                     // 0 = 随机端口
-    uint32_t keepalive_interval_sec = 15;       // Keepalive 间隔 (秒)
-    uint32_t keepalive_timeout_sec = 45;        // Keepalive 超时 (秒)
+    uint32_t keepalive_interval_sec = 1;        // Keepalive 间隔 (秒，无感知切换需要快速检测)
+    uint32_t keepalive_timeout_sec = 3;         // Keepalive 超时 (秒，不通立马切回 Relay)
     uint32_t punch_timeout_sec = 10;            // 打洞超时 (秒)
     uint32_t punch_batch_count = 5;             // 打洞批次数 (EasyTier: 5)
     uint32_t punch_batch_size = 2;              // 每批发送包数 (EasyTier: 2)
     uint32_t punch_batch_interval_ms = 400;     // 批次间隔 (毫秒, EasyTier: 400)
     uint32_t retry_interval_sec = 60;           // 失败后重试间隔 (秒)
     uint32_t stun_timeout_ms = 5000;            // STUN 查询超时 (毫秒)
-    uint32_t endpoint_refresh_sec = 30;         // 端点刷新间隔 (秒)，定期重新查询 STUN 并上报
+    uint32_t endpoint_refresh_sec = 60;         // 端点刷新间隔 (秒)，定期广播确保同步
 };
 
 // 对端 P2P 状态

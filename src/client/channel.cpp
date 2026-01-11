@@ -515,6 +515,9 @@ asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
         case FrameType::P2P_ENDPOINT:
             co_await handle_p2p_endpoint(frame);
             break;
+        case FrameType::ENDPOINT_ACK:
+            co_await handle_endpoint_ack(frame);
+            break;
         case FrameType::PONG:
             co_await handle_pong(frame);
             break;
@@ -676,11 +679,55 @@ asio::awaitable<void> ControlChannel::send_p2p_init(const P2PInit& init) {
     log().debug("Sent P2P_INIT: target_node={}, init_seq={}", init.target_node, init.init_seq);
 }
 
-asio::awaitable<void> ControlChannel::send_endpoint_update(const std::vector<Endpoint>& endpoints) {
+asio::awaitable<uint32_t> ControlChannel::send_endpoint_update(const std::vector<Endpoint>& endpoints) {
     EndpointUpdate update;
+    update.request_id = ++endpoint_request_id_;
     update.endpoints = endpoints;
+
+    // 保存待确认状态
+    pending_endpoint_request_id_ = update.request_id;
+    pending_endpoints_ = endpoints;
+    endpoint_ack_pending_ = true;
+
     co_await send_frame(FrameType::ENDPOINT_UPDATE, update.serialize());
-    log().debug("Sent ENDPOINT_UPDATE: {} endpoints", endpoints.size());
+    log().debug("Sent ENDPOINT_UPDATE: {} endpoints (request_id={})",
+                endpoints.size(), update.request_id);
+
+    co_return update.request_id;
+}
+
+asio::awaitable<void> ControlChannel::resend_pending_endpoints() {
+    if (pending_endpoints_.empty()) {
+        co_return;
+    }
+
+    EndpointUpdate update;
+    update.request_id = ++endpoint_request_id_;
+    update.endpoints = pending_endpoints_;
+
+    pending_endpoint_request_id_ = update.request_id;
+    endpoint_ack_pending_ = true;
+
+    co_await send_frame(FrameType::ENDPOINT_UPDATE, update.serialize());
+    log().info("Resent ENDPOINT_UPDATE after reconnect: {} endpoints (request_id={})",
+               update.endpoints.size(), update.request_id);
+}
+
+asio::awaitable<void> ControlChannel::handle_endpoint_ack(const Frame& frame) {
+    auto ack = EndpointAck::parse(frame.payload);
+    if (!ack) {
+        log().error("Failed to parse ENDPOINT_ACK");
+        co_return;
+    }
+
+    if (ack->request_id == pending_endpoint_request_id_) {
+        endpoint_ack_pending_ = false;
+        log().debug("Received ENDPOINT_ACK: request_id={}, success={}, count={}",
+                    ack->request_id, ack->success, ack->endpoint_count);
+    } else {
+        log().debug("Received ENDPOINT_ACK with unexpected request_id={} (expected {})",
+                    ack->request_id, pending_endpoint_request_id_);
+    }
 }
 
 asio::awaitable<void> ControlChannel::handle_p2p_endpoint(const Frame& frame) {

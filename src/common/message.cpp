@@ -1296,6 +1296,7 @@ std::expected<P2PStatusMsg, ParseError> P2PStatusMsg::parse(std::span<const uint
 
 std::vector<uint8_t> EndpointUpdate::serialize() const {
     BinaryWriter writer;
+    writer.write_u32_be(request_id);
     writer.write_u16_be(static_cast<uint16_t>(endpoints.size()));
     for (const auto& ep : endpoints) {
         serialization::write_endpoint(writer, ep);
@@ -1306,6 +1307,12 @@ std::vector<uint8_t> EndpointUpdate::serialize() const {
 std::expected<EndpointUpdate, ParseError> EndpointUpdate::parse(std::span<const uint8_t> data) {
     BinaryReader reader(data);
     EndpointUpdate msg;
+
+    auto req_id = reader.read_u32_be();
+    if (!req_id) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+    msg.request_id = *req_id;
 
     auto count = reader.read_u16_be();
     if (!count) {
@@ -1320,6 +1327,43 @@ std::expected<EndpointUpdate, ParseError> EndpointUpdate::parse(std::span<const 
         }
         msg.endpoints.push_back(*ep);
     }
+
+    return msg;
+}
+
+// ============================================================================
+// EndpointAck
+// ============================================================================
+
+std::vector<uint8_t> EndpointAck::serialize() const {
+    BinaryWriter writer;
+    writer.write_u32_be(request_id);
+    writer.write_u8(success ? 1 : 0);
+    writer.write_u8(endpoint_count);
+    return writer.take();
+}
+
+std::expected<EndpointAck, ParseError> EndpointAck::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    EndpointAck msg;
+
+    auto req_id = reader.read_u32_be();
+    if (!req_id) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+    msg.request_id = *req_id;
+
+    auto succ = reader.read_u8();
+    if (!succ) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+    msg.success = (*succ != 0);
+
+    auto cnt = reader.read_u8();
+    if (!cnt) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+    msg.endpoint_count = *cnt;
 
     return msg;
 }
