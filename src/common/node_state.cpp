@@ -1676,10 +1676,11 @@ void NodeStateMachine::set_peer_data_path_internal(NodeId peer_id, PeerDataPath 
                 break;
         }
         if (link->link_state != new_link_state) {
+            auto old_link_state = link->link_state;
             link->link_state = new_link_state;
             log().debug("Peer {} link: {} -> {}",
                        peer_id,
-                       peer_link_state_name(link->link_state),
+                       peer_link_state_name(old_link_state),
                        peer_link_state_name(new_link_state));
         }
 
