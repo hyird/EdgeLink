@@ -2446,7 +2446,7 @@ PUNCHING 子状态:
 
 ### 4.6 统一状态机架构
 
-为了实现 Client、Controller、Relay 之间的状态同步，系统采用分层状态机架构：
+为了实现 Client、Controller、Relay 之间的状态同步，系统采用统一的 `NodeStateMachine` 架构：
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -2458,20 +2458,26 @@ PUNCHING 子状态:
 │   └──────┬──────┘    └──────┬──────┘    └──────┬──────┘        │
 │          │                  │                  │                │
 │   ┌──────▼──────┐    ┌──────▼──────┐    ┌──────▼──────┐        │
-│   │ Connection  │    │ClientSession│    │ NodeState   │        │
-│   │ StateMachine│    │StateMachine │    │  Machine    │        │
+│   │ NodeState   │    │ NodeState   │    │ NodeState   │        │
+│   │  Machine    │    │  Machine    │    │  Machine    │        │
+│   │ (单实例)    │    │ (每客户端)   │    │ (单实例)    │        │
 │   └──────┬──────┘    └──────┬──────┘    └──────┬──────┘        │
 │          │                  │                  │                │
-│          └─────────────┬────┴─────────────┬────┘                │
-│                        │                  │                     │
-│                 ┌──────▼──────┐    ┌──────▼──────┐              │
-│                 │ NodeState   │    │ 共享类型    │              │
-│                 │  Machine    │    │ 定义        │              │
-│                 │ (统一状态)   │    │connection_  │              │
-│                 └─────────────┘    │types.hpp    │              │
-│                                    └─────────────┘              │
+│          └─────────────┬────┴──────────────────┘                │
+│                        │                                        │
+│                 ┌──────▼────────────────────────────┐           │
+│                 │ common/node_state.hpp             │           │
+│                 │ common/connection_types.hpp       │           │
+│                 │ (统一状态定义和事件类型)            │           │
+│                 └───────────────────────────────────┘           │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**设计优势**：
+- **代码复用**：Client、Controller、Relay 共享同一套状态机实现
+- **类型统一**：使用统一的 `NodeEvent` 事件类型
+- **状态一致**：各组件对节点状态的理解完全一致
+- **易于维护**：修改状态机逻辑只需改动一处
 
 #### 4.6.1 共享状态类型定义
 
@@ -2524,57 +2530,53 @@ PUNCHING 子状态:
 | ROUTE_ANNOUNCE     | 路由公告                 |
 | HEARTBEAT_TIMEOUT  | 心跳超时                 |
 
-#### 4.6.2 Client 连接状态机 (ConnectionStateMachine)
+#### 4.6.2 Client 端 NodeStateMachine
 
-Client 端使用 `ConnectionStateMachine` 管理控制面和数据面的分离：
+Client 使用单个 `NodeStateMachine` 实例管理自身的连接状态：
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                   ConnectionStateMachine                        │
+│                   Client NodeStateMachine                        │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│   控制面状态                      数据面状态                     │
-│   ┌───────────────┐              ┌───────────────┐              │
-│   │ ControlPlane  │              │  DataPlane    │              │
-│   │   State       │              │   State       │              │
-│   ├───────────────┤              ├───────────────┤              │
-│   │ DISCONNECTED  │              │ NO_CHANNEL    │              │
-│   │ CONNECTING    │              │ RELAY_ONLY    │              │
-│   │ AUTHENTICATING│              │ P2P_PRIMARY   │              │
-│   │ CONFIGURING   │              │ HYBRID        │              │
-│   │ ONLINE        │              │ P2P_ONLY      │              │
-│   └───────────────┘              └───────────────┘              │
+│   self_id_: NodeId (本机节点ID)                                  │
+│   self_role_: NodeRole::CLIENT                                  │
+│                                                                 │
+│   控制面状态 (ControlPlaneState)     数据面状态 (DataPlaneState) │
+│   ┌───────────────┐                  ┌───────────────┐          │
+│   │ DISCONNECTED  │                  │ OFFLINE       │          │
+│   │ CONNECTING    │                  │ RELAY_ONLY    │          │
+│   │ AUTHENTICATING│                  │ HYBRID        │          │
+│   │ CONFIGURING   │                  │ DEGRADED      │          │
+│   │ READY         │                  └───────────────┘          │
+│   │ RECONNECTING  │                                             │
+│   └───────────────┘                                             │
 │                                                                 │
 │   组合连接阶段 (ConnectionPhase)                                │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │ OFFLINE → CONTROL_ONLY → RELAY_READY → P2P_AVAILABLE    │   │
-│   │     │          │              │              │           │   │
-│   │     │          ▼              ▼              ▼           │   │
-│   │     │   (仅控制面)    (Relay可用)    (P2P可用)          │   │
-│   │     │                                                    │   │
-│   │     └───────────────► DEGRADED (部分功能可用)           │   │
+│   │ OFFLINE → AUTHENTICATING → CONFIGURING → ESTABLISHING  │   │
+│   │                                              │           │   │
+│   │                                              ▼           │   │
+│   │         RECONNECTING ◄──────────────── ONLINE           │   │
 │   └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
-│   多 Relay 支持                                                 │
+│   Relay 连接状态                                                 │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │ relay_states_: map<relay_id, RelayInfo>                 │   │
+│   │ relay_states_: map<relay_id, RelayState>                │   │
 │   │                                                         │   │
-│   │ RelayInfo:                                              │   │
+│   │ RelayState:                                             │   │
 │   │   - relay_id: string                                    │   │
-│   │   - state: RelayConnectionState                         │   │
-│   │   - latency_ms: uint16_t                                │   │
+│   │   - connection_state: RelayConnectionState              │   │
 │   │   - is_primary: bool                                    │   │
 │   └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
 │   对端连接状态                                                   │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │ peer_states_: map<node_id, PeerState>                   │   │
+│   │ peers_: map<NodeId, PeerInfo>                           │   │
 │   │                                                         │   │
-│   │ PeerState:                                              │   │
-│   │   - relay_reachable: bool                               │   │
-│   │   - p2p_state: P2PConnectionState                       │   │
-│   │   - preferred_path: DataPath (RELAY/P2P)                │   │
-│   │   - p2p_addr/port: Endpoint                             │   │
+│   │ PeerInfo:                                               │   │
+│   │   - data_path: PeerDataPath (RELAY/P2P/UNKNOWN)         │   │
+│   │   - link_state: PeerLinkState                           │   │
 │   │   - latency_ms: uint16_t                                │   │
 │   └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
@@ -2583,56 +2585,61 @@ Client 端使用 `ConnectionStateMachine` 管理控制面和数据面的分离�
 **事件处理流程**：
 
 ```cpp
+// Client 初始化状态机
+Client::Client(...) : state_machine_(crypto_.node_id(), NodeRole::CLIENT) {}
+
 // 状态机事件处理
-state_machine_.handle_event(StateEvent::AUTH_SUCCESS);     // 认证成功
-state_machine_.handle_event(StateEvent::CONFIG_RECEIVED);  // 配置接收
-state_machine_.handle_relay_event(relay_id, StateEvent::RELAY_CONNECTED);  // Relay连接
-state_machine_.handle_peer_event(peer_id, StateEvent::PEER_ONLINE);       // 对端上线
+state_machine_.set_control_plane_state(ControlPlaneState::CONFIGURING);
+state_machine_.handle_event(crypto_.node_id(), NodeEvent::AUTH_SUCCESS);
+
+state_machine_.set_control_plane_state(ControlPlaneState::READY);
+state_machine_.handle_event(crypto_.node_id(), NodeEvent::CONFIG_RECEIVED);
+
+// Relay 连接
+state_machine_.add_relay(relay_id, true);
+state_machine_.set_relay_connection_state(relay_id, RelayConnectionState::CONNECTED);
+
+// 对端状态
+state_machine_.add_peer(peer_id);
+state_machine_.set_peer_data_path(peer_id, PeerDataPath::RELAY);
+state_machine_.handle_event(peer_id, NodeEvent::PEER_ONLINE);
+
+// P2P 事件
+state_machine_.handle_p2p_event(crypto_.node_id(), peer_id, NodeEvent::P2P_PUNCH_SUCCESS);
+state_machine_.set_peer_data_path(peer_id, PeerDataPath::P2P);
 ```
 
-#### 4.6.3 Controller 客户端会话状态机 (ClientSessionStateMachine)
+#### 4.6.3 Controller 端 NodeStateMachine
 
-Controller 使用 `ClientSessionStateMachine` 管理所有连接的客户端状态：
+Controller 为每个连接的 Client 维护一个独立的 `NodeStateMachine` 实例：
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                  ClientSessionStateMachine                       │
+│                   Controller SessionManager                      │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│   client_states_: map<NodeId, ClientState>                      │
+│   client_state_machines_: map<NodeId, unique_ptr<NodeStateMachine>>   │
 │                                                                 │
-│   ClientState 结构:                                             │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │ 会话状态                                                 │   │
-│   │   session_state: ClientSessionState                     │   │
-│   │   relay_state: RelaySessionState                        │   │
-│   │                                                         │   │
-│   │ 认证信息                                                 │   │
-│   │   auth_key_hash: string                                 │   │
-│   │   session_key: array<uint8_t, 32>                       │   │
-│   │   auth_time: uint64_t                                   │   │
-│   │                                                         │   │
-│   │ 端点信息                                                 │   │
-│   │   endpoints: vector<Endpoint>                           │   │
-│   │   endpoint_state: EndpointState                         │   │
-│   │   endpoint_update_time: uint64_t                        │   │
-│   │                                                         │   │
-│   │ 路由信息                                                 │   │
-│   │   announced_routes: vector<RouteInfo>                   │   │
-│   │   route_update_time: uint64_t                           │   │
-│   │                                                         │   │
-│   │ P2P 协商                                                 │   │
-│   │   p2p_negotiations: map<NodeId, P2PNegotiation>         │   │
+│   │ NodeStateMachine(client_1)                              │   │
+│   │   - self_id_ = client_1_node_id                         │   │
+│   │   - self_role_ = NodeRole::CLIENT                       │   │
+│   │   - session_state, relay_state, endpoints, routes...    │   │
 │   └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
-│   回调接口:                                                      │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │ on_session_state_change(node_id, old, new)              │   │
-│   │ on_relay_state_change(node_id, old, new)                │   │
-│   │ on_client_online(node_id, network_id)                   │   │
-│   │ on_client_offline(node_id, network_id)                  │   │
-│   │ on_endpoint_update(node_id, endpoints)                  │   │
-│   │ on_route_update(node_id, added, removed)                │   │
+│   │ NodeStateMachine(client_2)                              │   │
+│   │   - self_id_ = client_2_node_id                         │   │
+│   │   - self_role_ = NodeRole::CLIENT                       │   │
+│   │   - session_state, relay_state, endpoints, routes...    │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   回调接口 (NodeStateCallbacks):                                 │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │ on_session_state_change(old, new)                       │   │
+│   │ on_relay_session_state_change(old, new)                 │   │
+│   │ on_endpoint_sync_state_change(old, new)                 │   │
+│   │ on_route_sync_state_change(old, new)                    │   │
 │   │ on_p2p_negotiation_change(initiator, responder, phase)  │   │
 │   └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
@@ -2641,16 +2648,30 @@ Controller 使用 `ClientSessionStateMachine` 管理所有连接的客户端状�
 **SessionManager 集成**：
 
 ```cpp
-// 会话注册时自动添加到状态机
-void SessionManager::register_control_session(NodeId node_id, ...) {
-    client_state_machine_.add_client(node_id);
-    client_state_machine_.handle_event(node_id, SessionEvent::CONTROL_CONNECT);
+// 获取或创建客户端状态机
+NodeStateMachine* SessionManager::get_or_create_state_machine(NodeId node_id, NetworkId network_id) {
+    std::unique_lock lock(state_machines_mutex_);
+    auto it = client_state_machines_.find(node_id);
+    if (it == client_state_machines_.end()) {
+        auto sm = std::make_unique<NodeStateMachine>(node_id, NodeRole::CLIENT);
+        sm->set_network_id(network_id);
+        // 设置回调...
+        it = client_state_machines_.emplace(node_id, std::move(sm)).first;
+    }
+    return it->second.get();
 }
 
-// 会话注销时自动触发下线回调
+// 会话注册
+void SessionManager::register_control_session(NodeId node_id, NetworkId network_id, ...) {
+    auto* sm = get_or_create_state_machine(node_id, network_id);
+    sm->handle_event(node_id, NodeEvent::CONTROL_CONNECT);
+}
+
+// 会话注销
 void SessionManager::unregister_control_session(NodeId node_id) {
-    client_state_machine_.handle_event(node_id, SessionEvent::CONTROL_DISCONNECT);
-    // 自动触发 on_client_offline，通知同网络其他节点
+    auto* sm = get_state_machine(node_id);
+    if (sm) sm->handle_event(node_id, NodeEvent::CONTROL_DISCONNECT);
+    // 自动触发回调，通知同网络其他节点
 }
 ```
 

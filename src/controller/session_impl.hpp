@@ -327,13 +327,13 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
                  this->node_id_, node->hostname, node->virtual_ip.to_string());
 
     // 通知状态机认证成功
-    this->manager_.handle_session_event(this->node_id_, SessionEvent::AUTH_SUCCESS);
+    this->manager_.handle_node_event(this->node_id_, NodeEvent::AUTH_SUCCESS);
 
     // Send CONFIG
     co_await send_config();
 
     // 通知状态机配置已发送
-    this->manager_.handle_session_event(this->node_id_, SessionEvent::CONFIG_SENT);
+    this->manager_.handle_node_event(this->node_id_, NodeEvent::CONFIG_SENT);
 
     // Notify other nodes about new peer
     co_await this->manager_.broadcast_config_update(this->network_id_, this->node_id_);
@@ -432,7 +432,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_config_ack(const Fr
     log().debug("Node {} acknowledged config version {}", this->node_id_, ack->version);
 
     // 通知状态机配置已确认
-    this->manager_.handle_session_event(this->node_id_, SessionEvent::CONFIG_ACK);
+    this->manager_.handle_node_event(this->node_id_, NodeEvent::CONFIG_ACK);
 }
 
 template<typename StreamType>

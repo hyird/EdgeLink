@@ -10,7 +10,7 @@
 #include "client/config_applier.hpp"
 #include "client/endpoint_manager.hpp"
 #include "client/p2p_manager.hpp"
-#include "client/connection_state.hpp"
+#include "common/node_state.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -182,12 +182,12 @@ public:
 
     CryptoEngine& crypto() { return crypto_; }
     PeerManager& peers() { return peers_; }
-    ConnectionStateMachine& state_machine() { return state_machine_; }
-    const ConnectionStateMachine& state_machine() const { return state_machine_; }
+    NodeStateMachine& state_machine() { return state_machine_; }
+    const NodeStateMachine& state_machine() const { return state_machine_; }
 
     // 统一状态机状态查询
-    ConnectionPhase connection_phase() const { return state_machine_.phase(); }
-    bool is_online() const { return state_machine_.is_online(); }
+    ConnectionPhase connection_phase() const { return state_machine_.connection_phase(); }
+    bool is_online() const { return state_machine_.is_client_connected(); }
 
     // Network routes (received from controller)
     const std::vector<RouteInfo>& routes() const { return routes_; }
@@ -264,7 +264,7 @@ private:
 
     CryptoEngine crypto_;
     PeerManager peers_;
-    ConnectionStateMachine state_machine_;  // 统一连接状态机
+    NodeStateMachine state_machine_;  // 统一节点状态机
 
     std::shared_ptr<ControlChannel> control_;
     std::shared_ptr<RelayChannel> relay_;

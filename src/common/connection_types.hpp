@@ -24,6 +24,110 @@ enum class ClientSessionState : uint8_t {
 const char* client_session_state_name(ClientSessionState state);
 
 // ============================================================================
+// 控制面状态 - Client 视角下与 Controller 的连接状态
+// ============================================================================
+enum class ControlPlaneState : uint8_t {
+    DISCONNECTED = 0,   // 未连接
+    CONNECTING,         // 连接中
+    AUTHENTICATING,     // 认证中（等待 AUTH_RESPONSE）
+    CONFIGURING,        // 配置中（等待 CONFIG）
+    READY,              // 就绪（已认证、已配置）
+    RECONNECTING,       // 重连中
+};
+
+const char* control_plane_state_name(ControlPlaneState state);
+
+// ============================================================================
+// 数据面状态 - Client 视角下数据传输通道状态
+// ============================================================================
+enum class DataPlaneState : uint8_t {
+    OFFLINE = 0,        // 离线（无可用数据通道）
+    RELAY_ONLY,         // 仅 Relay（Relay 已连接，P2P 未就绪）
+    HYBRID,             // 混合（Relay + 部分 P2P）
+    DEGRADED,           // 降级（Relay 断开，仅部分 P2P）
+};
+
+const char* data_plane_state_name(DataPlaneState state);
+
+// ============================================================================
+// 整体连接阶段 - Client 总体状态（组合控制面+数据面）
+// ============================================================================
+enum class ConnectionPhase : uint8_t {
+    OFFLINE = 0,        // 未连接
+    AUTHENTICATING,     // 认证中（控制面连接中）
+    CONFIGURING,        // 配置中（等待 CONFIG）
+    ESTABLISHING,       // 建立中（数据面连接中）
+    ONLINE,             // 在线（控制面+数据面就绪）
+    RECONNECTING,       // 重连中
+};
+
+const char* connection_phase_name(ConnectionPhase phase);
+
+// ============================================================================
+// 端点同步状态 - Client 视角下本节点端点的发现和上报状态
+// ============================================================================
+enum class ClientEndpointSyncState : uint8_t {
+    NOT_READY = 0,      // 未就绪（UDP socket 未初始化）
+    DISCOVERING,        // 发现中（STUN 查询中）
+    READY,              // 就绪（端点已发现）
+    UPLOADING,          // 上报中（等待 ACK）
+    SYNCED,             // 已同步（Controller 已确认）
+};
+
+const char* client_endpoint_sync_state_name(ClientEndpointSyncState state);
+
+// ============================================================================
+// 路由同步状态 - Client 视角
+// ============================================================================
+enum class RouteSyncState : uint8_t {
+    DISABLED = 0,       // 禁用（不接受路由）
+    PENDING,            // 待同步
+    SYNCING,            // 同步中
+    SYNCED,             // 已同步
+};
+
+const char* route_sync_state_name(RouteSyncState state);
+
+// ============================================================================
+// 对端数据路径 - Client 视角下每个对端的数据传输路径
+// ============================================================================
+enum class PeerDataPath : uint8_t {
+    UNKNOWN = 0,        // 未知（未尝试连接）
+    RELAY,              // 通过 Relay 转发
+    P2P,                // 通过 P2P 直连
+    UNREACHABLE,        // 不可达（对端离线或所有路径失败）
+};
+
+const char* peer_data_path_name(PeerDataPath path);
+
+// ============================================================================
+// 对端连接状态（组合视图）- Client 视角
+// ============================================================================
+enum class PeerLinkState : uint8_t {
+    UNKNOWN = 0,        // 未知（未尝试连接）
+    RESOLVING,          // 解析中（等待对端端点）
+    PUNCHING,           // 打洞中（NAT 穿透）
+    P2P_ACTIVE,         // P2P 活跃
+    RELAY_FALLBACK,     // Relay 回退（P2P 失败或超时）
+    OFFLINE,            // 对端离线
+};
+
+const char* peer_link_state_name(PeerLinkState state);
+
+// ============================================================================
+// Relay 连接状态 - Client 视角（支持多 Relay）
+// ============================================================================
+enum class RelayConnectionState : uint8_t {
+    DISCONNECTED = 0,   // 未连接
+    CONNECTING,         // 连接中
+    AUTHENTICATING,     // 认证中
+    CONNECTED,          // 已连接
+    RECONNECTING,       // 重连中
+};
+
+const char* relay_connection_state_name(RelayConnectionState state);
+
+// ============================================================================
 // Relay 会话状态 - Controller 视角下的 Relay 连接状态
 // ============================================================================
 enum class RelaySessionState : uint8_t {

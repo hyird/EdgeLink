@@ -14,6 +14,94 @@ const char* client_session_state_name(ClientSessionState state) {
     }
 }
 
+const char* control_plane_state_name(ControlPlaneState state) {
+    switch (state) {
+        case ControlPlaneState::DISCONNECTED: return "DISCONNECTED";
+        case ControlPlaneState::CONNECTING: return "CONNECTING";
+        case ControlPlaneState::AUTHENTICATING: return "AUTHENTICATING";
+        case ControlPlaneState::CONFIGURING: return "CONFIGURING";
+        case ControlPlaneState::READY: return "READY";
+        case ControlPlaneState::RECONNECTING: return "RECONNECTING";
+        default: return "UNKNOWN";
+    }
+}
+
+const char* data_plane_state_name(DataPlaneState state) {
+    switch (state) {
+        case DataPlaneState::OFFLINE: return "OFFLINE";
+        case DataPlaneState::RELAY_ONLY: return "RELAY_ONLY";
+        case DataPlaneState::HYBRID: return "HYBRID";
+        case DataPlaneState::DEGRADED: return "DEGRADED";
+        default: return "UNKNOWN";
+    }
+}
+
+const char* connection_phase_name(ConnectionPhase phase) {
+    switch (phase) {
+        case ConnectionPhase::OFFLINE: return "OFFLINE";
+        case ConnectionPhase::AUTHENTICATING: return "AUTHENTICATING";
+        case ConnectionPhase::CONFIGURING: return "CONFIGURING";
+        case ConnectionPhase::ESTABLISHING: return "ESTABLISHING";
+        case ConnectionPhase::ONLINE: return "ONLINE";
+        case ConnectionPhase::RECONNECTING: return "RECONNECTING";
+        default: return "UNKNOWN";
+    }
+}
+
+const char* client_endpoint_sync_state_name(ClientEndpointSyncState state) {
+    switch (state) {
+        case ClientEndpointSyncState::NOT_READY: return "NOT_READY";
+        case ClientEndpointSyncState::DISCOVERING: return "DISCOVERING";
+        case ClientEndpointSyncState::READY: return "READY";
+        case ClientEndpointSyncState::UPLOADING: return "UPLOADING";
+        case ClientEndpointSyncState::SYNCED: return "SYNCED";
+        default: return "UNKNOWN";
+    }
+}
+
+const char* route_sync_state_name(RouteSyncState state) {
+    switch (state) {
+        case RouteSyncState::DISABLED: return "DISABLED";
+        case RouteSyncState::PENDING: return "PENDING";
+        case RouteSyncState::SYNCING: return "SYNCING";
+        case RouteSyncState::SYNCED: return "SYNCED";
+        default: return "UNKNOWN";
+    }
+}
+
+const char* peer_data_path_name(PeerDataPath path) {
+    switch (path) {
+        case PeerDataPath::UNKNOWN: return "UNKNOWN";
+        case PeerDataPath::RELAY: return "RELAY";
+        case PeerDataPath::P2P: return "P2P";
+        case PeerDataPath::UNREACHABLE: return "UNREACHABLE";
+        default: return "UNKNOWN";
+    }
+}
+
+const char* peer_link_state_name(PeerLinkState state) {
+    switch (state) {
+        case PeerLinkState::UNKNOWN: return "UNKNOWN";
+        case PeerLinkState::RESOLVING: return "RESOLVING";
+        case PeerLinkState::PUNCHING: return "PUNCHING";
+        case PeerLinkState::P2P_ACTIVE: return "P2P_ACTIVE";
+        case PeerLinkState::RELAY_FALLBACK: return "RELAY_FALLBACK";
+        case PeerLinkState::OFFLINE: return "OFFLINE";
+        default: return "UNKNOWN";
+    }
+}
+
+const char* relay_connection_state_name(RelayConnectionState state) {
+    switch (state) {
+        case RelayConnectionState::DISCONNECTED: return "DISCONNECTED";
+        case RelayConnectionState::CONNECTING: return "CONNECTING";
+        case RelayConnectionState::AUTHENTICATING: return "AUTHENTICATING";
+        case RelayConnectionState::CONNECTED: return "CONNECTED";
+        case RelayConnectionState::RECONNECTING: return "RECONNECTING";
+        default: return "UNKNOWN";
+    }
+}
+
 const char* relay_session_state_name(RelaySessionState state) {
     switch (state) {
         case RelaySessionState::DISCONNECTED: return "DISCONNECTED";

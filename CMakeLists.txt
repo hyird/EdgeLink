@@ -149,7 +149,6 @@ if(BUILD_CONTROLLER)
         src/controller/session_manager.cpp
         src/controller/server.cpp
         src/controller/stun_server.cpp
-        src/controller/client_session_state.cpp
     )
 
     target_link_libraries(edgelink-controller PRIVATE
@@ -189,7 +188,6 @@ if(BUILD_CLIENT)
         src/client/config_applier.cpp
         src/client/endpoint_manager.cpp
         src/client/p2p_manager.cpp
-        src/client/connection_state.cpp
     )
 
     # Platform-specific TUN source

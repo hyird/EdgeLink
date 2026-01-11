@@ -2,9 +2,9 @@
 
 #include "common/types.hpp"
 #include "common/config.hpp"
+#include "common/node_state.hpp"
 #include "controller/database.hpp"
 #include "controller/jwt_util.hpp"
-#include "controller/client_session_state.hpp"
 #include <boost/asio.hpp>
 #include <functional>
 #include <memory>
@@ -111,15 +111,20 @@ public:
     void clear_node_endpoints(NodeId node_id);
 
     // ========================================================================
-    // 客户端状态机
+    // 客户端状态机（每个 Client 独立的状态机）
     // ========================================================================
 
-    // 获取状态机引用
-    ClientSessionStateMachine& client_state_machine() { return client_state_machine_; }
-    const ClientSessionStateMachine& client_state_machine() const { return client_state_machine_; }
+    // 获取或创建客户端状态机
+    NodeStateMachine* get_or_create_state_machine(NodeId node_id, NetworkId network_id);
 
-    // 处理会话事件
-    void handle_session_event(NodeId node_id, SessionEvent event);
+    // 获取客户端状态机
+    NodeStateMachine* get_state_machine(NodeId node_id);
+
+    // 移除客户端状态机
+    void remove_state_machine(NodeId node_id);
+
+    // 处理节点事件
+    void handle_node_event(NodeId node_id, NodeEvent event);
 
     // 处理端点更新
     void handle_endpoint_update(NodeId node_id, const std::vector<Endpoint>& endpoints);
@@ -137,7 +142,7 @@ public:
     void handle_p2p_status(NodeId node_id, NodeId peer_id, bool success);
 
     // 获取客户端状态
-    std::optional<ClientState> get_client_state(NodeId node_id) const;
+    std::optional<NodeState> get_client_state(NodeId node_id) const;
 
     // 获取在线客户端列表
     std::vector<NodeId> get_online_clients() const;
@@ -147,7 +152,7 @@ public:
 
 private:
     // 设置状态机回调
-    void setup_state_machine_callbacks();
+    void setup_state_machine_callbacks(NodeStateMachine* sm, NodeId node_id);
     asio::io_context& ioc_;
     Database& db_;
     JwtUtil& jwt_;
@@ -175,8 +180,9 @@ private:
     mutable std::shared_mutex endpoints_mutex_;
     std::unordered_map<NodeId, std::vector<Endpoint>> node_endpoints_;
 
-    // 客户端状态机
-    ClientSessionStateMachine client_state_machine_;
+    // 客户端状态机 (每个 client 一个独立的状态机)
+    mutable std::shared_mutex state_machines_mutex_;
+    std::unordered_map<NodeId, std::unique_ptr<NodeStateMachine>> client_state_machines_;
 };
 
 } // namespace edgelink::controller
