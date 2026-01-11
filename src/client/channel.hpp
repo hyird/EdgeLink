@@ -223,6 +223,7 @@ public:
     // State
     ChannelState state() const { return state_; }
     bool is_connected() const { return state_ == ChannelState::CONNECTED; }
+    const std::string& url() const { return url_; }
 
 private:
     asio::awaitable<void> read_loop();

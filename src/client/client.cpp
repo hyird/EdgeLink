@@ -36,6 +36,9 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     // Initialize config applier
     config_applier_ = std::make_unique<ConfigApplier>(*this);
 
+    // 设置统一状态机
+    setup_state_machine();
+
     // Initialize P2P managers
     endpoint_mgr_ = std::make_unique<EndpointManager>(ioc);
     p2p_mgr_ = std::make_unique<P2PManager>(ioc, crypto_, peers_, *endpoint_mgr_);
@@ -115,6 +118,7 @@ void Client::setup_callbacks() {
 
     control_cbs.on_auth_response = [this](const AuthResponse& resp) {
         log().info("Authenticated: node_id={}, ip={}", resp.node_id, resp.virtual_ip.to_string());
+        state_machine_.handle_event(StateEvent::AUTH_SUCCESS);
     };
 
     control_cbs.on_config = [this](const Config& config) {
@@ -128,6 +132,9 @@ void Client::setup_callbacks() {
 
         log().info("Config received: {} peers, {} routes, {} stuns",
                    config.peers.size(), config.routes.size(), config.stuns.size());
+
+        // 通知状态机收到配置
+        state_machine_.handle_event(StateEvent::CONFIG_RECEIVED);
 
         // 配置 STUN 服务器并启动 P2P manager
         // 必须在收到 CONFIG 后启动，确保 STUN 服务器已配置
@@ -185,9 +192,15 @@ void Client::setup_callbacks() {
             for (const auto& peer : update.add_peers) {
                 peers_.add_peer(peer);
                 added_peer_ids.push_back(peer.node_id);
-                // P2P 打洞延迟到首次发送数据时触发
+                // 通知状态机对端上线
+                state_machine_.add_peer(peer.node_id);
+                state_machine_.handle_peer_event(peer.node_id, StateEvent::PEER_ONLINE);
             }
             for (auto peer_id : update.del_peer_ids) {
+                // 通知状态机对端下线
+                state_machine_.handle_peer_event(peer_id, StateEvent::PEER_OFFLINE);
+                state_machine_.remove_peer(peer_id);
+
                 peers_.remove_peer(peer_id);
                 // peer 下线，断开 P2P 连接
                 if (p2p_mgr_) {
@@ -286,6 +299,8 @@ void Client::setup_callbacks() {
 
     control_cbs.on_disconnected = [this]() {
         log().warn("Control channel disconnected");
+        state_machine_.handle_event(StateEvent::CONTROL_DISCONNECTED);
+
         // Reconnect if we were running or in the middle of connecting
         if (config_.auto_reconnect && state_ != ClientState::STOPPED &&
             state_ != ClientState::RECONNECTING) {
@@ -331,6 +346,12 @@ void Client::setup_callbacks() {
 
     relay_cbs.on_connected = [this]() {
         log().info("Relay channel connected");
+
+        // 通知状态机 Relay 已连接
+        std::string relay_id = relay_ ? relay_->url() : "default";
+        state_machine_.add_relay(relay_id, true);  // 添加为主 Relay
+        state_machine_.handle_relay_event(relay_id, StateEvent::RELAY_CONNECTED);
+
         state_ = ClientState::RUNNING;
 
         // Setup TUN if enabled
@@ -371,6 +392,11 @@ void Client::setup_callbacks() {
 
     relay_cbs.on_disconnected = [this]() {
         log().warn("Relay channel disconnected");
+
+        // 通知状态机 Relay 已断开
+        std::string relay_id = relay_ ? relay_->url() : "default";
+        state_machine_.handle_relay_event(relay_id, StateEvent::RELAY_DISCONNECTED);
+
         // Reconnect if we were running or in the middle of connecting
         if (config_.auto_reconnect && state_ != ClientState::STOPPED &&
             state_ != ClientState::RECONNECTING) {
@@ -388,7 +414,26 @@ void Client::setup_callbacks() {
             log().info("P2P state changed: peer={}, state={}",
                        peers_.get_peer_ip_str(peer_id), p2p_state_name(state));
 
-            // 更新 PeerManager 的连接状态
+            // 通知状态机 P2P 状态变化
+            switch (state) {
+                case P2PState::RESOLVING:
+                    state_machine_.handle_peer_event(peer_id, StateEvent::P2P_INIT_SENT);
+                    break;
+                case P2PState::PUNCHING:
+                    state_machine_.handle_peer_event(peer_id, StateEvent::P2P_ENDPOINT_RECEIVED);
+                    break;
+                case P2PState::CONNECTED:
+                    state_machine_.handle_peer_event(peer_id, StateEvent::PUNCH_SUCCESS);
+                    break;
+                case P2PState::RELAY_ONLY:
+                    // P2P 失败，回退到 Relay
+                    state_machine_.handle_peer_event(peer_id, StateEvent::PUNCH_TIMEOUT);
+                    break;
+                default:
+                    break;
+            }
+
+            // 更新 PeerManager 的连接状态（保持兼容）
             P2PStatus status = P2PStatus::DISCONNECTED;
             if (state == P2PState::CONNECTED) {
                 status = P2PStatus::P2P;
@@ -658,6 +703,7 @@ asio::awaitable<bool> Client::start() {
 
         // Connect to control channel
         state_ = ClientState::AUTHENTICATING;
+        state_machine_.handle_event(StateEvent::START_CONNECT);
         log().info("Connecting to controller...");
 
         bool connected = co_await control_->connect(config_.authkey);
@@ -1602,6 +1648,110 @@ void Client::clear_system_routes() {
         log().info("Clearing all system routes");
         route_mgr_->cleanup_all();
     }
+}
+
+void Client::setup_state_machine() {
+    // 配置状态机超时参数
+    state_machine_.set_resolve_timeout(config_.p2p.stun_timeout);
+    state_machine_.set_punch_timeout(config_.p2p.punch_timeout * 1000);
+    state_machine_.set_keepalive_timeout(config_.p2p.keepalive_timeout * 1000);
+    state_machine_.set_retry_interval(config_.p2p.retry_interval * 1000);
+
+    // 设置状态机回调
+    StateCallbacks callbacks;
+
+    // 连接阶段变更回调
+    callbacks.on_phase_change = [this](ConnectionPhase old_phase, ConnectionPhase new_phase) {
+        log().info("Connection phase: {} -> {}",
+                   connection_phase_name(old_phase), connection_phase_name(new_phase));
+
+        // 更新旧的 ClientState 以保持兼容
+        switch (new_phase) {
+            case ConnectionPhase::OFFLINE:
+                state_ = ClientState::STOPPED;
+                break;
+            case ConnectionPhase::AUTHENTICATING:
+                state_ = ClientState::AUTHENTICATING;
+                break;
+            case ConnectionPhase::CONFIGURING:
+                state_ = ClientState::AUTHENTICATING;
+                break;
+            case ConnectionPhase::ESTABLISHING:
+                state_ = ClientState::CONNECTING_RELAY;
+                break;
+            case ConnectionPhase::ONLINE:
+                state_ = ClientState::RUNNING;
+                break;
+            case ConnectionPhase::RECONNECTING:
+                state_ = ClientState::RECONNECTING;
+                break;
+        }
+    };
+
+    // 控制面状态变更回调
+    callbacks.on_control_plane_change = [this](ControlPlaneState old_state, ControlPlaneState new_state) {
+        log().debug("Control plane: {} -> {}",
+                    control_plane_state_name(old_state), control_plane_state_name(new_state));
+    };
+
+    // 数据面状态变更回调
+    callbacks.on_data_plane_change = [this](DataPlaneState old_state, DataPlaneState new_state) {
+        log().debug("Data plane: {} -> {}",
+                    data_plane_state_name(old_state), data_plane_state_name(new_state));
+    };
+
+    // Relay 状态变更回调
+    callbacks.on_relay_state_change = [this](const std::string& relay_id,
+                                               RelayConnectionState old_state,
+                                               RelayConnectionState new_state) {
+        log().info("Relay {}: {} -> {}",
+                   relay_id,
+                   relay_connection_state_name(old_state),
+                   relay_connection_state_name(new_state));
+    };
+
+    // 对端链接状态变更回调
+    callbacks.on_peer_state_change = [this](NodeId peer_id,
+                                             PeerLinkState old_state,
+                                             PeerLinkState new_state) {
+        log().info("Peer {} link state: {} -> {}",
+                   peers_.get_peer_ip_str(peer_id),
+                   peer_link_state_name(old_state),
+                   peer_link_state_name(new_state));
+    };
+
+    // 对端数据路径变更回调
+    callbacks.on_peer_data_path_change = [this](NodeId peer_id,
+                                                  PeerDataPath old_path,
+                                                  PeerDataPath new_path) {
+        log().debug("Peer {} data path: {} -> {}",
+                    peers_.get_peer_ip_str(peer_id),
+                    peer_data_path_name(old_path),
+                    peer_data_path_name(new_path));
+
+        // 更新 PeerManager 的连接状态
+        P2PStatus status = P2PStatus::DISCONNECTED;
+        switch (new_path) {
+            case PeerDataPath::P2P:
+                status = P2PStatus::P2P;
+                break;
+            case PeerDataPath::RELAY:
+                status = P2PStatus::RELAY_ONLY;
+                break;
+            default:
+                status = P2PStatus::DISCONNECTED;
+                break;
+        }
+        peers_.set_connection_status(peer_id, status);
+    };
+
+    // 路由状态变更回调
+    callbacks.on_route_state_change = [this](RouteSyncState old_state, RouteSyncState new_state) {
+        log().debug("Route state: {} -> {}",
+                    route_sync_state_name(old_state), route_sync_state_name(new_state));
+    };
+
+    state_machine_.set_callbacks(std::move(callbacks));
 }
 
 } // namespace edgelink::client

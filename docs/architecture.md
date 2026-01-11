@@ -1,6 +1,6 @@
 # EdgeLink 架构设计文档
 
-> **版本**: 3.0
+> **版本**: 3.1
 > **更新日期**: 2026-01-11
 > **协议版本**: 0x02
 
@@ -2442,6 +2442,377 @@ PUNCHING 子状态:
                     ┌──────────────────────────────────────────┐
                     │                 FAILED                   │
                     └──────────────────────────────────────────┘
+```
+
+### 4.6 统一状态机架构
+
+为了实现 Client、Controller、Relay 之间的状态同步，系统采用分层状态机架构：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      统一状态机架构                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
+│   │   Client    │    │ Controller  │    │    Relay    │        │
+│   └──────┬──────┘    └──────┬──────┘    └──────┬──────┘        │
+│          │                  │                  │                │
+│   ┌──────▼──────┐    ┌──────▼──────┐    ┌──────▼──────┐        │
+│   │ Connection  │    │ClientSession│    │ NodeState   │        │
+│   │ StateMachine│    │StateMachine │    │  Machine    │        │
+│   └──────┬──────┘    └──────┬──────┘    └──────┬──────┘        │
+│          │                  │                  │                │
+│          └─────────────┬────┴─────────────┬────┘                │
+│                        │                  │                     │
+│                 ┌──────▼──────┐    ┌──────▼──────┐              │
+│                 │ NodeState   │    │ 共享类型    │              │
+│                 │  Machine    │    │ 定义        │              │
+│                 │ (统一状态)   │    │connection_  │              │
+│                 └─────────────┘    │types.hpp    │              │
+│                                    └─────────────┘              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 4.6.1 共享状态类型定义
+
+`common/connection_types.hpp` 定义了跨组件共享的状态枚举：
+
+**客户端会话状态 (ClientSessionState)**：
+
+| 状态           | 值   | 说明                     |
+| -------------- | ---- | ------------------------ |
+| DISCONNECTED   | 0    | 未连接                   |
+| AUTHENTICATING | 1    | 认证中                   |
+| AUTHENTICATED  | 2    | 已认证，等待配置         |
+| CONFIGURING    | 3    | 正在配置                 |
+| ONLINE         | 4    | 在线，完全可用           |
+| DEGRADED       | 5    | 降级（部分功能可用）     |
+
+**Relay 会话状态 (RelaySessionState)**：
+
+| 状态           | 值   | 说明                     |
+| -------------- | ---- | ------------------------ |
+| DISCONNECTED   | 0    | 未连接                   |
+| AUTHENTICATING | 1    | 认证中                   |
+| CONNECTED      | 2    | 已连接                   |
+| RECONNECTING   | 3    | 重连中                   |
+
+**P2P 协商阶段 (P2PNegotiationPhase)**：
+
+| 阶段           | 值   | 说明                     |
+| -------------- | ---- | ------------------------ |
+| NONE           | 0    | 未开始                   |
+| INITIATED      | 1    | 已发起                   |
+| ENDPOINTS_SENT | 2    | 端点已发送               |
+| ESTABLISHED    | 3    | 已建立                   |
+| FAILED         | 4    | 失败                     |
+
+**会话事件 (SessionEvent)**：
+
+| 事件               | 说明                     |
+| ------------------ | ------------------------ |
+| CONTROL_CONNECT    | Control 通道连接         |
+| CONTROL_DISCONNECT | Control 通道断开         |
+| RELAY_CONNECT      | Relay 通道连接           |
+| RELAY_DISCONNECT   | Relay 通道断开           |
+| AUTH_SUCCESS       | 认证成功                 |
+| AUTH_FAILED        | 认证失败                 |
+| CONFIG_SENT        | 配置已发送               |
+| CONFIG_ACK         | 配置已确认               |
+| ENDPOINT_UPDATE    | 端点更新                 |
+| P2P_INIT_RECEIVED  | 收到 P2P 初始化          |
+| ROUTE_ANNOUNCE     | 路由公告                 |
+| HEARTBEAT_TIMEOUT  | 心跳超时                 |
+
+#### 4.6.2 Client 连接状态机 (ConnectionStateMachine)
+
+Client 端使用 `ConnectionStateMachine` 管理控制面和数据面的分离：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   ConnectionStateMachine                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   控制面状态                      数据面状态                     │
+│   ┌───────────────┐              ┌───────────────┐              │
+│   │ ControlPlane  │              │  DataPlane    │              │
+│   │   State       │              │   State       │              │
+│   ├───────────────┤              ├───────────────┤              │
+│   │ DISCONNECTED  │              │ NO_CHANNEL    │              │
+│   │ CONNECTING    │              │ RELAY_ONLY    │              │
+│   │ AUTHENTICATING│              │ P2P_PRIMARY   │              │
+│   │ CONFIGURING   │              │ HYBRID        │              │
+│   │ ONLINE        │              │ P2P_ONLY      │              │
+│   └───────────────┘              └───────────────┘              │
+│                                                                 │
+│   组合连接阶段 (ConnectionPhase)                                │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │ OFFLINE → CONTROL_ONLY → RELAY_READY → P2P_AVAILABLE    │   │
+│   │     │          │              │              │           │   │
+│   │     │          ▼              ▼              ▼           │   │
+│   │     │   (仅控制面)    (Relay可用)    (P2P可用)          │   │
+│   │     │                                                    │   │
+│   │     └───────────────► DEGRADED (部分功能可用)           │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   多 Relay 支持                                                 │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │ relay_states_: map<relay_id, RelayInfo>                 │   │
+│   │                                                         │   │
+│   │ RelayInfo:                                              │   │
+│   │   - relay_id: string                                    │   │
+│   │   - state: RelayConnectionState                         │   │
+│   │   - latency_ms: uint16_t                                │   │
+│   │   - is_primary: bool                                    │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   对端连接状态                                                   │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │ peer_states_: map<node_id, PeerState>                   │   │
+│   │                                                         │   │
+│   │ PeerState:                                              │   │
+│   │   - relay_reachable: bool                               │   │
+│   │   - p2p_state: P2PConnectionState                       │   │
+│   │   - preferred_path: DataPath (RELAY/P2P)                │   │
+│   │   - p2p_addr/port: Endpoint                             │   │
+│   │   - latency_ms: uint16_t                                │   │
+│   └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**事件处理流程**：
+
+```cpp
+// 状态机事件处理
+state_machine_.handle_event(StateEvent::AUTH_SUCCESS);     // 认证成功
+state_machine_.handle_event(StateEvent::CONFIG_RECEIVED);  // 配置接收
+state_machine_.handle_relay_event(relay_id, StateEvent::RELAY_CONNECTED);  // Relay连接
+state_machine_.handle_peer_event(peer_id, StateEvent::PEER_ONLINE);       // 对端上线
+```
+
+#### 4.6.3 Controller 客户端会话状态机 (ClientSessionStateMachine)
+
+Controller 使用 `ClientSessionStateMachine` 管理所有连接的客户端状态：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  ClientSessionStateMachine                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   client_states_: map<NodeId, ClientState>                      │
+│                                                                 │
+│   ClientState 结构:                                             │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │ 会话状态                                                 │   │
+│   │   session_state: ClientSessionState                     │   │
+│   │   relay_state: RelaySessionState                        │   │
+│   │                                                         │   │
+│   │ 认证信息                                                 │   │
+│   │   auth_key_hash: string                                 │   │
+│   │   session_key: array<uint8_t, 32>                       │   │
+│   │   auth_time: uint64_t                                   │   │
+│   │                                                         │   │
+│   │ 端点信息                                                 │   │
+│   │   endpoints: vector<Endpoint>                           │   │
+│   │   endpoint_state: EndpointState                         │   │
+│   │   endpoint_update_time: uint64_t                        │   │
+│   │                                                         │   │
+│   │ 路由信息                                                 │   │
+│   │   announced_routes: vector<RouteInfo>                   │   │
+│   │   route_update_time: uint64_t                           │   │
+│   │                                                         │   │
+│   │ P2P 协商                                                 │   │
+│   │   p2p_negotiations: map<NodeId, P2PNegotiation>         │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   回调接口:                                                      │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │ on_session_state_change(node_id, old, new)              │   │
+│   │ on_relay_state_change(node_id, old, new)                │   │
+│   │ on_client_online(node_id, network_id)                   │   │
+│   │ on_client_offline(node_id, network_id)                  │   │
+│   │ on_endpoint_update(node_id, endpoints)                  │   │
+│   │ on_route_update(node_id, added, removed)                │   │
+│   │ on_p2p_negotiation_change(initiator, responder, phase)  │   │
+│   └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**SessionManager 集成**：
+
+```cpp
+// 会话注册时自动添加到状态机
+void SessionManager::register_control_session(NodeId node_id, ...) {
+    client_state_machine_.add_client(node_id);
+    client_state_machine_.handle_event(node_id, SessionEvent::CONTROL_CONNECT);
+}
+
+// 会话注销时自动触发下线回调
+void SessionManager::unregister_control_session(NodeId node_id) {
+    client_state_machine_.handle_event(node_id, SessionEvent::CONTROL_DISCONNECT);
+    // 自动触发 on_client_offline，通知同网络其他节点
+}
+```
+
+#### 4.6.4 统一节点状态机 (NodeStateMachine)
+
+`NodeStateMachine` 提供跨组件的统一状态视图，用于状态同步：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      NodeStateMachine                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   self_id_: NodeId                                              │
+│   self_role_: NodeRole (CLIENT/CONTROLLER/RELAY)                │
+│                                                                 │
+│   node_states_: map<NodeId, NodeState>                          │
+│                                                                 │
+│   NodeState 结构:                                               │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │ 基本信息                                                 │   │
+│   │   node_id, network_id, role                             │   │
+│   │                                                         │   │
+│   │ 连接状态                                                 │   │
+│   │   connection_state: NodeConnectionState                 │   │
+│   │     (OFFLINE/CONNECTING/AUTHENTICATING/ONLINE/DEGRADED) │   │
+│   │   data_channel: DataChannelState                        │   │
+│   │     (NONE/RELAY_ONLY/P2P_ONLY/HYBRID)                   │   │
+│   │                                                         │   │
+│   │ 虚拟 IP                                                  │   │
+│   │   virtual_ip: IPv4Address                               │   │
+│   │                                                         │   │
+│   │ 端点信息                                                 │   │
+│   │   endpoints: vector<Endpoint>                           │   │
+│   │   endpoint_update_time, endpoint_synced                 │   │
+│   │                                                         │   │
+│   │ 路由信息                                                 │   │
+│   │   announced_routes: vector<RouteInfo>                   │   │
+│   │   route_update_time                                     │   │
+│   │                                                         │   │
+│   │ 延迟信息                                                 │   │
+│   │   latency_ms, last_ping_time, last_seen_time            │   │
+│   │                                                         │   │
+│   │ P2P 连接状态                                             │   │
+│   │   p2p_links: map<NodeId, P2PLink>                       │   │
+│   │                                                         │   │
+│   │   P2PLink:                                              │   │
+│   │     peer_id, state (P2PConnectionState)                 │   │
+│   │     peer_endpoints, active_endpoint                     │   │
+│   │     connect_time, last_recv_time, rtt_ms                │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   P2P 连接状态 (P2PConnectionState):                            │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │  NONE ──► INITIATING ──► WAITING_ENDPOINT ──► PUNCHING  │   │
+│   │    ▲                                              │      │   │
+│   │    │                                              ▼      │   │
+│   │    └──────────── FAILED ◄──────────────────► CONNECTED  │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   节点事件 (NodeEvent):                                          │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │ 连接事件: CONNECT, DISCONNECT, AUTH_SUCCESS, AUTH_FAILED│   │
+│   │ 数据通道: RELAY_CONNECTED, RELAY_DISCONNECTED           │   │
+│   │          P2P_CONNECTED, P2P_DISCONNECTED                │   │
+│   │ 同步事件: ENDPOINT_UPDATE, ENDPOINT_SYNCED              │   │
+│   │          ROUTE_ANNOUNCE, ROUTE_WITHDRAW                 │   │
+│   │ P2P 协商: P2P_INIT, P2P_ENDPOINT_RECEIVED               │   │
+│   │          P2P_PUNCH_START/SUCCESS/FAILED                 │   │
+│   │          P2P_KEEPALIVE_TIMEOUT                          │   │
+│   │ 心跳:    PING, PONG, HEARTBEAT_TIMEOUT                  │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   回调接口:                                                      │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │ on_connection_state_change(node_id, old, new)           │   │
+│   │ on_data_channel_change(node_id, old, new)               │   │
+│   │ on_node_status_change(node_id, online)                  │   │
+│   │ on_endpoint_update(node_id, endpoints)                  │   │
+│   │ on_route_change(node_id, added, removed)                │   │
+│   │ on_p2p_state_change(node_id, peer_id, old, new)         │   │
+│   └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**超时参数**：
+
+| 参数                   | 默认值  | 说明                     |
+| ---------------------- | ------- | ------------------------ |
+| p2p_punch_timeout_ms   | 10000   | P2P 打洞超时             |
+| p2p_keepalive_timeout_ms| 3000   | P2P 保活超时             |
+| heartbeat_timeout_ms   | 30000   | 心跳超时                 |
+| p2p_retry_interval_ms  | 60000   | P2P 重试间隔             |
+
+#### 4.6.5 状态同步流程
+
+**客户端上线流程**：
+
+```
+Client                    Controller                   Other Clients
+  │                           │                              │
+  │ ① CONTROL_CONNECT         │                              │
+  ├──────────────────────────►│                              │
+  │                           │ state_machine_.add_client()  │
+  │                           │ handle_event(CONTROL_CONNECT)│
+  │                           │                              │
+  │ ② AUTH_SUCCESS            │                              │
+  │◄──────────────────────────┤                              │
+  │                           │ handle_event(AUTH_SUCCESS)   │
+  │                           │                              │
+  │ ③ CONFIG + CONFIG_ACK     │                              │
+  │◄─────────────────────────►│                              │
+  │                           │ handle_event(CONFIG_ACK)     │
+  │                           │ → session_state = ONLINE     │
+  │                           │ → on_client_online 回调      │
+  │                           │                              │
+  │                           │ ④ 广播 PEER_STATUS(online)   │
+  │                           ├─────────────────────────────►│
+  │                           │                              │
+```
+
+**端点同步流程**：
+
+```
+Client                    Controller                   Other Clients
+  │                           │                              │
+  │ ① ENDPOINT_UPDATE         │                              │
+  │   [endpoints...]          │                              │
+  ├──────────────────────────►│                              │
+  │                           │ handle_endpoint_update()     │
+  │                           │ → 更新 client_state.endpoints│
+  │                           │ → on_endpoint_update 回调    │
+  │                           │                              │
+  │ ② ENDPOINT_ACK            │                              │
+  │◄──────────────────────────┤                              │
+  │                           │                              │
+  │                           │ (P2P_INIT 时发送端点给对端)  │
+  │                           │                              │
+```
+
+**P2P 协商状态同步**：
+
+```
+Client A                  Controller                   Client B
+  │                           │                              │
+  │ ① P2P_INIT(target=B)      │                              │
+  ├──────────────────────────►│                              │
+  │                           │ handle_p2p_init(A, B, seq)   │
+  │                           │ → 更新双方 p2p_negotiations  │
+  │                           │ → phase = INITIATED          │
+  │                           │                              │
+  │ ② P2P_ENDPOINT(B→A)       │  P2P_ENDPOINT(A→B)          │
+  │◄──────────────────────────┤─────────────────────────────►│
+  │                           │ → phase = ENDPOINTS_SENT     │
+  │                           │                              │
+  │◄══════════════════════════════════════════════════════════►│
+  │              UDP 打洞 (参考 4.2 P2P 状态机)               │
+  │                           │                              │
+  │ ③ P2P_STATUS(success)     │  P2P_STATUS(success)        │
+  ├──────────────────────────►│◄─────────────────────────────┤
+  │                           │ handle_p2p_status(A, B, true)│
+  │                           │ → phase = ESTABLISHED        │
+  │                           │                              │
 ```
 
 ---

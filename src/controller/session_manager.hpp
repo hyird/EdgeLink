@@ -4,6 +4,7 @@
 #include "common/config.hpp"
 #include "controller/database.hpp"
 #include "controller/jwt_util.hpp"
+#include "controller/client_session_state.hpp"
 #include <boost/asio.hpp>
 #include <functional>
 #include <memory>
@@ -109,7 +110,44 @@ public:
     // 清除节点的端点
     void clear_node_endpoints(NodeId node_id);
 
+    // ========================================================================
+    // 客户端状态机
+    // ========================================================================
+
+    // 获取状态机引用
+    ClientSessionStateMachine& client_state_machine() { return client_state_machine_; }
+    const ClientSessionStateMachine& client_state_machine() const { return client_state_machine_; }
+
+    // 处理会话事件
+    void handle_session_event(NodeId node_id, SessionEvent event);
+
+    // 处理端点更新
+    void handle_endpoint_update(NodeId node_id, const std::vector<Endpoint>& endpoints);
+
+    // 处理路由公告
+    void handle_route_announce(NodeId node_id, const std::vector<RouteInfo>& routes);
+
+    // 处理路由撤销
+    void handle_route_withdraw(NodeId node_id, const std::vector<RouteInfo>& routes);
+
+    // 处理 P2P 初始化
+    void handle_p2p_init(NodeId initiator, NodeId responder, uint32_t seq);
+
+    // 处理 P2P 状态
+    void handle_p2p_status(NodeId node_id, NodeId peer_id, bool success);
+
+    // 获取客户端状态
+    std::optional<ClientState> get_client_state(NodeId node_id) const;
+
+    // 获取在线客户端列表
+    std::vector<NodeId> get_online_clients() const;
+
+    // 检查超时
+    void check_timeouts();
+
 private:
+    // 设置状态机回调
+    void setup_state_machine_callbacks();
     asio::io_context& ioc_;
     Database& db_;
     JwtUtil& jwt_;
@@ -136,6 +174,9 @@ private:
     // 节点端点缓存 (内存中，会话断开时清除)
     mutable std::shared_mutex endpoints_mutex_;
     std::unordered_map<NodeId, std::vector<Endpoint>> node_endpoints_;
+
+    // 客户端状态机
+    ClientSessionStateMachine client_state_machine_;
 };
 
 } // namespace edgelink::controller
