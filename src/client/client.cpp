@@ -127,9 +127,23 @@ void Client::setup_callbacks() {
         log().info("Config received: {} peers, {} routes, {} stuns",
                    config.peers.size(), config.routes.size(), config.stuns.size());
 
-        // 配置 STUN 服务器
+        // 配置 STUN 服务器并启动 P2P manager
+        // 必须在收到 CONFIG 后启动，确保 STUN 服务器已配置
         if (endpoint_mgr_ && !config.stuns.empty()) {
             endpoint_mgr_->set_stun_servers(config.stuns);
+        }
+
+        // 启动 P2P manager (在 STUN 配置完成后)
+        if (p2p_mgr_ && !p2p_mgr_->is_running()) {
+            auto self = shared_from_this();
+            asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
+                try {
+                    co_await self->p2p_mgr_->start();
+                    log().info("P2P manager started (STUN configured)");
+                } catch (const std::exception& e) {
+                    log().error("P2P manager failed: {}", e.what());
+                }
+            }(), asio::detached);
         }
 
         // 初始化路由管理器并同步路由到系统
@@ -301,18 +315,7 @@ void Client::setup_callbacks() {
             asio::co_spawn(ioc_, announce_configured_routes(), asio::detached);
         }
 
-        // Start P2P manager (不主动打洞，等第一次发送数据时触发)
-        if (p2p_mgr_) {
-            auto self = shared_from_this();
-            asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
-                try {
-                    co_await self->p2p_mgr_->start();
-                    log().info("P2P manager started (will punch on first send)");
-                } catch (const std::exception& e) {
-                    log().error("P2P manager failed: {}", e.what());
-                }
-            }(), asio::detached);
-        }
+        // P2P manager 现在在 on_config 回调中启动（确保 STUN 已配置）
     };
 
     relay_cbs.on_disconnected = [this]() {
