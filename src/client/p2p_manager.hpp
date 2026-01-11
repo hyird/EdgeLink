@@ -43,6 +43,7 @@ struct P2PConfig {
     uint32_t punch_batch_interval_ms = 400;     // 批次间隔 (毫秒, EasyTier: 400)
     uint32_t retry_interval_sec = 60;           // 失败后重试间隔 (秒)
     uint32_t stun_timeout_ms = 5000;            // STUN 查询超时 (毫秒)
+    uint32_t endpoint_refresh_sec = 30;         // 端点刷新间隔 (秒)，定期重新查询 STUN 并上报
 };
 
 // 对端 P2P 状态
@@ -161,6 +162,12 @@ private:
     // 重试循环
     asio::awaitable<void> retry_loop();
 
+    // 端点刷新循环 (定期重新查询 STUN 并上报端点)
+    asio::awaitable<void> endpoint_refresh_loop();
+
+    // 刷新端点 (重新查询 STUN 并上报给 Controller)
+    asio::awaitable<void> refresh_endpoints();
+
     // 处理收到的 UDP 数据
     void handle_udp_packet(const asio::ip::udp::endpoint& from,
                            std::span<const uint8_t> data);
@@ -226,6 +233,10 @@ private:
     asio::steady_timer keepalive_timer_;
     asio::steady_timer punch_timer_;
     asio::steady_timer retry_timer_;
+    asio::steady_timer endpoint_refresh_timer_;
+
+    // 端点刷新跟踪
+    uint64_t last_endpoint_refresh_time_ = 0;  // 上次端点刷新时间 (微秒)
 
     // P2P_INIT 序列号
     std::atomic<uint32_t> init_seq_{0};

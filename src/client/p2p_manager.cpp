@@ -40,6 +40,7 @@ P2PManager::P2PManager(asio::io_context& ioc, CryptoEngine& crypto,
     , keepalive_timer_(ioc)
     , punch_timer_(ioc)
     , retry_timer_(ioc)
+    , endpoint_refresh_timer_(ioc)
 {
 }
 
@@ -88,6 +89,7 @@ asio::awaitable<bool> P2PManager::start() {
     asio::co_spawn(ioc_, keepalive_loop(), asio::detached);
     asio::co_spawn(ioc_, punch_loop(), asio::detached);
     asio::co_spawn(ioc_, retry_loop(), asio::detached);
+    asio::co_spawn(ioc_, endpoint_refresh_loop(), asio::detached);
 
     log().info("P2P manager started on port {}", endpoints_.local_port());
 
@@ -112,6 +114,7 @@ asio::awaitable<void> P2PManager::stop() {
     keepalive_timer_.cancel();
     punch_timer_.cancel();
     retry_timer_.cancel();
+    endpoint_refresh_timer_.cancel();
 
     // 关闭 socket
     endpoints_.close_socket();
@@ -613,6 +616,62 @@ asio::awaitable<void> P2PManager::retry_loop() {
             connect_peer(peer_id);
         }
     }
+}
+
+asio::awaitable<void> P2PManager::endpoint_refresh_loop() {
+    // 等待初始刷新间隔，避免启动时立即刷新 (start() 已经上报过一次)
+    endpoint_refresh_timer_.expires_after(
+        std::chrono::seconds(config_.endpoint_refresh_sec));
+
+    try {
+        co_await endpoint_refresh_timer_.async_wait(asio::use_awaitable);
+    } catch (const boost::system::system_error&) {
+        co_return;
+    }
+
+    while (running_) {
+        // 刷新端点
+        co_await refresh_endpoints();
+
+        // 等待下一次刷新
+        endpoint_refresh_timer_.expires_after(
+            std::chrono::seconds(config_.endpoint_refresh_sec));
+
+        try {
+            co_await endpoint_refresh_timer_.async_wait(asio::use_awaitable);
+        } catch (const boost::system::system_error&) {
+            break;
+        }
+    }
+}
+
+asio::awaitable<void> P2PManager::refresh_endpoints() {
+    if (!running_) {
+        co_return;
+    }
+
+    log().debug("Refreshing endpoints (periodic broadcast)");
+
+    // 重新查询 STUN 端点
+    auto stun_result = co_await endpoints_.query_stun_endpoint();
+    if (stun_result.success) {
+        auto& addr = stun_result.mapped_endpoint.address;
+        log().debug("STUN refresh: {}.{}.{}.{}:{}",
+            addr[0], addr[1], addr[2], addr[3],
+            stun_result.mapped_endpoint.port);
+    }
+
+    // 上报端点给 Controller
+    if (callbacks_.on_endpoints_ready) {
+        auto eps = endpoints_.get_all_endpoints();
+        if (!eps.empty()) {
+            log().debug("Broadcasting {} endpoints to controller", eps.size());
+            callbacks_.on_endpoints_ready(eps);
+        }
+    }
+
+    // 更新刷新时间
+    last_endpoint_refresh_time_ = now_us();
 }
 
 void P2PManager::handle_udp_packet(const asio::ip::udp::endpoint& from,

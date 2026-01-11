@@ -107,6 +107,11 @@ enable = true
 # [热重载: 立即生效]
 # accept_routes = true
 
+# Route announcement refresh interval in seconds
+# Periodically re-announce routes to handle packet loss (0 = announce only at startup)
+# [热重载: 下次循环生效]
+announce_interval = 30
+
 [p2p]
 # P2P NAT traversal configuration
 # When enabled, the client will attempt direct peer-to-peer connections
@@ -149,6 +154,11 @@ retry_interval = 60
 # STUN query timeout in milliseconds
 # [热重载: 立即生效]
 stun_timeout = 5000
+
+# Endpoint refresh interval in seconds (re-query STUN and report endpoints)
+# Helps maintain accurate endpoint info when NAT mappings change
+# [热重载: 下次循环生效]
+endpoint_refresh_interval = 30
 
 [log]
 # Log level: trace, debug, info, warn, error

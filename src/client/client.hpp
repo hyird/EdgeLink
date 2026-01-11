@@ -58,6 +58,7 @@ struct ClientConfig {
     std::vector<std::string> advertise_routes;  // CIDR格式，如 "192.168.1.0/24", "10.0.0.0/8"
     bool exit_node = false;                     // 作为出口节点，公告 0.0.0.0/0
     bool accept_routes = true;                  // 是否接受其他节点的路由并应用到系统
+    std::chrono::seconds route_announce_interval{30};  // 路由公告刷新间隔（0 = 仅启动时公告一次）
 
     // Logging settings (for hot-reload)
     std::string log_level = "debug";    // 日志级别
@@ -75,6 +76,7 @@ struct ClientConfig {
         uint32_t punch_batch_interval = 400;    // 批次间隔（毫秒, EasyTier: 400）
         uint32_t retry_interval = 60;           // 失败后重试间隔（秒）
         uint32_t stun_timeout = 5000;           // STUN 查询超时（毫秒）
+        uint32_t endpoint_refresh_interval = 30; // 端点刷新间隔（秒，定期重新查询 STUN 并上报）
     } p2p;
 
     // 获取当前使用的controller host
@@ -241,6 +243,9 @@ private:
     // Latency measurement loop - periodically measure peer latency
     asio::awaitable<void> latency_measure_loop();
 
+    // Route announce loop - periodically re-announce routes
+    asio::awaitable<void> route_announce_loop();
+
     // Reconnection logic
     asio::awaitable<void> reconnect();
 
@@ -259,6 +264,7 @@ private:
     asio::steady_timer reconnect_timer_;
     asio::steady_timer dns_refresh_timer_;
     asio::steady_timer latency_timer_;
+    asio::steady_timer route_announce_timer_;
 
     // Cached DNS resolution results for change detection
     std::string cached_controller_endpoints_;

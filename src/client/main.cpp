@@ -910,6 +910,7 @@ int cmd_up(int argc, char* argv[]) {
         client_cfg.advertise_routes = cfg.advertise_routes;
         client_cfg.exit_node = cfg.exit_node;
         client_cfg.accept_routes = cfg.accept_routes;
+        client_cfg.route_announce_interval = cfg.route_announce_interval;
 
         // P2P 配置
         client_cfg.p2p.enabled = cfg.p2p.enabled;
@@ -922,6 +923,7 @@ int cmd_up(int argc, char* argv[]) {
         client_cfg.p2p.punch_batch_interval = cfg.p2p.punch_batch_interval;
         client_cfg.p2p.retry_interval = cfg.p2p.retry_interval;
         client_cfg.p2p.stun_timeout = cfg.p2p.stun_timeout;
+        client_cfg.p2p.endpoint_refresh_interval = cfg.p2p.endpoint_refresh_interval;
 
         // Create client
         auto client = std::make_shared<Client>(ioc, client_cfg);

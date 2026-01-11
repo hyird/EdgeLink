@@ -271,6 +271,9 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             if (auto v = (*routing)["accept_routes"].value<bool>()) {
                 config.accept_routes = *v;
             }
+            if (auto v = (*routing)["announce_interval"].value<int64_t>()) {
+                config.route_announce_interval = std::chrono::seconds(*v);
+            }
         }
 
         // [log] section
@@ -322,6 +325,9 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             }
             if (auto v = (*p2p)["stun_timeout"].value<int64_t>()) {
                 config.p2p.stun_timeout = static_cast<uint32_t>(*v);
+            }
+            if (auto v = (*p2p)["endpoint_refresh_interval"].value<int64_t>()) {
+                config.p2p.endpoint_refresh_interval = static_cast<uint32_t>(*v);
             }
         }
 

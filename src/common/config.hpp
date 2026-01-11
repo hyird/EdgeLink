@@ -108,6 +108,7 @@ struct ClientConfig {
         uint32_t punch_batch_interval = 400;    // 批次间隔（毫秒, EasyTier: 400）
         uint32_t retry_interval = 60;           // 失败后重试间隔（秒）
         uint32_t stun_timeout = 5000;           // STUN 查询超时（毫秒）
+        uint32_t endpoint_refresh_interval = 30; // 端点刷新间隔（秒，定期重新查询 STUN 并上报）
     } p2p;
 
     // 获取当前使用的controller host (格式: host:port)
@@ -162,6 +163,7 @@ struct ClientConfig {
     std::vector<std::string> advertise_routes;  // CIDR format routes to advertise
     bool exit_node = false;                     // Act as exit node (advertise 0.0.0.0/0)
     bool accept_routes = true;                  // Accept routes from other nodes and apply to system
+    std::chrono::seconds route_announce_interval{30};  // 路由公告刷新间隔（0 = 仅启动时公告一次）
 
     // Logging
     std::string log_level = "debug";

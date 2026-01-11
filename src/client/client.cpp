@@ -30,7 +30,8 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     , keepalive_timer_(ioc)
     , reconnect_timer_(ioc)
     , dns_refresh_timer_(ioc)
-    , latency_timer_(ioc) {
+    , latency_timer_(ioc)
+    , route_announce_timer_(ioc) {
 
     // Initialize config applier
     config_applier_ = std::make_unique<ConfigApplier>(*this);
@@ -51,6 +52,7 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     p2p_cfg.punch_batch_interval_ms = config_.p2p.punch_batch_interval;
     p2p_cfg.retry_interval_sec = config_.p2p.retry_interval;
     p2p_cfg.stun_timeout_ms = config_.p2p.stun_timeout;
+    p2p_cfg.endpoint_refresh_sec = config_.p2p.endpoint_refresh_interval;
     p2p_mgr_->set_config(p2p_cfg);
 
     // Setup SSL context
@@ -320,8 +322,14 @@ void Client::setup_callbacks() {
         }
 
         // Announce configured routes (advertise_routes and exit_node)
+        // 首次公告，然后启动定期公告循环
         if (!config_.advertise_routes.empty() || config_.exit_node) {
             asio::co_spawn(ioc_, announce_configured_routes(), asio::detached);
+
+            // 定期重新公告路由（防止网络丢包导致 Controller 没收到）
+            if (config_.route_announce_interval.count() > 0) {
+                asio::co_spawn(ioc_, route_announce_loop(), asio::detached);
+            }
         }
 
         // P2P manager 现在在 on_config 回调中启动（确保 STUN 已配置）
@@ -688,6 +696,7 @@ asio::awaitable<void> Client::stop() {
     reconnect_timer_.cancel();
     dns_refresh_timer_.cancel();
     latency_timer_.cancel();
+    route_announce_timer_.cancel();
 
     // Stop P2P manager
     if (p2p_mgr_) {
@@ -975,6 +984,41 @@ asio::awaitable<void> Client::latency_measure_loop() {
     }
 
     log().debug("Latency measurement loop stopped");
+}
+
+asio::awaitable<void> Client::route_announce_loop() {
+    // 等待第一个间隔（首次公告已经在 on_connected 中完成）
+    route_announce_timer_.expires_after(config_.route_announce_interval);
+
+    try {
+        co_await route_announce_timer_.async_wait(asio::use_awaitable);
+    } catch (const boost::system::system_error&) {
+        co_return;
+    }
+
+    log().info("Route announcement loop started (interval: {}s)", config_.route_announce_interval.count());
+
+    while (state_ == ClientState::RUNNING) {
+        try {
+            // 重新公告路由
+            if (control_ && control_->is_connected()) {
+                log().debug("Re-announcing routes (periodic broadcast)");
+                co_await announce_configured_routes();
+            }
+
+            // 等待下一个间隔
+            route_announce_timer_.expires_after(config_.route_announce_interval);
+            co_await route_announce_timer_.async_wait(asio::use_awaitable);
+
+        } catch (const boost::system::system_error& e) {
+            if (e.code() != asio::error::operation_aborted) {
+                log().debug("Route announce error: {}", e.what());
+            }
+            break;
+        }
+    }
+
+    log().debug("Route announcement loop stopped");
 }
 
 // ============================================================================
