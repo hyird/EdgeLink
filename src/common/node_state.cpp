@@ -225,9 +225,20 @@ void NodeStateMachine::handle_event(NodeId node_id, NodeEvent event) {
 void NodeStateMachine::handle_p2p_event(NodeId node_id, NodeId peer_id, NodeEvent event) {
     log().debug("Node {} P2P with {} event: {}", node_id, peer_id, node_event_name(event));
 
+    // 【调试】检查是否为自身节点的 P2P 事件
+    if (node_id == self_id_) {
+        // Client 端的 P2P 状态存储在 self_state_ 中，应该使用专门的方法
+        log().debug("P2P event for self node, delegating to self_state handling");
+        handle_self_p2p_event(peer_id, event);
+        return;
+    }
+
+    log().debug("Acquiring nodes_mutex_ for node {}", node_id);
     std::unique_lock lock(nodes_mutex_);
+    log().debug("Acquired nodes_mutex_ for node {}", node_id);
     auto* state = get_node_state_mut(node_id);
     if (!state) {
+        log().debug("Node {} not found in node_states_, returning", node_id);
         return;
     }
 
@@ -296,6 +307,126 @@ void NodeStateMachine::handle_p2p_event(NodeId node_id, NodeId peer_id, NodeEven
     // 触发回调
     if (link.state != old_p2p_state && callbacks_.on_p2p_state_change) {
         callbacks_.on_p2p_state_change(node_id, peer_id, old_p2p_state, link.state);
+    }
+}
+
+void NodeStateMachine::handle_self_p2p_event(NodeId peer_id, NodeEvent event) {
+    log().debug("Self P2P with {} event: {}", peer_id, node_event_name(event));
+
+    std::unique_lock lock(nodes_mutex_);
+
+    auto& link = self_state_.p2p_links[peer_id];
+    if (link.peer_id == 0) {
+        link.peer_id = peer_id;
+    }
+
+    auto old_p2p_state = link.state;
+
+    switch (event) {
+        case NodeEvent::P2P_INIT:
+        case NodeEvent::P2P_INIT_SENT:
+            if (link.state == P2PConnectionState::NONE ||
+                link.state == P2PConnectionState::FAILED) {
+                link.state = P2PConnectionState::INITIATING;
+                link.connect_time = now_us();
+            }
+            break;
+
+        case NodeEvent::P2P_ENDPOINT_RECEIVED:
+            if (link.state == P2PConnectionState::INITIATING ||
+                link.state == P2PConnectionState::WAITING_ENDPOINT ||
+                link.state == P2PConnectionState::NONE) {
+                link.state = P2PConnectionState::PUNCHING;
+            }
+            break;
+
+        case NodeEvent::P2P_PUNCH_START:
+            link.state = P2PConnectionState::PUNCHING;
+            break;
+
+        case NodeEvent::P2P_PUNCH_SUCCESS:
+            link.state = P2PConnectionState::CONNECTED;
+            link.connect_time = now_us();
+            link.punch_failures = 0;
+            break;
+
+        case NodeEvent::P2P_PUNCH_FAILED:
+        case NodeEvent::P2P_PUNCH_TIMEOUT:
+            link.state = P2PConnectionState::FAILED;
+            link.punch_failures++;
+            break;
+
+        case NodeEvent::P2P_KEEPALIVE_TIMEOUT:
+            if (link.state == P2PConnectionState::CONNECTED) {
+                link.state = P2PConnectionState::FAILED;
+            }
+            break;
+
+        case NodeEvent::P2P_CONNECTED:
+            link.state = P2PConnectionState::CONNECTED;
+            link.last_recv_time = now_us();
+            break;
+
+        case NodeEvent::P2P_DISCONNECTED:
+            link.state = P2PConnectionState::NONE;
+            break;
+
+        default:
+            break;
+    }
+
+    // 更新数据面状态（在锁内，但不调用回调）
+    bool has_p2p = false;
+    for (const auto& [pid, plink] : self_state_.p2p_links) {
+        if (plink.state == P2PConnectionState::CONNECTED) {
+            has_p2p = true;
+            break;
+        }
+    }
+
+    DataPlaneState new_data_state = self_state_.data_plane;
+    bool has_relay = self_state_.has_connected_relay();
+    if (has_relay && has_p2p) {
+        new_data_state = DataPlaneState::HYBRID;
+    } else if (has_relay) {
+        new_data_state = DataPlaneState::RELAY_ONLY;
+    } else if (has_p2p) {
+        new_data_state = DataPlaneState::DEGRADED;
+    } else {
+        new_data_state = DataPlaneState::OFFLINE;
+    }
+
+    auto old_data_state = self_state_.data_plane;
+    bool data_state_changed = (old_data_state != new_data_state);
+    if (data_state_changed) {
+        self_state_.data_plane = new_data_state;
+    }
+
+    lock.unlock();
+
+    // 触发回调（在锁外）
+    if (link.state != old_p2p_state) {
+        log().info("Self P2P with {}: {} -> {}",
+                   peer_id,
+                   p2p_connection_state_name(old_p2p_state),
+                   p2p_connection_state_name(link.state));
+
+        if (callbacks_.on_p2p_state_change) {
+            callbacks_.on_p2p_state_change(self_id_, peer_id, old_p2p_state, link.state);
+        }
+    }
+
+    if (data_state_changed) {
+        log().info("Data plane: {} -> {}",
+                   data_plane_state_name(old_data_state),
+                   data_plane_state_name(new_data_state));
+
+        if (callbacks_.on_data_plane_change) {
+            callbacks_.on_data_plane_change(old_data_state, new_data_state);
+        }
+
+        // 更新连接阶段
+        update_connection_phase();
     }
 }
 

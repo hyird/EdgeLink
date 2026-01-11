@@ -477,6 +477,9 @@ public:
     // 处理 P2P 事件
     void handle_p2p_event(NodeId node_id, NodeId peer_id, NodeEvent event);
 
+    // 处理自身节点的 P2P 事件 (Client 端使用 self_state_)
+    void handle_self_p2p_event(NodeId peer_id, NodeEvent event);
+
     // ========================================================================
     // 节点管理
     // ========================================================================
