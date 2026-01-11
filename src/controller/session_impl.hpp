@@ -593,7 +593,16 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Fram
         co_return;
     }
 
-    // 构造 P2P_ENDPOINT 响应
+    // 从数据库获取发起方节点信息
+    auto src_node = this->manager_.database().get_node(this->node_id_);
+    if (!src_node) {
+        log().warn("Source node {} not found in database", this->node_id_);
+        co_return;
+    }
+
+    // ========================================================================
+    // 1. 发送目标节点的端点给发起方
+    // ========================================================================
     P2PEndpointMsg resp;
     resp.init_seq = init->init_seq;
     resp.peer_node = init->target_node;
@@ -610,6 +619,26 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Fram
                 this->node_id_, init->target_node, resp.endpoints.size());
 
     co_await this->send_frame(FrameType::P2P_ENDPOINT, resp.serialize());
+
+    // ========================================================================
+    // 2. 双向打洞：同时通知目标节点也开始向发起方打洞
+    // ========================================================================
+    P2PEndpointMsg reverse_resp;
+    reverse_resp.init_seq = 0;  // 被动打洞，seq=0
+    reverse_resp.peer_node = this->node_id_;
+
+    // 复制发起方的公钥
+    if (src_node->machine_key.size() >= X25519_KEY_SIZE) {
+        std::copy_n(src_node->machine_key.begin(), X25519_KEY_SIZE, reverse_resp.peer_key.begin());
+    }
+
+    // 获取发起方的端点列表
+    reverse_resp.endpoints = this->manager_.get_node_endpoints(this->node_id_);
+
+    log().debug("Sending reverse P2P_ENDPOINT to node {} for peer {}: {} endpoints (bidirectional punch)",
+                init->target_node, this->node_id_, reverse_resp.endpoints.size());
+
+    co_await target_session->send_frame(FrameType::P2P_ENDPOINT, reverse_resp.serialize());
 }
 
 template<typename StreamType>

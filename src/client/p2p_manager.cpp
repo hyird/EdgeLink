@@ -180,17 +180,34 @@ void P2PManager::handle_p2p_endpoint(const P2PEndpointMsg& msg) {
     std::unique_lock lock(states_mutex_);
 
     auto it = peer_states_.find(msg.peer_node);
+
+    // seq=0 表示被动打洞请求（对端向我们发起了 P2P_INIT）
+    bool passive_punch = (msg.init_seq == 0);
+
     if (it == peer_states_.end()) {
-        log().warn("Received P2P_ENDPOINT for unknown peer {}", msg.peer_node);
-        return;
+        if (passive_punch && !msg.endpoints.empty()) {
+            // 被动打洞：创建新的状态并开始打洞
+            log().debug("Passive P2P punch request from peer {}", msg.peer_node);
+        } else {
+            log().warn("Received P2P_ENDPOINT for unknown peer {}", msg.peer_node);
+            return;
+        }
+    } else if (!passive_punch) {
+        // 主动打洞：验证序列号
+        auto& state = it->second;
+        if (state.init_seq != msg.init_seq) {
+            log().debug("P2P_ENDPOINT seq mismatch: expected {}, got {}",
+                state.init_seq, msg.init_seq);
+            return;
+        }
     }
 
-    auto& state = it->second;
+    // 获取或创建状态
+    auto& state = peer_states_[msg.peer_node];
 
-    // 验证序列号
-    if (state.init_seq != msg.init_seq) {
-        log().debug("P2P_ENDPOINT seq mismatch: expected {}, got {}",
-            state.init_seq, msg.init_seq);
+    // 如果已经是 CONNECTED 或正在 PUNCHING，不要重复处理
+    if (state.state == P2PState::CONNECTED) {
+        log().debug("Already connected to peer {}, ignoring P2P_ENDPOINT", msg.peer_node);
         return;
     }
 
@@ -201,8 +218,9 @@ void P2PManager::handle_p2p_endpoint(const P2PEndpointMsg& msg) {
     state.punch_count = 0;
     state.last_punch_time = 0;
 
-    log().debug("Received P2P_ENDPOINT for peer {}: {} endpoints",
-        msg.peer_node, msg.endpoints.size());
+    log().debug("Received P2P_ENDPOINT for peer {}: {} endpoints{}",
+        msg.peer_node, msg.endpoints.size(),
+        passive_punch ? " (passive punch)" : "");
 
     for (const auto& ep : msg.endpoints) {
         log().debug("  - {}.{}.{}.{}:{} (type={})",
