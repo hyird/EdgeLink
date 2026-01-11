@@ -304,35 +304,14 @@ void Client::setup_callbacks() {
             asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
                 try {
                     co_await self->p2p_mgr_->start();
+                    log().info("P2P manager started successfully");
                 } catch (const std::exception& e) {
                     log().error("P2P manager failed: {}", e.what());
                 }
             }(), asio::detached);
 
-            // 延迟上报端点，确保 P2P manager 完全启动
-            asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
-                try {
-                    // 等待一小段时间让 P2P manager 启动
-                    asio::steady_timer timer(self->ioc_);
-                    timer.expires_after(std::chrono::milliseconds(100));
-                    co_await timer.async_wait(asio::use_awaitable);
-
-                    // 检查状态并上报端点
-                    if (self->p2p_mgr_ && self->p2p_mgr_->is_running()) {
-                        auto ctrl = self->control_;
-                        if (ctrl && ctrl->is_connected()) {
-                            auto endpoints = self->p2p_mgr_->our_endpoints();
-                            log().debug("Reporting {} endpoints to controller", endpoints.size());
-                            if (!endpoints.empty()) {
-                                co_await ctrl->send_endpoint_update(endpoints);
-                                log().debug("Endpoint update sent successfully");
-                            }
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    log().debug("Endpoint report failed: {}", e.what());
-                }
-            }(), asio::detached);
+            // TODO: 端点上报暂时禁用，需要调查内存问题
+            // Endpoint reporting is temporarily disabled
         }
     };
 
