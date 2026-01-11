@@ -66,10 +66,27 @@ asio::awaitable<bool> P2PManager::start() {
         co_return true;
     }
 
+    // 使用 compare_exchange 防止多个协程同时进入启动流程
+    bool expected = false;
+    if (!starting_.compare_exchange_strong(expected, true)) {
+        // 另一个协程正在启动中，等待它完成
+        log().debug("P2P manager is already starting, waiting...");
+        while (starting_ && !running_) {
+            asio::steady_timer wait_timer(ioc_);
+            wait_timer.expires_after(std::chrono::milliseconds(100));
+            co_await wait_timer.async_wait(asio::use_awaitable);
+        }
+        co_return running_.load();
+    }
+
+    // 确保退出时重置 starting_ 标志（无论成功还是失败）
+    auto reset_starting = [this]() { starting_ = false; };
+
     // 初始化 UDP socket
     endpoints_.set_local_port(config_.bind_port);
     if (!co_await endpoints_.init_socket()) {
         log().error("Failed to initialize UDP socket");
+        reset_starting();
         co_return false;
     }
 
@@ -83,6 +100,7 @@ asio::awaitable<bool> P2PManager::start() {
     }
 
     running_ = true;
+    starting_ = false;  // 启动完成，重置标志
 
     // 启动后台任务
     asio::co_spawn(ioc_, recv_loop(), asio::detached);
@@ -109,6 +127,7 @@ asio::awaitable<void> P2PManager::stop() {
     }
 
     running_ = false;
+    starting_ = false;  // 确保启动标志也重置
 
     // 取消定时器
     keepalive_timer_.cancel();

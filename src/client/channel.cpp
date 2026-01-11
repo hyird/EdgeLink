@@ -696,6 +696,47 @@ asio::awaitable<uint32_t> ControlChannel::send_endpoint_update(const std::vector
     co_return update.request_id;
 }
 
+asio::awaitable<bool> ControlChannel::send_endpoint_update_and_wait_ack(
+    const std::vector<Endpoint>& endpoints,
+    uint32_t timeout_ms) {
+
+    // 发送端点更新
+    uint32_t request_id = co_await send_endpoint_update(endpoints);
+
+    // 创建或重置等待定时器
+    if (!endpoint_ack_timer_) {
+        endpoint_ack_timer_ = std::make_unique<asio::steady_timer>(ioc_);
+    }
+
+    // 设置超时
+    endpoint_ack_timer_->expires_after(std::chrono::milliseconds(timeout_ms));
+
+    try {
+        // 等待定时器：
+        // - 如果 handle_endpoint_ack 收到 ACK，会取消定时器，抛出 operation_aborted
+        // - 如果超时，正常返回
+        co_await endpoint_ack_timer_->async_wait(asio::use_awaitable);
+
+        // 超时了，检查是否仍在等待
+        if (endpoint_ack_pending_ && pending_endpoint_request_id_ == request_id) {
+            log().warn("ENDPOINT_UPDATE ACK timeout (request_id={})", request_id);
+            co_return false;
+        }
+    } catch (const boost::system::system_error& e) {
+        if (e.code() == asio::error::operation_aborted) {
+            // 定时器被取消，说明 ACK 已收到
+            if (!endpoint_ack_pending_) {
+                log().debug("ENDPOINT_UPDATE ACK received (request_id={})", request_id);
+                co_return true;
+            }
+        } else {
+            throw;
+        }
+    }
+
+    co_return !endpoint_ack_pending_;
+}
+
 asio::awaitable<void> ControlChannel::resend_pending_endpoints() {
     if (pending_endpoints_.empty()) {
         co_return;
@@ -724,6 +765,11 @@ asio::awaitable<void> ControlChannel::handle_endpoint_ack(const Frame& frame) {
         endpoint_ack_pending_ = false;
         log().debug("Received ENDPOINT_ACK: request_id={}, success={}, count={}",
                     ack->request_id, ack->success, ack->endpoint_count);
+
+        // 通知等待者 ACK 已收到（通过取消定时器）
+        if (endpoint_ack_timer_) {
+            endpoint_ack_timer_->cancel();
+        }
     } else {
         log().debug("Received ENDPOINT_ACK with unexpected request_id={} (expected {})",
                     ack->request_id, pending_endpoint_request_id_);

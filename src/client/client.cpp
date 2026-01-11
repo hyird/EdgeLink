@@ -456,7 +456,7 @@ void Client::setup_callbacks() {
             }
         };
 
-        // 【新增】异步版本：上报端点并等待确认
+        // 异步版本：上报端点并等待 Controller 确认（ENDPOINT_ACK）
         // 这确保 Controller 在处理 P2P_INIT 时已经有我们的端点
         p2p_cbs.on_endpoints_ready_async = [this](const std::vector<Endpoint>& endpoints) -> asio::awaitable<bool> {
             // 保存端点（用于重连后重发）
@@ -465,13 +465,16 @@ void Client::setup_callbacks() {
                 last_reported_endpoints_ = endpoints;
             }
 
-            // 上报端点给 Controller 并等待确认
+            // 上报端点给 Controller 并等待 ACK
             if (control_ && control_->is_connected()) {
-                log().debug("Sending endpoint update (async): {} endpoints", endpoints.size());
-                co_await control_->send_endpoint_update(endpoints);
-                // 这里简化处理：发送成功即认为确认
-                // 实际上可以等待 ENDPOINT_ACK，但目前 send_endpoint_update 已经是协程
-                co_return true;
+                log().debug("Sending endpoint update (async): {} endpoints, waiting for ACK", endpoints.size());
+                bool ack_received = co_await control_->send_endpoint_update_and_wait_ack(endpoints);
+                if (ack_received) {
+                    log().debug("Endpoint update confirmed by controller");
+                } else {
+                    log().warn("Endpoint update ACK not received, proceeding anyway");
+                }
+                co_return ack_received;
             }
             co_return false;
         };

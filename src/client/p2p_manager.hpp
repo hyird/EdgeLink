@@ -232,6 +232,7 @@ private:
     P2PCallbacks callbacks_;
 
     std::atomic<bool> running_{false};
+    std::atomic<bool> starting_{false};  // 正在启动中，防止重复进入 start()
 
     // 对端 P2P 状态
     mutable std::shared_mutex states_mutex_;

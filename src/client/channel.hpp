@@ -101,6 +101,12 @@ public:
     // Returns request_id for tracking acknowledgement
     asio::awaitable<uint32_t> send_endpoint_update(const std::vector<Endpoint>& endpoints);
 
+    // Send ENDPOINT_UPDATE and wait for ACK (with timeout)
+    // Returns true if ACK received, false on timeout
+    asio::awaitable<bool> send_endpoint_update_and_wait_ack(
+        const std::vector<Endpoint>& endpoints,
+        uint32_t timeout_ms = 5000);
+
     // Check if last endpoint update was acknowledged
     bool is_endpoint_ack_pending() const { return endpoint_ack_pending_; }
 
@@ -181,6 +187,7 @@ private:
     uint32_t pending_endpoint_request_id_ = 0;       // 待确认的请求 ID
     std::atomic<bool> endpoint_ack_pending_{false};  // 是否有待确认的请求
     std::vector<Endpoint> pending_endpoints_;        // 最后上报的端点（用于重发）
+    std::unique_ptr<asio::steady_timer> endpoint_ack_timer_;  // ACK 等待通知定时器
 
     ControlChannelCallbacks callbacks_;
 };
