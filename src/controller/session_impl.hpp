@@ -202,6 +202,10 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& 
             co_await handle_route_withdraw(frame);
             break;
 
+        case FrameType::P2P_INIT:
+            co_await handle_p2p_init(frame);
+            break;
+
         default:
             if (!this->authenticated_) {
                 co_await this->send_error(1001, "Not authenticated", frame.header.type);
@@ -545,6 +549,65 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_withdraw(cons
 
     // 通知其他节点路由更新
     co_await this->manager_.broadcast_route_update(this->network_id_, this->node_id_, {}, withdraw->routes);
+}
+
+template<typename StreamType>
+asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Frame& frame) {
+    if (!this->authenticated_) {
+        co_await this->send_error(1001, "Not authenticated", FrameType::P2P_INIT);
+        co_return;
+    }
+
+    auto init = P2PInit::parse(frame.payload);
+    if (!init) {
+        log().error("Invalid P2P_INIT format");
+        co_return;
+    }
+
+    log().debug("P2P_INIT from node {} targeting node {}, seq={}",
+                this->node_id_, init->target_node, init->init_seq);
+
+    // 查找目标节点的 Control Session
+    auto target_session = this->manager_.get_control_session(init->target_node);
+    if (!target_session) {
+        log().debug("Target node {} not connected, cannot provide endpoints", init->target_node);
+        // 发送空的 P2P_ENDPOINT 表示对端不在线
+        P2PEndpointMsg resp;
+        resp.init_seq = init->init_seq;
+        resp.peer_node = init->target_node;
+        resp.peer_key = {};  // 空公钥
+        resp.endpoints = {}; // 空端点列表
+        co_await this->send_frame(FrameType::P2P_ENDPOINT, resp.serialize());
+        co_return;
+    }
+
+    // 从数据库获取对端节点信息
+    auto peer_node = this->manager_.database().get_node(init->target_node);
+    if (!peer_node) {
+        log().warn("Target node {} not found in database", init->target_node);
+        co_return;
+    }
+
+    // 构造 P2P_ENDPOINT 响应
+    P2PEndpointMsg resp;
+    resp.init_seq = init->init_seq;
+    resp.peer_node = init->target_node;
+
+    // 复制公钥 (machine_key)
+    if (peer_node->machine_key.size() >= X25519_KEY_SIZE) {
+        std::copy_n(peer_node->machine_key.begin(), X25519_KEY_SIZE, resp.peer_key.begin());
+    }
+
+    // TODO: 获取对端端点信息
+    // 目前暂时返回空端点列表，后续需要：
+    // 1. 对端通过 STUN 获取的公网端点
+    // 2. 对端上报的本地端点
+    // 这需要对端先完成端点发现并上报给 Controller
+
+    log().debug("Sending P2P_ENDPOINT to node {} for peer {}: {} endpoints",
+                this->node_id_, init->target_node, resp.endpoints.size());
+
+    co_await this->send_frame(FrameType::P2P_ENDPOINT, resp.serialize());
 }
 
 template<typename StreamType>

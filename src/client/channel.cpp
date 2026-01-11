@@ -512,6 +512,9 @@ asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
         case FrameType::ROUTE_ACK:
             co_await handle_route_ack(frame);
             break;
+        case FrameType::P2P_ENDPOINT:
+            co_await handle_p2p_endpoint(frame);
+            break;
         case FrameType::PONG:
             co_await handle_pong(frame);
             break;
@@ -666,6 +669,26 @@ asio::awaitable<void> ControlChannel::send_route_withdraw(const std::vector<Rout
 
     co_await send_frame(FrameType::ROUTE_WITHDRAW, withdraw.serialize());
     log().info("Withdrew {} routes (request_id={})", routes.size(), withdraw.request_id);
+}
+
+asio::awaitable<void> ControlChannel::send_p2p_init(const P2PInit& init) {
+    co_await send_frame(FrameType::P2P_INIT, init.serialize());
+    log().debug("Sent P2P_INIT: target_node={}, init_seq={}", init.target_node, init.init_seq);
+}
+
+asio::awaitable<void> ControlChannel::handle_p2p_endpoint(const Frame& frame) {
+    auto msg = P2PEndpointMsg::parse(frame.payload);
+    if (!msg) {
+        log().error("Failed to parse P2P_ENDPOINT");
+        co_return;
+    }
+
+    log().debug("Received P2P_ENDPOINT: peer_node={}, init_seq={}, {} endpoints",
+                msg->peer_node, msg->init_seq, msg->endpoints.size());
+
+    if (callbacks_.on_p2p_endpoint) {
+        callbacks_.on_p2p_endpoint(*msg);
+    }
 }
 
 asio::awaitable<void> ControlChannel::handle_pong(const Frame& frame) {

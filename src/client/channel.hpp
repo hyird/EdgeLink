@@ -59,6 +59,7 @@ struct ControlChannelCallbacks {
     std::function<void(const Config&)> on_config;
     std::function<void(const ConfigUpdate&)> on_config_update;
     std::function<void(const RouteUpdate&)> on_route_update;
+    std::function<void(const P2PEndpointMsg&)> on_p2p_endpoint;  // P2P 端点响应
     std::function<void(uint16_t code, const std::string& msg)> on_error;
     std::function<void()> on_connected;
     std::function<void()> on_disconnected;
@@ -93,6 +94,9 @@ public:
     // Send ROUTE_WITHDRAW (withdraw previously announced routes)
     asio::awaitable<void> send_route_withdraw(const std::vector<RouteInfo>& routes);
 
+    // Send P2P_INIT (request peer endpoints from Controller)
+    asio::awaitable<void> send_p2p_init(const P2PInit& init);
+
     // Set callbacks
     void set_callbacks(ControlChannelCallbacks callbacks);
 
@@ -116,6 +120,7 @@ private:
     asio::awaitable<void> handle_config_update(const Frame& frame);
     asio::awaitable<void> handle_route_update(const Frame& frame);
     asio::awaitable<void> handle_route_ack(const Frame& frame);
+    asio::awaitable<void> handle_p2p_endpoint(const Frame& frame);
     asio::awaitable<void> handle_pong(const Frame& frame);
     asio::awaitable<void> handle_error(const Frame& frame);
 

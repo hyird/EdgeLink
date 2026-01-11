@@ -128,15 +128,33 @@ void Client::setup_callbacks() {
                 route_mgr_->sync_routes(config.routes);
             }
         }
+
+        // 自动对所有在线 peer 发起 P2P 连接
+        if (p2p_mgr_ && p2p_mgr_->is_running()) {
+            for (const auto& peer : config.peers) {
+                if (peer.online && peer.node_id != crypto_.node_id()) {
+                    p2p_mgr_->connect_peer(peer.node_id);
+                }
+            }
+        }
     };
 
     control_cbs.on_config_update = [this](const ConfigUpdate& update) {
         if (has_flag(update.update_flags, ConfigUpdateFlags::PEER_CHANGED)) {
             for (const auto& peer : update.add_peers) {
                 peers_.add_peer(peer);
+                // 新 peer 上线，自动发起 P2P 连接
+                if (p2p_mgr_ && p2p_mgr_->is_running() &&
+                    peer.online && peer.node_id != crypto_.node_id()) {
+                    p2p_mgr_->connect_peer(peer.node_id);
+                }
             }
             for (auto peer_id : update.del_peer_ids) {
                 peers_.remove_peer(peer_id);
+                // peer 下线，断开 P2P 连接
+                if (p2p_mgr_) {
+                    p2p_mgr_->disconnect_peer(peer_id);
+                }
             }
         }
     };
@@ -194,6 +212,13 @@ void Client::setup_callbacks() {
         log().error("Control error {}: {}", code, msg);
         if (callbacks_.on_error) {
             callbacks_.on_error(code, msg);
+        }
+    };
+
+    control_cbs.on_p2p_endpoint = [this](const P2PEndpointMsg& msg) {
+        // 转发给 P2PManager 处理
+        if (p2p_mgr_) {
+            p2p_mgr_->handle_p2p_endpoint(msg);
         }
     };
 
@@ -289,6 +314,55 @@ void Client::setup_callbacks() {
     };
 
     relay_->set_callbacks(std::move(relay_cbs));
+
+    // P2P manager callbacks
+    if (p2p_mgr_) {
+        P2PCallbacks p2p_cbs;
+
+        p2p_cbs.on_state_change = [this](NodeId peer_id, P2PState state) {
+            log().info("P2P state changed: peer={}, state={}",
+                       peers_.get_peer_ip_str(peer_id), p2p_state_name(state));
+        };
+
+        p2p_cbs.on_data = [this](NodeId peer_id, std::span<const uint8_t> data) {
+            log().debug("P2P data received: {} bytes from {}",
+                        data.size(), peers_.get_peer_ip_str(peer_id));
+
+            // Check for internal ping/pong messages (type byte 0xEE/0xEF)
+            if (data.size() >= 13 && (data[0] == 0xEE || data[0] == 0xEF)) {
+                handle_ping_data(peer_id, data);
+                return;
+            }
+
+            // If TUN mode is enabled, write IP packets to TUN device
+            if (is_tun_enabled() && ip_packet::version(data) == 4) {
+                auto result = tun_->write(data);
+                if (!result) {
+                    log().warn("Failed to write to TUN: {}", tun_error_message(result.error()));
+                }
+            }
+
+            // Call user callback
+            if (callbacks_.on_data_received) {
+                callbacks_.on_data_received(peer_id, data);
+            }
+        };
+
+        p2p_cbs.on_send_p2p_init = [this](const P2PInit& init) {
+            // 通过 Control Channel 发送 P2P_INIT
+            if (control_ && control_->is_connected()) {
+                asio::co_spawn(ioc_, control_->send_p2p_init(init), asio::detached);
+            }
+        };
+
+        p2p_cbs.on_send_p2p_status = [this](const P2PStatusMsg& status) {
+            // TODO: 通过 Control Channel 发送 P2P_STATUS
+            log().debug("P2P status: peer={}, state={}, latency={}ms",
+                        status.peer_node, static_cast<int>(status.status), status.latency_ms);
+        };
+
+        p2p_mgr_->set_callbacks(std::move(p2p_cbs));
+    }
 }
 
 bool Client::setup_tun() {
@@ -607,13 +681,18 @@ asio::awaitable<void> Client::stop() {
 
 asio::awaitable<bool> Client::send_to_peer(NodeId peer_id, std::span<const uint8_t> data) {
     // 优先尝试 P2P 发送
-    if (p2p_mgr_ && p2p_mgr_->is_p2p_connected(peer_id)) {
-        bool sent = co_await p2p_mgr_->send_data(peer_id, data);
-        if (sent) {
-            co_return true;
+    if (p2p_mgr_ && p2p_mgr_->is_running()) {
+        if (p2p_mgr_->is_p2p_connected(peer_id)) {
+            bool sent = co_await p2p_mgr_->send_data(peer_id, data);
+            if (sent) {
+                co_return true;
+            }
+            // P2P 发送失败，回退到 Relay
+            log().debug("P2P send failed, falling back to relay");
+        } else {
+            // P2P 未连接，尝试发起连接（异步，不阻塞当前发送）
+            p2p_mgr_->connect_peer(peer_id);
         }
-        // P2P 发送失败，回退到 Relay
-        log().debug("P2P send failed, falling back to relay");
     }
 
     // 通过 Relay 发送

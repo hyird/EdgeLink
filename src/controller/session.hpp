@@ -135,6 +135,7 @@ private:
     asio::awaitable<void> handle_latency_report(const Frame& frame);
     asio::awaitable<void> handle_route_announce(const Frame& frame);
     asio::awaitable<void> handle_route_withdraw(const Frame& frame);
+    asio::awaitable<void> handle_p2p_init(const Frame& frame);
 
     // Send CONFIG to this client
     asio::awaitable<void> send_config();

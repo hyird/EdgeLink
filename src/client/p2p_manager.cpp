@@ -136,6 +136,7 @@ void P2PManager::connect_peer(NodeId peer_id) {
     state.state = P2PState::RESOLVING;
     state.init_seq = ++init_seq_;
     state.punch_count = 0;
+    state.last_punch_time = now_us();  // 记录 RESOLVING 开始时间
 
     lock.unlock();
 
@@ -449,21 +450,39 @@ asio::awaitable<void> P2PManager::punch_loop() {
             }
         }
 
-        // 检查打洞超时
+        // 检查打洞超时和 RESOLVING 超时
         std::vector<NodeId> timed_out;
         {
             std::shared_lock lock(states_mutex_);
             for (const auto& [id, state] : peer_states_) {
-                if (state.state == P2PState::PUNCHING && state.last_punch_time > 0) {
-                    if (now - state.last_punch_time > config_.punch_timeout_sec * 1000000ULL) {
-                        timed_out.push_back(id);
+                if (state.last_punch_time > 0) {
+                    if (state.state == P2PState::PUNCHING) {
+                        // 打洞超时 (punch_timeout_sec)
+                        if (now - state.last_punch_time > config_.punch_timeout_sec * 1000000ULL) {
+                            timed_out.push_back(id);
+                        }
+                    } else if (state.state == P2PState::RESOLVING) {
+                        // RESOLVING 超时 (5 秒)
+                        if (now - state.last_punch_time > 5 * 1000000ULL) {
+                            timed_out.push_back(id);
+                        }
                     }
                 }
             }
         }
 
         for (auto peer_id : timed_out) {
-            log().warn("P2P hole punching to peer {} timed out", peer_id);
+            std::shared_lock lock(states_mutex_);
+            auto it = peer_states_.find(peer_id);
+            if (it != peer_states_.end()) {
+                auto old_state = it->second.state;
+                lock.unlock();
+                log().warn("P2P {} to peer {} timed out",
+                           old_state == P2PState::RESOLVING ? "resolving" : "hole punching",
+                           peer_id);
+            } else {
+                lock.unlock();
+            }
             set_peer_state(peer_id, P2PState::RELAY_ONLY);
             report_p2p_status(peer_id);
         }
