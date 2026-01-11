@@ -69,6 +69,8 @@ struct P2PCallbacks {
     std::function<void(const P2PInit& init)> on_send_p2p_init;
     // 请求发送 P2P_STATUS (通过 Control Channel)
     std::function<void(const P2PStatusMsg& status)> on_send_p2p_status;
+    // 端点已就绪，需要上报给 Controller
+    std::function<void(const std::vector<Endpoint>& endpoints)> on_endpoints_ready;
 };
 
 /**

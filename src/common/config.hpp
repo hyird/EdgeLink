@@ -165,6 +165,7 @@ struct ClientConfig {
     // Logging
     std::string log_level = "debug";
     std::string log_file;
+    std::unordered_map<std::string, std::string> module_log_levels;  // 模块级别日志配置
 
     // Load from TOML file
     static std::expected<ClientConfig, ConfigError> load(const std::string& path);

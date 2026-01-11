@@ -281,6 +281,14 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             if (auto v = (*log)["file"].value<std::string>()) {
                 config.log_file = *v;
             }
+            // [log.modules] 模块级别日志配置
+            if (auto modules = (*log)["modules"].as_table()) {
+                for (const auto& [key, value] : *modules) {
+                    if (auto v = value.value<std::string>()) {
+                        config.module_log_levels[std::string(key)] = *v;
+                    }
+                }
+            }
         }
 
         // [p2p] section

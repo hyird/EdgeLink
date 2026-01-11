@@ -90,6 +90,14 @@ asio::awaitable<bool> P2PManager::start() {
     asio::co_spawn(ioc_, retry_loop(), asio::detached);
 
     log().info("P2P manager started on port {}", endpoints_.local_port());
+
+    // 通知端点已就绪，需要上报给 Controller
+    if (callbacks_.on_endpoints_ready) {
+        auto eps = endpoints_.get_all_endpoints();
+        log().debug("Reporting {} endpoints to controller", eps.size());
+        callbacks_.on_endpoints_ready(eps);
+    }
+
     co_return true;
 }
 

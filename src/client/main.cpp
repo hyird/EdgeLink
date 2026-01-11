@@ -23,7 +23,8 @@ using namespace edgelink::client;
 constexpr const char* VERSION = "1.0.0";
 constexpr const char* BUILD_DATE = __DATE__;
 
-void setup_logging(const std::string& level, const std::string& log_file) {
+void setup_logging(const std::string& level, const std::string& log_file,
+                   const std::unordered_map<std::string, std::string>& module_levels = {}) {
     LogConfig config;
     config.global_level = log_level_from_string(level);
     config.console_enabled = true;
@@ -32,6 +33,11 @@ void setup_logging(const std::string& level, const std::string& log_file) {
     if (!log_file.empty()) {
         config.file_enabled = true;
         config.file_path = log_file;
+    }
+
+    // 模块级别日志配置
+    for (const auto& [module, module_level] : module_levels) {
+        config.module_levels[module] = log_level_from_string(module_level);
     }
 
     LogManager::instance().init(config);
@@ -863,7 +869,7 @@ int cmd_up(int argc, char* argv[]) {
     }
 
     // Setup logging with new system
-    setup_logging(cfg.log_level, cfg.log_file);
+    setup_logging(cfg.log_level, cfg.log_file, cfg.module_log_levels);
 
     auto& log = Logger::get("client");
     log.info("EdgeLink Client {} starting...", VERSION);

@@ -11,7 +11,6 @@
 # Controller server address (API paths are appended automatically)
 # [热重载: 重连]
 url = "localhost:8080"
-
 # Enable TLS (wss://), default: disabled
 # [热重载: 重连]
 tls = false
@@ -150,8 +149,17 @@ stun_timeout = 5000
 [log]
 # Log level: trace, debug, info, warn, error
 # [热重载: 立即生效]
-level = "debug"
+level = "info"
 
 # Log file (optional, logs to console if not specified)
 # [热重载: 下次启动生效]
 # file = "/var/log/edgelink-client.log"
+
+# Module-specific log levels
+# Available modules: client, client.p2p, client.endpoint, client.channel,
+#                   client.tun, client.route, client.peer_manager, client.crypto, client.ipc
+# [热重载: 立即生效]
+[log.modules]
+# 例如: 只对 P2P 模块启用 debug 日志
+# "client.p2p" = "debug"
+# "client.endpoint" = "debug"

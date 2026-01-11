@@ -358,6 +358,14 @@ void Client::setup_callbacks() {
                         status.peer_node, static_cast<int>(status.status), status.latency_ms);
         };
 
+        p2p_cbs.on_endpoints_ready = [this](const std::vector<Endpoint>& endpoints) {
+            // 上报端点给 Controller
+            if (control_ && control_->is_connected()) {
+                log().debug("Sending endpoint update: {} endpoints", endpoints.size());
+                asio::co_spawn(ioc_, control_->send_endpoint_update(endpoints), asio::detached);
+            }
+        };
+
         p2p_mgr_->set_callbacks(std::move(p2p_cbs));
     }
 }
