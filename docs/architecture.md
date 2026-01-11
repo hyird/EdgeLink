@@ -2283,19 +2283,24 @@ else:
 
 #### P2P CONNECTED 状态维持与超时
 
+**无感知切换设计**：
+- P2P 通时自动使用 P2P 直连
+- P2P 不通时立即切回 Relay（3 秒内）
+- 用户无感知，数据传输不中断
+
 **Keepalive 机制**：
 
-| 参数                   | 默认值 | 说明                                 |
-| ---------------------- | ------ | ------------------------------------ |
-| keepalive_interval     | 15s    | P2P_KEEPALIVE 发送间隔               |
-| keepalive_timeout      | 45s    | 未收到任何包的超时时间 (3x interval) |
-| keepalive_miss_limit   | 3      | 连续丢失次数阈值                     |
+| 参数                   | 默认值 | 说明                                   |
+| ---------------------- | ------ | -------------------------------------- |
+| keepalive_interval     | 1s     | P2P_KEEPALIVE 发送间隔（快速检测）     |
+| keepalive_timeout      | 3s     | 未收到任何包的超时时间（立即切换）     |
+| keepalive_miss_limit   | 3      | 连续丢失次数阈值                       |
 
 **状态转换条件**：
 
 | 条件                                    | 目标状态    | 说明                        |
 | --------------------------------------- | ----------- | --------------------------- |
-| 超过 45s 未收到任何 P2P 包              | RELAY_ONLY  | 超时，降级到 Relay          |
+| 超过 3s 未收到任何 P2P 包               | RELAY_ONLY  | 超时，立即降级到 Relay      |
 | 连续 3 次 KEEPALIVE 无响应              | RELAY_ONLY  | 探测失败，降级到 Relay      |
 | 收到 P2P 数据包或 KEEPALIVE_ACK         | CONNECTED   | 保持连接，重置超时计时器    |
 | 对端主动发送断开通知                    | IDLE        | 对端主动断开                |
@@ -4291,14 +4296,16 @@ level = "info"  # 全局默认等级
 | reconnect.multiplier     | float    | 2.0       | 重连延迟倍数               |
 | p2p.enabled              | bool     | true      | 启用 P2P 直连              |
 | p2p.bind_port            | uint16   | 0         | UDP 绑定端口 (0=随机)      |
-| p2p.keepalive_interval   | uint32   | 15        | P2P keepalive 间隔 (秒)    |
-| p2p.keepalive_timeout    | uint32   | 45        | P2P keepalive 超时 (秒)    |
+| p2p.keepalive_interval   | uint32   | 1         | P2P keepalive 间隔 (秒，快速检测) |
+| p2p.keepalive_timeout    | uint32   | 3         | P2P keepalive 超时 (秒，立即切换) |
 | p2p.punch_timeout        | uint32   | 10        | 打洞超时时间 (秒)          |
 | p2p.punch_batch_count    | uint32   | 5         | 打洞批次数 (EasyTier: 5)   |
 | p2p.punch_batch_size     | uint32   | 2         | 每批发送包数 (EasyTier: 2) |
 | p2p.punch_batch_interval | uint32   | 400       | 批次间隔 (毫秒, EasyTier: 400) |
 | p2p.retry_interval       | uint32   | 60        | 失败后重试间隔 (秒)        |
 | p2p.stun_timeout         | uint32   | 5000      | STUN 探测超时 (毫秒)       |
+| p2p.endpoint_refresh     | uint32   | 60        | 端点刷新间隔 (秒)          |
+| routing.announce_interval| uint32   | 60        | 路由公告刷新间隔 (秒)      |
 | queue.capacity           | uint32   | 65536     | 消息队列最大容量           |
 | queue.high_watermark     | float    | 0.8       | 高水位线 (触发背压)        |
 | queue.low_watermark      | float    | 0.5       | 低水位线 (恢复正常)        |
@@ -5247,18 +5254,21 @@ enable = true
 # advertise_routes = ["192.168.1.0/24", "10.0.0.0/8"]
 # 作为出口节点，通告 0.0.0.0/0
 # exit_node = false
+# 路由公告刷新间隔 (秒，确保同步)
+announce_interval = 60
 
 [p2p]
 enabled = true                         # 启用 P2P NAT 穿透
 bind_port = 0                          # UDP 绑定端口 (0=随机)
-keepalive_interval = 15                # Keepalive 间隔 (秒)
-keepalive_timeout = 45                 # Keepalive 超时 (秒)
+keepalive_interval = 1                 # Keepalive 间隔 (秒，快速检测)
+keepalive_timeout = 3                  # Keepalive 超时 (秒，立即切换)
 punch_timeout = 10                     # 打洞超时 (秒)
 punch_batch_count = 5                  # 打洞批次数 (EasyTier: 5)
 punch_batch_size = 2                   # 每批发送包数 (EasyTier: 2)
 punch_batch_interval = 400             # 批次间隔 (毫秒, EasyTier: 400)
 retry_interval = 60                    # 失败后重试间隔 (秒)
 stun_timeout = 5000                    # STUN 查询超时 (毫秒)
+endpoint_refresh_interval = 60         # 端点刷新间隔 (秒，确保同步)
 
 [log]
 level = "info"
