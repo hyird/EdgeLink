@@ -889,6 +889,10 @@ int cmd_up(int argc, char* argv[]) {
     try {
         asio::io_context ioc;
 
+        // 使用 work_guard 防止 io_context.run() 在没有挂起操作时提前返回
+        // 这在容器环境中特别重要，因为某些协程可能异步完成
+        auto work_guard = asio::make_work_guard(ioc);
+
         // Create client config
         client::ClientConfig client_cfg;
         client_cfg.controller_hosts = cfg.controller_hosts;
@@ -971,10 +975,10 @@ int cmd_up(int argc, char* argv[]) {
             Logger::get("client").error("Error {}: {}", code, msg);
         };
 
-        callbacks.on_shutdown_requested = [&ioc, &client, &log]() {
+        callbacks.on_shutdown_requested = [&ioc, &client, &log, &work_guard]() {
             log.info("Shutdown requested via IPC, stopping...");
+            work_guard.reset();  // 允许 io_context.run() 在没有挂起操作时返回
             asio::co_spawn(ioc, client->stop(), asio::detached);
-            ioc.stop();
         };
 
         client->set_callbacks(std::move(callbacks));
@@ -991,8 +995,8 @@ int cmd_up(int argc, char* argv[]) {
         asio::signal_set signals(ioc, SIGINT, SIGTERM);
         signals.async_wait([&](const boost::system::error_code&, int sig) {
             log.info("Received signal {}, shutting down...", sig);
+            work_guard.reset();  // 允许 io_context.run() 在没有挂起操作时返回
             asio::co_spawn(ioc, client->stop(), asio::detached);
-            ioc.stop();
         });
 
         // Start client
