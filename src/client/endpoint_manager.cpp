@@ -82,6 +82,33 @@ uint32_t read_u32_be(const uint8_t* data) {
            static_cast<uint32_t>(data[3]);
 }
 
+// 判断 IPv4 地址是否是私有/内网 IP
+// 包括: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 (CGNAT),
+//       127.0.0.0/8 (Loopback), 169.254.0.0/16 (Link-local)
+bool is_private_ip(const std::array<uint8_t, 4>& addr) {
+    uint8_t a = addr[0], b = addr[1];
+
+    // 127.0.0.0/8 - Loopback
+    if (a == 127) return true;
+
+    // 10.0.0.0/8
+    if (a == 10) return true;
+
+    // 172.16.0.0/12 (172.16.0.0 - 172.31.255.255)
+    if (a == 172 && b >= 16 && b <= 31) return true;
+
+    // 192.168.0.0/16
+    if (a == 192 && b == 168) return true;
+
+    // 100.64.0.0/10 (100.64.0.0 - 100.127.255.255) - CGNAT
+    if (a == 100 && b >= 64 && b <= 127) return true;
+
+    // 169.254.0.0/16 - Link-local
+    if (a == 169 && b == 254) return true;
+
+    return false;
+}
+
 } // anonymous namespace
 
 const char* nat_type_name(NatType type) {
@@ -230,13 +257,8 @@ asio::awaitable<StunQueryResult> EndpointManager::query_stun_endpoint() {
 std::vector<Endpoint> EndpointManager::get_all_endpoints() const {
     std::vector<Endpoint> endpoints;
 
-    // 添加本地端点
-    {
-        std::lock_guard lock(local_mutex_);
-        endpoints.insert(endpoints.end(), local_endpoints_.begin(), local_endpoints_.end());
-    }
-
-    // 添加 STUN 端点
+    // 只添加 STUN 端点（公网 IP）
+    // 私有 IP (10.x, 172.16-31.x, 192.168.x, 100.64-127.x) 对跨网络的对端没有意义
     {
         std::lock_guard lock(stun_mutex_);
         if (stun_endpoint_) {
