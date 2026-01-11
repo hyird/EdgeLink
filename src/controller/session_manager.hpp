@@ -96,6 +96,19 @@ public:
         return builtin_stun_;
     }
 
+    // ========================================================================
+    // 节点端点缓存
+    // ========================================================================
+
+    // 更新节点的端点列表
+    void update_node_endpoints(NodeId node_id, const std::vector<Endpoint>& endpoints);
+
+    // 获取节点的端点列表
+    std::vector<Endpoint> get_node_endpoints(NodeId node_id) const;
+
+    // 清除节点的端点
+    void clear_node_endpoints(NodeId node_id);
+
 private:
     asio::io_context& ioc_;
     Database& db_;
@@ -119,6 +132,10 @@ private:
     // Builtin Relay/STUN 配置
     ControllerConfig::BuiltinRelayConfig builtin_relay_;
     ControllerConfig::BuiltinStunConfig builtin_stun_;
+
+    // 节点端点缓存 (内存中，会话断开时清除)
+    mutable std::shared_mutex endpoints_mutex_;
+    std::unordered_map<NodeId, std::vector<Endpoint>> node_endpoints_;
 };
 
 } // namespace edgelink::controller

@@ -97,6 +97,9 @@ public:
     // Send P2P_INIT (request peer endpoints from Controller)
     asio::awaitable<void> send_p2p_init(const P2PInit& init);
 
+    // Send ENDPOINT_UPDATE (report our endpoints to Controller)
+    asio::awaitable<void> send_endpoint_update(const std::vector<Endpoint>& endpoints);
+
     // Set callbacks
     void set_callbacks(ControlChannelCallbacks callbacks);
 

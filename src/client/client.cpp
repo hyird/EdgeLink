@@ -298,9 +298,19 @@ void Client::setup_callbacks() {
             asio::co_spawn(ioc_, announce_configured_routes(), asio::detached);
         }
 
-        // Start P2P manager
+        // Start P2P manager and report endpoints
         if (p2p_mgr_) {
-            asio::co_spawn(ioc_, p2p_mgr_->start(), asio::detached);
+            auto self = shared_from_this();
+            asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
+                bool started = co_await self->p2p_mgr_->start();
+                if (started && self->control_ && self->control_->is_connected()) {
+                    // 上报端点给 Controller
+                    auto endpoints = self->p2p_mgr_->our_endpoints();
+                    if (!endpoints.empty()) {
+                        co_await self->control_->send_endpoint_update(endpoints);
+                    }
+                }
+            }(), asio::detached);
         }
     };
 

@@ -1290,4 +1290,38 @@ std::expected<P2PStatusMsg, ParseError> P2PStatusMsg::parse(std::span<const uint
     return msg;
 }
 
+// ============================================================================
+// EndpointUpdate
+// ============================================================================
+
+std::vector<uint8_t> EndpointUpdate::serialize() const {
+    BinaryWriter writer;
+    writer.write_u16_be(static_cast<uint16_t>(endpoints.size()));
+    for (const auto& ep : endpoints) {
+        serialization::write_endpoint(writer, ep);
+    }
+    return writer.take();
+}
+
+std::expected<EndpointUpdate, ParseError> EndpointUpdate::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    EndpointUpdate msg;
+
+    auto count = reader.read_u16_be();
+    if (!count) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    msg.endpoints.reserve(*count);
+    for (uint16_t i = 0; i < *count; ++i) {
+        auto ep = serialization::read_endpoint(reader);
+        if (!ep) {
+            return std::unexpected(ep.error());
+        }
+        msg.endpoints.push_back(*ep);
+    }
+
+    return msg;
+}
+
 } // namespace edgelink

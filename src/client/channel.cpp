@@ -676,6 +676,13 @@ asio::awaitable<void> ControlChannel::send_p2p_init(const P2PInit& init) {
     log().debug("Sent P2P_INIT: target_node={}, init_seq={}", init.target_node, init.init_seq);
 }
 
+asio::awaitable<void> ControlChannel::send_endpoint_update(const std::vector<Endpoint>& endpoints) {
+    EndpointUpdate update;
+    update.endpoints = endpoints;
+    co_await send_frame(FrameType::ENDPOINT_UPDATE, update.serialize());
+    log().debug("Sent ENDPOINT_UPDATE: {} endpoints", endpoints.size());
+}
+
 asio::awaitable<void> ControlChannel::handle_p2p_endpoint(const Frame& frame) {
     auto msg = P2PEndpointMsg::parse(frame.payload);
     if (!msg) {

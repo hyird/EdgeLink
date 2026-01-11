@@ -324,6 +324,14 @@ struct P2PStatusMsg {
     static std::expected<P2PStatusMsg, ParseError> parse(std::span<const uint8_t> data);
 };
 
+// ENDPOINT_UPDATE (0x46) - 客户端上报自己的端点
+struct EndpointUpdate {
+    std::vector<Endpoint> endpoints;  // 本节点的端点列表
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<EndpointUpdate, ParseError> parse(std::span<const uint8_t> data);
+};
+
 // ============================================================================
 // Serialization Helpers
 // ============================================================================

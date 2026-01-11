@@ -150,6 +150,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::run() {
     // Cleanup
     if (this->authenticated_ && this->node_id_ != 0) {
         this->manager_.unregister_control_session(this->node_id_);
+        this->manager_.clear_node_endpoints(this->node_id_);
         this->manager_.database().update_node_online(this->node_id_, false);
 
         // Get node's routes before deleting them (for broadcasting withdrawal)
@@ -204,6 +205,10 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& 
 
         case FrameType::P2P_INIT:
             co_await handle_p2p_init(frame);
+            break;
+
+        case FrameType::ENDPOINT_UPDATE:
+            co_await handle_endpoint_update(frame);
             break;
 
         default:
@@ -598,16 +603,37 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Fram
         std::copy_n(peer_node->machine_key.begin(), X25519_KEY_SIZE, resp.peer_key.begin());
     }
 
-    // TODO: 获取对端端点信息
-    // 目前暂时返回空端点列表，后续需要：
-    // 1. 对端通过 STUN 获取的公网端点
-    // 2. 对端上报的本地端点
-    // 这需要对端先完成端点发现并上报给 Controller
+    // 获取对端上报的端点列表
+    resp.endpoints = this->manager_.get_node_endpoints(init->target_node);
 
     log().debug("Sending P2P_ENDPOINT to node {} for peer {}: {} endpoints",
                 this->node_id_, init->target_node, resp.endpoints.size());
 
     co_await this->send_frame(FrameType::P2P_ENDPOINT, resp.serialize());
+}
+
+template<typename StreamType>
+asio::awaitable<void> ControlSessionImpl<StreamType>::handle_endpoint_update(const Frame& frame) {
+    if (!this->authenticated_) {
+        co_await this->send_error(1001, "Not authenticated", FrameType::ENDPOINT_UPDATE);
+        co_return;
+    }
+
+    auto update = EndpointUpdate::parse(frame.payload);
+    if (!update) {
+        log().error("Invalid ENDPOINT_UPDATE format");
+        co_return;
+    }
+
+    log().debug("Node {} reported {} endpoints", this->node_id_, update->endpoints.size());
+    for (const auto& ep : update->endpoints) {
+        log().debug("  - {}.{}.{}.{}:{} (type={})",
+                    ep.address[0], ep.address[1], ep.address[2], ep.address[3],
+                    ep.port, static_cast<int>(ep.type));
+    }
+
+    // 存储端点到 SessionManager
+    this->manager_.update_node_endpoints(this->node_id_, update->endpoints);
 }
 
 template<typename StreamType>

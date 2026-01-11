@@ -250,4 +250,29 @@ std::string SessionManager::get_node_ip_str(NodeId node_id) {
     return std::to_string(node_id);
 }
 
+// ============================================================================
+// 节点端点缓存
+// ============================================================================
+
+void SessionManager::update_node_endpoints(NodeId node_id, const std::vector<Endpoint>& endpoints) {
+    std::unique_lock lock(endpoints_mutex_);
+    node_endpoints_[node_id] = endpoints;
+    log().debug("Updated endpoints for node {}: {} endpoints", node_id, endpoints.size());
+}
+
+std::vector<Endpoint> SessionManager::get_node_endpoints(NodeId node_id) const {
+    std::shared_lock lock(endpoints_mutex_);
+    auto it = node_endpoints_.find(node_id);
+    if (it != node_endpoints_.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+void SessionManager::clear_node_endpoints(NodeId node_id) {
+    std::unique_lock lock(endpoints_mutex_);
+    node_endpoints_.erase(node_id);
+    log().debug("Cleared endpoints for node {}", node_id);
+}
+
 } // namespace edgelink::controller
