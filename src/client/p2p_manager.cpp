@@ -237,9 +237,7 @@ void P2PManager::disconnect_peer(NodeId peer_id) {
         lock.unlock();
 
         if (old_state != P2PState::IDLE) {
-            if (callbacks_.on_state_change) {
-                callbacks_.on_state_change(peer_id, P2PState::IDLE);
-            }
+            notify_state_change(peer_id, P2PState::IDLE);
         }
     }
 }
@@ -308,9 +306,7 @@ void P2PManager::handle_p2p_endpoint(const P2PEndpointMsg& msg) {
 
     lock.unlock();
 
-    if (callbacks_.on_state_change) {
-        callbacks_.on_state_change(msg.peer_node, P2PState::PUNCHING);
-    }
+    notify_state_change(msg.peer_node, P2PState::PUNCHING);
 
     // 立即启动分批打洞 (EasyTier 风格)
     asio::co_spawn(ioc_, do_punch_batches(msg.peer_node), asio::detached);
@@ -517,9 +513,7 @@ asio::awaitable<void> P2PManager::keepalive_loop() {
                 lock.unlock();
 
                 log().warn("P2P connection to peer {} timed out", peer_id);
-                if (callbacks_.on_state_change) {
-                    callbacks_.on_state_change(peer_id, P2PState::RELAY_ONLY);
-                }
+                notify_state_change(peer_id, P2PState::RELAY_ONLY);
                 report_p2p_status(peer_id);
             }
             // 如果条件不满足，说明期间收到了新数据，跳过
@@ -599,9 +593,7 @@ asio::awaitable<void> P2PManager::punch_loop() {
                        old_state == P2PState::RESOLVING ? "resolving" : "hole punching",
                        peer_id);
 
-            if (callbacks_.on_state_change) {
-                callbacks_.on_state_change(peer_id, P2PState::RELAY_ONLY);
-            }
+            notify_state_change(peer_id, P2PState::RELAY_ONLY);
             report_p2p_status(peer_id);
         }
     }
@@ -892,9 +884,7 @@ void P2PManager::handle_p2p_ping(const asio::ip::udp::endpoint& from,
         log().info("P2P connection established with peer {} via {}",
             ping.src_node, from.address().to_string());
 
-        if (callbacks_.on_state_change) {
-            callbacks_.on_state_change(ping.src_node, P2PState::CONNECTED);
-        }
+        notify_state_change(ping.src_node, P2PState::CONNECTED);
         report_p2p_status(ping.src_node);
     } else {
         state.last_recv_time = now_us();
@@ -934,9 +924,7 @@ void P2PManager::handle_p2p_pong(const asio::ip::udp::endpoint& from,
         log().info("P2P connection established with peer {} via {} (latency: {}ms)",
             pong.src_node, from.address().to_string(), latency_ms);
 
-        if (callbacks_.on_state_change) {
-            callbacks_.on_state_change(pong.src_node, P2PState::CONNECTED);
-        }
+        notify_state_change(pong.src_node, P2PState::CONNECTED);
         report_p2p_status(pong.src_node);
     }
 
@@ -1164,9 +1152,16 @@ void P2PManager::set_peer_state(NodeId peer_id, P2PState state) {
         it->second.state = state;
         lock.unlock();
 
-        if (old_state != state && callbacks_.on_state_change) {
-            callbacks_.on_state_change(peer_id, state);
+        if (old_state != state) {
+            notify_state_change(peer_id, state);
         }
+    }
+}
+
+void P2PManager::notify_state_change(NodeId peer_id, P2PState state) {
+    if (state_channel_) {
+        // 使用 try_send 避免阻塞，channel 满时丢弃
+        state_channel_->try_send(boost::system::error_code{}, peer_id, state);
     }
 }
 

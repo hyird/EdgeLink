@@ -254,6 +254,9 @@ private:
     // Route announce loop - periodically re-announce routes
     asio::awaitable<void> route_announce_loop();
 
+    // P2P state handler - 处理 P2P 状态变化（替代回调）
+    asio::awaitable<void> p2p_state_handler();
+
     // Reconnection logic
     asio::awaitable<void> reconnect();
 
@@ -308,6 +311,7 @@ private:
     // P2P support
     std::unique_ptr<EndpointManager> endpoint_mgr_;
     std::unique_ptr<P2PManager> p2p_mgr_;
+    std::unique_ptr<P2PStateChannel> p2p_state_channel_;  // P2P 状态变化通道
 
     // 保存最后上报的端点（用于重连后重发）
     std::vector<Endpoint> last_reported_endpoints_;

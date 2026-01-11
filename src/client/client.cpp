@@ -44,6 +44,10 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     endpoint_mgr_ = std::make_unique<EndpointManager>(ioc);
     p2p_mgr_ = std::make_unique<P2PManager>(ioc, crypto_, peers_, *endpoint_mgr_);
 
+    // 创建 P2P 状态变化通道（容量 64）
+    p2p_state_channel_ = std::make_unique<P2PStateChannel>(ioc, 64);
+    p2p_mgr_->set_state_channel(p2p_state_channel_.get());
+
     // 设置 P2P 配置
     client::P2PConfig p2p_cfg;
     p2p_cfg.enabled = config_.p2p.enabled;
@@ -375,6 +379,11 @@ void Client::setup_callbacks() {
         // Start keepalive
         asio::co_spawn(ioc_, keepalive_loop(), asio::detached);
 
+        // Start P2P state handler (处理 P2P 状态变化)
+        if (p2p_state_channel_) {
+            asio::co_spawn(ioc_, p2p_state_handler(), asio::detached);
+        }
+
         // Start DNS refresh loop
         asio::co_spawn(ioc_, dns_refresh_loop(), asio::detached);
 
@@ -414,43 +423,9 @@ void Client::setup_callbacks() {
     relay_->set_callbacks(std::move(relay_cbs));
 
     // P2P manager callbacks
+    // 注意：on_state_change 已移除，改用 p2p_state_channel_ 和 p2p_state_handler() 协程
     if (p2p_mgr_) {
         P2PCallbacks p2p_cbs;
-
-        p2p_cbs.on_state_change = [this](NodeId peer_id, P2PState state) {
-            log().info("P2P state changed: peer={}, state={}",
-                       peers_.get_peer_ip_str(peer_id), p2p_state_name(state));
-
-            // 通知状态机 P2P 状态变化
-            switch (state) {
-                case P2PState::RESOLVING:
-                    state_machine_.handle_p2p_event(crypto_.node_id(), peer_id, NodeEvent::P2P_INIT_SENT);
-                    break;
-                case P2PState::PUNCHING:
-                    state_machine_.handle_p2p_event(crypto_.node_id(), peer_id, NodeEvent::P2P_ENDPOINT_RECEIVED);
-                    break;
-                case P2PState::CONNECTED:
-                    state_machine_.handle_p2p_event(crypto_.node_id(), peer_id, NodeEvent::P2P_PUNCH_SUCCESS);
-                    state_machine_.set_peer_data_path(peer_id, PeerDataPath::P2P);
-                    break;
-                case P2PState::RELAY_ONLY:
-                    // P2P 失败，回退到 Relay
-                    state_machine_.handle_p2p_event(crypto_.node_id(), peer_id, NodeEvent::P2P_PUNCH_TIMEOUT);
-                    state_machine_.set_peer_data_path(peer_id, PeerDataPath::RELAY);
-                    break;
-                default:
-                    break;
-            }
-
-            // 更新 PeerManager 的连接状态（保持兼容）
-            P2PStatus status = P2PStatus::DISCONNECTED;
-            if (state == P2PState::CONNECTED) {
-                status = P2PStatus::P2P;
-            } else if (state == P2PState::RELAY_ONLY || state == P2PState::PUNCHING || state == P2PState::RESOLVING) {
-                status = P2PStatus::RELAY_ONLY;
-            }
-            peers_.set_connection_status(peer_id, status);
-        };
 
         p2p_cbs.on_data = [this](NodeId peer_id, std::span<const uint8_t> data) {
             log().debug("P2P data received: {} bytes from {}",
@@ -901,6 +876,65 @@ asio::awaitable<bool> Client::send_ip_packet(std::span<const uint8_t> packet) {
 
     // Send to peer with that IP
     co_return co_await send_to_ip(dst_ip, packet);
+}
+
+asio::awaitable<void> Client::p2p_state_handler() {
+    log().debug("P2P state handler started");
+
+    while (state_ != ClientState::STOPPED) {
+        try {
+            // 从 channel 接收状态变化
+            auto [ec, peer_id, state] = co_await p2p_state_channel_->async_receive(
+                asio::as_tuple(asio::use_awaitable));
+
+            if (ec) {
+                if (ec != asio::error::operation_aborted) {
+                    log().debug("P2P state channel error: {}", ec.message());
+                }
+                break;
+            }
+
+            log().info("P2P state changed: peer={}, state={}",
+                       peers_.get_peer_ip_str(peer_id), p2p_state_name(state));
+
+            // 处理状态变化
+            switch (state) {
+                case P2PState::RESOLVING:
+                    state_machine_.handle_self_p2p_event(peer_id, NodeEvent::P2P_INIT_SENT);
+                    break;
+                case P2PState::PUNCHING:
+                    state_machine_.handle_self_p2p_event(peer_id, NodeEvent::P2P_ENDPOINT_RECEIVED);
+                    break;
+                case P2PState::CONNECTED:
+                    state_machine_.handle_self_p2p_event(peer_id, NodeEvent::P2P_PUNCH_SUCCESS);
+                    state_machine_.set_peer_data_path(peer_id, PeerDataPath::P2P);
+                    break;
+                case P2PState::RELAY_ONLY:
+                    // P2P 失败，回退到 Relay
+                    state_machine_.handle_self_p2p_event(peer_id, NodeEvent::P2P_PUNCH_TIMEOUT);
+                    state_machine_.set_peer_data_path(peer_id, PeerDataPath::RELAY);
+                    break;
+                case P2PState::IDLE:
+                    state_machine_.set_peer_data_path(peer_id, PeerDataPath::UNKNOWN);
+                    break;
+            }
+
+            // 更新 PeerManager 的连接状态（保持兼容）
+            P2PStatus p2p_status = P2PStatus::DISCONNECTED;
+            if (state == P2PState::CONNECTED) {
+                p2p_status = P2PStatus::P2P;
+            } else if (state == P2PState::RELAY_ONLY || state == P2PState::PUNCHING || state == P2PState::RESOLVING) {
+                p2p_status = P2PStatus::RELAY_ONLY;
+            }
+            peers_.set_connection_status(peer_id, p2p_status);
+
+        } catch (const std::exception& e) {
+            log().warn("P2P state handler exception: {}", e.what());
+            break;
+        }
+    }
+
+    log().debug("P2P state handler stopped");
 }
 
 asio::awaitable<void> Client::keepalive_loop() {

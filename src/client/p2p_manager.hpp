@@ -7,6 +7,7 @@
 #include "client/endpoint_manager.hpp"
 
 #include <boost/asio.hpp>
+#include <boost/asio/experimental/channel.hpp>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -30,6 +31,10 @@ enum class P2PState : uint8_t {
 
 // P2P 状态名称
 const char* p2p_state_name(P2PState state);
+
+// P2P 状态变化通道类型（用于协程间通信，替代回调）
+using P2PStateChannel = asio::experimental::channel<
+    void(boost::system::error_code, NodeId, P2PState)>;
 
 // P2P 配置
 struct P2PConfig {
@@ -61,10 +66,8 @@ struct PeerP2PState {
     uint16_t latency_ms = 0;                    // RTT 延迟
 };
 
-// P2P 回调
+// P2P 回调（简化版：状态变化通过 channel 传递，不再使用回调）
 struct P2PCallbacks {
-    // P2P 状态变化
-    std::function<void(NodeId peer_id, P2PState state)> on_state_change;
     // 收到 P2P 数据
     std::function<void(NodeId peer_id, std::span<const uint8_t> data)> on_data;
     // 请求发送 P2P_INIT (通过 Control Channel) - 同步版本
@@ -103,6 +106,9 @@ public:
 
     // 设置回调
     void set_callbacks(P2PCallbacks callbacks);
+
+    // 设置状态变化通道（替代 on_state_change 回调）
+    void set_state_channel(P2PStateChannel* channel) { state_channel_ = channel; }
 
     // 启动 P2P 管理器
     asio::awaitable<bool> start();
@@ -211,6 +217,9 @@ private:
     // 更新对端状态
     void set_peer_state(NodeId peer_id, P2PState state);
 
+    // 通知状态变化（通过 channel）
+    void notify_state_change(NodeId peer_id, P2PState state);
+
     // 上报 P2P 状态给 Controller
     void report_p2p_status(NodeId peer_id);
 
@@ -230,6 +239,7 @@ private:
 
     P2PConfig config_;
     P2PCallbacks callbacks_;
+    P2PStateChannel* state_channel_ = nullptr;  // 状态变化通道（由 Client 提供）
 
     std::atomic<bool> running_{false};
     std::atomic<bool> starting_{false};  // 正在启动中，防止重复进入 start()
