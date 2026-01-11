@@ -2177,72 +2177,170 @@ Client 支持定时自动测量到所有在线对端节点的延迟 (RTT)，用�
 
 ### 4.3 事件系统 (NodeEvent)
 
-`NodeEvent` 统一定义了所有状态机事件：
+`NodeEvent` 统一定义了所有状态机事件（定义于 `common/node_state.hpp`）：
 
 ```cpp
 enum class NodeEvent : uint8_t {
-    // 连接事件
-    START_CONNECT,          // 开始连接
-    CONNECT,                // 已连接
-    DISCONNECT,             // 断开连接
+    // ========== 通用连接事件 ==========
+    CONNECT,                // 连接
+    DISCONNECT,             // 断开
+
+    // ========== Client 控制面事件 ==========
+    START_CONNECT,          // 开始连接（Client 端）
+    CONTROL_CONNECTED,      // Control 连接建立（Client 端）
+    CONTROL_DISCONNECTED,   // Control 连接断开（Client 端）
+
+    // ========== 认证事件 ==========
+    AUTH_REQUEST,           // 收到认证请求（Controller 端）
     AUTH_SUCCESS,           // 认证成功
     AUTH_FAILED,            // 认证失败
-    CONFIG_RECEIVED,        // 收到配置
-    CONTROL_DISCONNECTED,   // 控制面断开
 
-    // 对端事件
-    PEER_ONLINE,            // 对端上线
-    PEER_OFFLINE,           // 对端下线
+    // ========== 配置事件 ==========
+    CONFIG_SENT,            // 配置已发送（Controller 端）
+    CONFIG_RECEIVED,        // 收到配置（Client 端）
+    CONFIG_ACK,             // 收到配置确认
 
-    // P2P 事件
-    P2P_INIT_SENT,          // 发送 P2P 初始化请求
-    P2P_INIT_RECEIVED,      // 收到 P2P 初始化请求
+    // ========== Relay 事件 ==========
+    RELAY_AUTH,             // Relay 认证请求
+    RELAY_AUTH_SUCCESS,     // Relay 认证成功
+    RELAY_CONNECTING,       // Relay 连接中（Client 端）
+    RELAY_CONNECTED,        // Relay 已连接
+    RELAY_DISCONNECTED,     // Relay 断开
+    RELAY_RECONNECTING,     // Relay 重连中
+
+    // ========== P2P 数据通道事件 ==========
+    P2P_CONNECTED,          // P2P 已连接
+    P2P_DISCONNECTED,       // P2P 断开
+
+    // ========== 端点同步事件 ==========
+    SOCKET_READY,           // UDP Socket 就绪（Client 端）
+    STUN_SUCCESS,           // STUN 查询成功（Client 端）
+    STUN_FAILED,            // STUN 查询失败（Client 端）
+    ENDPOINT_UPDATE,        // 端点更新
+    ENDPOINT_UPLOADED,      // 端点已上报（Client 端）
+    ENDPOINT_ACK,           // 端点确认
+    ENDPOINT_SYNCED,        // 端点已同步
+
+    // ========== 路由事件 ==========
+    ROUTE_ANNOUNCE,         // 路由公告
+    ROUTE_WITHDRAW,         // 路由撤销
+    ROUTES_RECEIVED,        // 收到路由（Client 端）
+    ROUTES_APPLIED,         // 路由已应用（Client 端）
+
+    // ========== P2P 协商事件 ==========
+    P2P_INIT,               // P2P 初始化请求
+    P2P_INIT_SENT,          // P2P_INIT 已发送（Client 端）
+    P2P_ENDPOINT_SENT,      // P2P 端点已发送（Controller 端）
     P2P_ENDPOINT_RECEIVED,  // 收到对端端点
     P2P_PUNCH_START,        // 开始打洞
     P2P_PUNCH_SUCCESS,      // 打洞成功
-    P2P_PUNCH_TIMEOUT,      // 打洞超时
+    P2P_PUNCH_FAILED,       // 打洞失败
+    P2P_PUNCH_TIMEOUT,      // 打洞超时（Client 端）
+    P2P_STATUS,             // P2P 状态报告
     P2P_KEEPALIVE_TIMEOUT,  // P2P 保活超时
 
-    // 端点事件
-    ENDPOINT_DISCOVERED,    // 发现端点
-    ENDPOINT_UPLOADED,      // 端点已上传
-    ENDPOINT_ACK,           // 端点确认
+    // ========== 对端事件（Client 端）==========
+    PEER_ONLINE,            // 对端上线
+    PEER_OFFLINE,           // 对端下线
 
-    // 路由事件
-    ROUTE_ANNOUNCED,        // 路由已公告
-    ROUTE_WITHDRAWN,        // 路由已撤销
-    ROUTE_ACK,              // 路由确认
-
-    // 心跳
+    // ========== 心跳事件 ==========
+    PING,                   // 收到 PING
+    PONG,                   // 收到 PONG
     HEARTBEAT_TIMEOUT,      // 心跳超时
 };
 ```
 
 ### 4.4 回调接口 (NodeStateCallbacks)
 
-状态机通过回调通知状态变更：
+状态机通过回调通知状态变更（定义于 `common/node_state.hpp`）：
 
 ```cpp
 struct NodeStateCallbacks {
-    // Client 端回调
-    std::function<void(ConnectionPhase, ConnectionPhase)> on_connection_phase_change;
-    std::function<void(ControlPlaneState, ControlPlaneState)> on_control_plane_change;
-    std::function<void(DataPlaneState, DataPlaneState)> on_data_plane_change;
-    std::function<void(const std::string&, RelayConnectionState, RelayConnectionState)>
-        on_relay_connection_change;
-    std::function<void(NodeId, PeerLinkState, PeerLinkState)> on_peer_link_state_change;
-    std::function<void(NodeId, PeerDataPath, PeerDataPath)> on_peer_data_path_change;
-    std::function<void(RouteSyncState, RouteSyncState)> on_route_sync_change;
+    // ========== 通用回调 ==========
 
-    // Controller 端回调
-    std::function<void(ClientSessionState, ClientSessionState)> on_session_state_change;
-    std::function<void(RelaySessionState, RelaySessionState)> on_relay_session_state_change;
-    std::function<void(ClientEndpointSyncState, ClientEndpointSyncState)>
-        on_endpoint_sync_state_change;
-    std::function<void(RouteSyncState, RouteSyncState)> on_route_sync_state_change;
-    std::function<void(NodeId, NodeId, P2PNegotiationPhase)> on_p2p_negotiation_change;
+    // 连接状态变更
+    std::function<void(NodeId node_id, NodeConnectionState old_state, NodeConnectionState new_state)>
+        on_connection_state_change;
+
+    // 节点上线/下线
+    std::function<void(NodeId node_id, bool online)> on_node_status_change;
+
+    // 端点更新
+    std::function<void(NodeId node_id, const std::vector<Endpoint>& endpoints)>
+        on_endpoint_update;
+
+    // 路由变更
+    std::function<void(NodeId node_id, const std::vector<RouteInfo>& added,
+                       const std::vector<RouteInfo>& removed)>
+        on_route_change;
+
+    // P2P 状态变更
+    std::function<void(NodeId node_id, NodeId peer_id,
+                       P2PConnectionState old_state, P2PConnectionState new_state)>
+        on_p2p_state_change;
+
+    // ========== Controller 端回调 ==========
+
+    // 会话状态变更（Controller 端使用）
+    std::function<void(NodeId node_id, ClientSessionState old_state, ClientSessionState new_state)>
+        on_session_state_change;
+
+    // Relay 会话状态变更（Controller 视角）
+    std::function<void(NodeId node_id, RelaySessionState old_state, RelaySessionState new_state)>
+        on_relay_state_change;
+
+    // 数据通道变更
+    std::function<void(NodeId node_id, DataChannelState old_state, DataChannelState new_state)>
+        on_data_channel_change;
+
+    // 客户端上线（Controller 端使用）
+    std::function<void(NodeId node_id, NetworkId network_id)> on_client_online;
+
+    // 客户端下线（Controller 端使用）
+    std::function<void(NodeId node_id, NetworkId network_id)> on_client_offline;
+
+    // P2P 协商状态变更（Controller 端使用）
+    std::function<void(NodeId initiator, NodeId responder, P2PNegotiationPhase phase)>
+        on_p2p_negotiation_change;
+
+    // ========== Client 端回调 ==========
+
+    // 全局连接阶段变更（Client 端使用）
+    std::function<void(ConnectionPhase old_phase, ConnectionPhase new_phase)>
+        on_connection_phase_change;
+
+    // 控制面状态变更（Client 端使用）
+    std::function<void(ControlPlaneState old_state, ControlPlaneState new_state)>
+        on_control_plane_change;
+
+    // 数据面状态变更（Client 端使用）
+    std::function<void(DataPlaneState old_state, DataPlaneState new_state)>
+        on_data_plane_change;
+
+    // Relay 连接状态变更（Client 端使用，支持多 Relay）
+    std::function<void(const std::string& relay_id,
+                       RelayConnectionState old_state, RelayConnectionState new_state)>
+        on_relay_connection_change;
+
+    // 端点同步状态变更（Client 端使用）
+    std::function<void(ClientEndpointSyncState old_state, ClientEndpointSyncState new_state)>
+        on_endpoint_sync_change;
+
+    // 路由同步状态变更（Client 端使用）
+    std::function<void(RouteSyncState old_state, RouteSyncState new_state)>
+        on_route_sync_change;
+
+    // 对端连接状态变更（Client 端使用，组合视图）
+    std::function<void(NodeId peer_id, PeerLinkState old_state, PeerLinkState new_state)>
+        on_peer_link_state_change;
+
+    // 对端数据路径变更（Client 端使用）
+    std::function<void(NodeId peer_id, PeerDataPath old_path, PeerDataPath new_path)>
+        on_peer_data_path_change;
 };
 ```
+
+**注意**：所有回调都在**锁释放后**调用，避免死锁风险。
 
 ### 4.5 Client 端状态管理
 

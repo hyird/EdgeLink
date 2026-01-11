@@ -119,6 +119,12 @@ NodeStateMachine::NodeStateMachine(NodeId self_id, NodeRole self_role)
     self_state_.role = self_role;
 }
 
+void NodeStateMachine::set_self_id(NodeId new_id) {
+    log().debug("Updating self_id from {} to {}", self_id_, new_id);
+    self_id_ = new_id;
+    self_state_.node_id = new_id;
+}
+
 void NodeStateMachine::set_callbacks(NodeStateCallbacks callbacks) {
     callbacks_ = std::move(callbacks);
 }
@@ -1563,7 +1569,13 @@ void NodeStateMachine::update_peer_active_connection(NodeId peer_id,
     std::unique_lock lock(nodes_mutex_);
     auto* link = get_peer_link_mut(peer_id);
     if (!link) {
-        add_peer(peer_id);
+        // 直接内联添加 peer，避免递归获取锁导致死锁
+        if (self_state_.p2p_links.find(peer_id) == self_state_.p2p_links.end()) {
+            NodeState::P2PLink new_link;
+            new_link.peer_id = peer_id;
+            self_state_.p2p_links[peer_id] = new_link;
+            log().debug("Added peer {} (inline)", peer_id);
+        }
         link = get_peer_link_mut(peer_id);
         if (!link) return;
     }
@@ -1664,7 +1676,13 @@ void NodeStateMachine::set_peer_link_state_internal(NodeId peer_id, PeerLinkStat
     std::unique_lock lock(nodes_mutex_);
     auto* link = get_peer_link_mut(peer_id);
     if (!link) {
-        add_peer(peer_id);
+        // 直接内联添加 peer，避免递归获取锁导致死锁
+        if (self_state_.p2p_links.find(peer_id) == self_state_.p2p_links.end()) {
+            NodeState::P2PLink new_link;
+            new_link.peer_id = peer_id;
+            self_state_.p2p_links[peer_id] = new_link;
+            log().debug("Added peer {} (inline)", peer_id);
+        }
         link = get_peer_link_mut(peer_id);
         if (!link) return;
     }
@@ -1689,7 +1707,13 @@ void NodeStateMachine::set_peer_data_path_internal(NodeId peer_id, PeerDataPath 
     std::unique_lock lock(nodes_mutex_);
     auto* link = get_peer_link_mut(peer_id);
     if (!link) {
-        add_peer(peer_id);
+        // 直接内联添加 peer，避免递归获取锁导致死锁
+        if (self_state_.p2p_links.find(peer_id) == self_state_.p2p_links.end()) {
+            NodeState::P2PLink new_link;
+            new_link.peer_id = peer_id;
+            self_state_.p2p_links[peer_id] = new_link;
+            log().debug("Added peer {} (inline)", peer_id);
+        }
         link = get_peer_link_mut(peer_id);
         if (!link) return;
     }

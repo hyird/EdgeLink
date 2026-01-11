@@ -467,6 +467,9 @@ public:
     NodeId self_id() const { return self_id_; }
     NodeRole self_role() const { return self_role_; }
 
+    // 更新自身 NodeId（认证成功后调用）
+    void set_self_id(NodeId new_id);
+
     // ========================================================================
     // 事件处理
     // ========================================================================

@@ -119,6 +119,8 @@ void Client::setup_callbacks() {
 
     control_cbs.on_auth_response = [this](const AuthResponse& resp) {
         log().info("Authenticated: node_id={}, ip={}", resp.node_id, resp.virtual_ip.to_string());
+        // 更新状态机的 self_id（认证前为 0，现在获得真正的 node_id）
+        state_machine_.set_self_id(crypto_.node_id());
         state_machine_.set_control_plane_state(ControlPlaneState::CONFIGURING);
         state_machine_.handle_event(crypto_.node_id(), NodeEvent::AUTH_SUCCESS);
     };
