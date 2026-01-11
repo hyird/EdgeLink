@@ -117,7 +117,10 @@ std::expected<ControllerConfig, ConfigError> ControllerConfig::parse(const std::
             if (auto v = (*stun)["enabled"].value<bool>()) {
                 config.builtin_stun.enabled = *v;
             }
-            if (auto v = (*stun)["ip"].value<std::string>()) {
+            // 支持 public_ip 和 ip 两种写法（优先 public_ip）
+            if (auto v = (*stun)["public_ip"].value<std::string>()) {
+                config.builtin_stun.public_ip = *v;
+            } else if (auto v = (*stun)["ip"].value<std::string>()) {
                 config.builtin_stun.public_ip = *v;
             }
             if (auto v = (*stun)["port"].value<int64_t>()) {
