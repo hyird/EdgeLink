@@ -319,6 +319,8 @@ asio::awaitable<void> P2PManager::recv_loop() {
     std::array<uint8_t, 65536> buffer;
     asio::ip::udp::endpoint sender;
 
+    log().debug("recv_loop started");
+
     while (running_ && endpoints_.is_socket_open()) {
         try {
             auto bytes = co_await endpoints_.socket().async_receive_from(
@@ -329,11 +331,16 @@ asio::awaitable<void> P2PManager::recv_loop() {
             }
         } catch (const boost::system::system_error& e) {
             if (e.code() == asio::error::operation_aborted) {
+                log().debug("recv_loop: operation aborted");
                 break;
             }
             log().error("UDP recv error: {}", e.what());
+        } catch (const std::exception& e) {
+            log().error("recv_loop exception: {}", e.what());
         }
     }
+
+    log().debug("recv_loop ended");
 }
 
 asio::awaitable<void> P2PManager::keepalive_loop() {

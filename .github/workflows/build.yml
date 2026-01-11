@@ -8,14 +8,11 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-env:
-  BUILD_TYPE: RelWithDebInfo
-
 jobs:
   # =============================================================================
-  # Linux Build - Alpine musl (Full Static) with FetchContent
+  # Linux Release Build - Alpine musl (Full Static)
   # =============================================================================
-  build-linux:
+  build-linux-release:
     runs-on: ubuntu-latest
     container:
       image: alpine:3.20
@@ -30,19 +27,18 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    # Cache entire build directory (invalidates when third_party changes)
     - name: Cache build
       uses: actions/cache@v4
       with:
-        path: build
-        key: build-linux-v2-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+        path: build-release
+        key: build-linux-release-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
         restore-keys: |
-          build-linux-v2-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+          build-linux-release-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
 
-    - name: Configure CMake (FetchContent + musl static)
+    - name: Configure CMake
       run: |
-        cmake -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
+        cmake -B build-release -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DBUILD_SHARED_LIBS=OFF \
           -DEDGELINK_STATIC=ON \
@@ -51,34 +47,96 @@ jobs:
           -DBUILD_CLIENT=ON
 
     - name: Build
-      run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
+      run: cmake --build build-release --config Release -j $(nproc)
 
     - name: Verify Static Linking
       run: |
         echo "=== File info ==="
-        file build/edgelink-* || true
+        file build-release/edgelink-* || true
         echo "=== Dynamic dependencies ==="
-        ldd build/edgelink-controller 2>&1 || echo "Fully static binary (expected)"
+        ldd build-release/edgelink-controller 2>&1 || echo "Fully static binary (expected)"
 
-    - name: Package Linux Artifacts
+    - name: Package Artifacts
       run: |
         mkdir -p artifacts/linux
-        cp build/edgelink-controller artifacts/linux/ || true
-        cp build/edgelink-client artifacts/linux/ || true
+        cp build-release/edgelink-controller artifacts/linux/ || true
+        cp build-release/edgelink-client artifacts/linux/ || true
         cp -r config artifacts/linux/
-        tar -czvf edgelink-linux-x64-static.tar.gz -C artifacts linux
+        tar -czvf edgelink-linux-x64-release.tar.gz -C artifacts linux
 
-    - name: Upload Linux Artifacts
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: edgelink-linux-x64-static
-        path: edgelink-linux-x64-static.tar.gz
+        name: edgelink-linux-x64-release
+        path: edgelink-linux-x64-release.tar.gz
         retention-days: 30
 
   # =============================================================================
-  # Windows Build - MinGW-w64 via MSYS2
+  # Linux Debug Build - Alpine musl (Full Static)
   # =============================================================================
-  build-windows:
+  build-linux-debug:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.20
+
+    steps:
+    - name: Install Dependencies
+      run: |
+        apk add --no-cache \
+          build-base cmake ninja git curl zip unzip tar \
+          pkgconfig linux-headers musl-dev perl bash python3 \
+          autoconf automake libtool go
+
+    - uses: actions/checkout@v4
+
+    - name: Cache build
+      uses: actions/cache@v4
+      with:
+        path: build-debug
+        key: build-linux-debug-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+        restore-keys: |
+          build-linux-debug-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+
+    - name: Configure CMake
+      run: |
+        cmake -B build-debug -G Ninja \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DEDGELINK_STATIC=ON \
+          -DBUILD_CONTROLLER=ON \
+          -DBUILD_SERVER=OFF \
+          -DBUILD_CLIENT=ON
+
+    - name: Build
+      run: cmake --build build-debug --config Debug -j $(nproc)
+
+    - name: Verify Static Linking
+      run: |
+        echo "=== File info ==="
+        file build-debug/edgelink-* || true
+        echo "=== Dynamic dependencies ==="
+        ldd build-debug/edgelink-controller 2>&1 || echo "Fully static binary (expected)"
+
+    - name: Package Artifacts
+      run: |
+        mkdir -p artifacts/linux
+        cp build-debug/edgelink-controller artifacts/linux/ || true
+        cp build-debug/edgelink-client artifacts/linux/ || true
+        cp -r config artifacts/linux/
+        tar -czvf edgelink-linux-x64-debug.tar.gz -C artifacts linux
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: edgelink-linux-x64-debug
+        path: edgelink-linux-x64-debug.tar.gz
+        retention-days: 30
+
+  # =============================================================================
+  # Windows Release Build - MinGW-w64 via MSYS2
+  # =============================================================================
+  build-windows-release:
     runs-on: windows-latest
 
     defaults:
@@ -107,14 +165,13 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    # Cache entire build directory (invalidates when third_party changes)
     - name: Cache build
       uses: actions/cache@v4
       with:
-        path: build
-        key: build-windows-mingw-v2-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+        path: build-release
+        key: build-windows-release-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
         restore-keys: |
-          build-windows-mingw-v2-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+          build-windows-release-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
 
     - name: Cache wintun
       uses: actions/cache@v4
@@ -130,10 +187,10 @@ jobs:
         Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile "wintun.zip"
         Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-extract"
 
-    - name: Configure CMake (MinGW-w64)
+    - name: Configure CMake
       run: |
-        cmake -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
+        cmake -B build-release -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DBUILD_SHARED_LIBS=OFF \
           -DBUILD_CONTROLLER=ON \
@@ -141,31 +198,114 @@ jobs:
           -DBUILD_CLIENT=ON
 
     - name: Build
-      run: cmake --build build --config ${{env.BUILD_TYPE}} -j $(nproc)
+      run: cmake --build build-release --config Release -j $(nproc)
 
-    - name: Package Windows Artifacts
+    - name: Package Artifacts
       shell: powershell
       run: |
         New-Item -ItemType Directory -Force -Path artifacts/windows
-        Copy-Item -Path "build/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "build/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
-        # Include wintun.dll (client loads from same directory at runtime)
+        Copy-Item -Path "build-release/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "build-release/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "wintun-extract/wintun/bin/amd64/wintun.dll" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse
-        Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-mingw.zip"
+        Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-release.zip"
 
-    - name: Upload Windows Artifacts
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: edgelink-windows-x64-mingw
-        path: edgelink-windows-x64-mingw.zip
+        name: edgelink-windows-x64-release
+        path: edgelink-windows-x64-release.zip
         retention-days: 30
 
   # =============================================================================
-  # Docker Build and Push
+  # Windows Debug Build - MinGW-w64 via MSYS2
   # =============================================================================
-  docker:
-    needs: [build-linux]
+  build-windows-debug:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          mingw-w64-x86_64-toolchain
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-ninja
+          mingw-w64-x86_64-go
+          make
+          git
+          perl
+          autoconf
+          automake
+          libtool
+          zip
+          unzip
+
+    - uses: actions/checkout@v4
+
+    - name: Cache build
+      uses: actions/cache@v4
+      with:
+        path: build-debug
+        key: build-windows-debug-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+        restore-keys: |
+          build-windows-debug-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+
+    - name: Cache wintun
+      uses: actions/cache@v4
+      id: cache-wintun
+      with:
+        path: wintun-extract
+        key: wintun-0.14.1
+
+    - name: Download wintun
+      if: steps.cache-wintun.outputs.cache-hit != 'true'
+      shell: powershell
+      run: |
+        Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile "wintun.zip"
+        Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-extract"
+
+    - name: Configure CMake
+      run: |
+        cmake -B build-debug -G Ninja \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DBUILD_CONTROLLER=ON \
+          -DBUILD_SERVER=OFF \
+          -DBUILD_CLIENT=ON
+
+    - name: Build
+      run: cmake --build build-debug --config Debug -j $(nproc)
+
+    - name: Package Artifacts
+      shell: powershell
+      run: |
+        New-Item -ItemType Directory -Force -Path artifacts/windows
+        Copy-Item -Path "build-debug/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "build-debug/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "wintun-extract/wintun/bin/amd64/wintun.dll" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse
+        Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-debug.zip"
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: edgelink-windows-x64-debug
+        path: edgelink-windows-x64-debug.zip
+        retention-days: 30
+
+  # =============================================================================
+  # Docker Release Build and Push
+  # =============================================================================
+  docker-release:
+    needs: [build-linux-release]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
 
@@ -175,12 +315,12 @@ jobs:
     - name: Download Linux Artifacts
       uses: actions/download-artifact@v4
       with:
-        name: edgelink-linux-x64-static
+        name: edgelink-linux-x64-release
         path: .
 
     - name: Extract Artifacts
       run: |
-        tar -xzvf edgelink-linux-x64-static.tar.gz
+        tar -xzvf edgelink-linux-x64-release.tar.gz
         cp linux/edgelink-controller docker/
         cp linux/edgelink-client docker/
 
@@ -236,10 +376,86 @@ jobs:
         labels: ${{ steps.meta-client.outputs.labels }}
 
   # =============================================================================
+  # Docker Debug Build and Push
+  # =============================================================================
+  docker-debug:
+    needs: [build-linux-debug]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download Linux Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: edgelink-linux-x64-debug
+        path: .
+
+    - name: Extract Artifacts
+      run: |
+        tar -xzvf edgelink-linux-x64-debug.tar.gz
+        cp linux/edgelink-controller docker/
+        cp linux/edgelink-client docker/
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Docker meta (controller)
+      id: meta-controller
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-controller
+        flavor: |
+          suffix=-debug
+        tags: |
+          type=ref,event=branch
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix=
+
+    - name: Docker meta (client)
+      id: meta-client
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-client
+        flavor: |
+          suffix=-debug
+        tags: |
+          type=ref,event=branch
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix=
+
+    - name: Build and push controller
+      uses: docker/build-push-action@v5
+      with:
+        context: docker
+        file: docker/Dockerfile.controller
+        push: true
+        tags: ${{ steps.meta-controller.outputs.tags }}
+        labels: ${{ steps.meta-controller.outputs.labels }}
+
+    - name: Build and push client
+      uses: docker/build-push-action@v5
+      with:
+        context: docker
+        file: docker/Dockerfile.client
+        push: true
+        tags: ${{ steps.meta-client.outputs.tags }}
+        labels: ${{ steps.meta-client.outputs.labels }}
+
+  # =============================================================================
   # Release Job
   # =============================================================================
   release:
-    needs: [build-linux, build-windows, docker]
+    needs: [build-linux-release, build-linux-debug, build-windows-release, build-windows-debug, docker-release, docker-debug]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
 
@@ -256,8 +472,10 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          artifacts/edgelink-linux-x64-static/edgelink-linux-x64-static.tar.gz
-          artifacts/edgelink-windows-x64-mingw/edgelink-windows-x64-mingw.zip
+          artifacts/edgelink-linux-x64-release/edgelink-linux-x64-release.tar.gz
+          artifacts/edgelink-linux-x64-debug/edgelink-linux-x64-debug.tar.gz
+          artifacts/edgelink-windows-x64-release/edgelink-windows-x64-release.zip
+          artifacts/edgelink-windows-x64-debug/edgelink-windows-x64-debug.zip
         draft: false
         prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
         generate_release_notes: true
