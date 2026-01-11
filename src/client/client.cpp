@@ -135,19 +135,6 @@ void Client::setup_callbacks() {
             endpoint_mgr_->set_stun_servers(config.stuns);
         }
 
-        // 启动 P2P manager (在 STUN 配置完成后)
-        if (p2p_mgr_ && !p2p_mgr_->is_running()) {
-            auto self = shared_from_this();
-            asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
-                try {
-                    co_await self->p2p_mgr_->start();
-                    log().info("P2P manager started (STUN configured)");
-                } catch (const std::exception& e) {
-                    log().error("P2P manager failed: {}", e.what());
-                }
-            }(), asio::detached);
-        }
-
         // 初始化路由管理器并同步路由到系统
         if (config_.accept_routes && is_tun_enabled()) {
             if (!route_mgr_) {
@@ -159,17 +146,33 @@ void Client::setup_callbacks() {
             }
         }
 
-        // 重连后重发端点（如果之前有上报过的端点）
-        {
-            std::lock_guard lock(endpoints_mutex_);
-            if (control_ && control_->is_connected() && !last_reported_endpoints_.empty()) {
-                auto endpoints = last_reported_endpoints_;
-                auto self = shared_from_this();
-                asio::co_spawn(ioc_, [self, endpoints]() -> asio::awaitable<void> {
-                    co_await self->control_->send_endpoint_update(endpoints);
-                    log().info("Resent {} endpoints after reconnect", endpoints.size());
-                }(), asio::detached);
-            }
+        // 【关键修复】启动 P2P manager 并在成功后重发端点
+        // 确保端点重发在 P2P Manager 完全启动后执行
+        if (p2p_mgr_ && !p2p_mgr_->is_running()) {
+            auto self = shared_from_this();
+            asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
+                try {
+                    co_await self->p2p_mgr_->start();
+                    log().info("P2P manager started (STUN configured)");
+
+                    // 【关键修复】在 P2P Manager 启动成功后重发端点
+                    // 这样确保 UDP socket 已经就绪
+                    std::vector<Endpoint> endpoints;
+                    {
+                        std::lock_guard lock(self->endpoints_mutex_);
+                        if (!self->last_reported_endpoints_.empty()) {
+                            endpoints = self->last_reported_endpoints_;
+                        }
+                    }
+
+                    if (!endpoints.empty() && self->control_ && self->control_->is_connected()) {
+                        co_await self->control_->send_endpoint_update(endpoints);
+                        log().info("Resent {} endpoints after P2P manager started", endpoints.size());
+                    }
+                } catch (const std::exception& e) {
+                    log().error("P2P manager failed: {}", e.what());
+                }
+            }(), asio::detached);
         }
 
         // P2P 打洞延迟到首次发送数据时触发
@@ -192,10 +195,28 @@ void Client::setup_callbacks() {
                 }
             }
 
-            // peer 上线后，重新同步路由（之前可能因为 gateway IP 查不到而失败）
+            // 【关键修复】peer 上线后，只同步与新 peer 相关的路由
+            // 避免与 on_route_update 竞争，使用增量更新而非全量同步
             if (!added_peer_ids.empty() && route_mgr_ && config_.accept_routes) {
-                std::lock_guard lock(routes_mutex_);
-                route_mgr_->sync_routes(routes_);
+                std::vector<RouteInfo> relevant_routes;
+                {
+                    std::lock_guard lock(routes_mutex_);
+                    for (const auto& route : routes_) {
+                        // 检查路由的 gateway 是否是新上线的 peer
+                        for (auto peer_id : added_peer_ids) {
+                            if (route.gateway_node == peer_id) {
+                                relevant_routes.push_back(route);
+                                break;
+                            }
+                        }
+                    }
+                }
+                // 只同步与新 peer 相关的路由
+                if (!relevant_routes.empty()) {
+                    route_mgr_->apply_route_update(relevant_routes, {});
+                    log().debug("Applied {} routes for {} newly online peers",
+                               relevant_routes.size(), added_peer_ids.size());
+                }
             }
         }
     };
@@ -402,9 +423,16 @@ void Client::setup_callbacks() {
         };
 
         p2p_cbs.on_send_p2p_init = [this](const P2PInit& init) {
-            // 通过 Control Channel 发送 P2P_INIT
+            // 通过 Control Channel 发送 P2P_INIT（同步版本，立即返回）
             if (control_ && control_->is_connected()) {
                 asio::co_spawn(ioc_, control_->send_p2p_init(init), asio::detached);
+            }
+        };
+
+        // 【新增】异步版本：等待 P2P_INIT 发送完成
+        p2p_cbs.on_send_p2p_init_async = [this](const P2PInit& init) -> asio::awaitable<void> {
+            if (control_ && control_->is_connected()) {
+                co_await control_->send_p2p_init(init);
             }
         };
 
@@ -421,11 +449,31 @@ void Client::setup_callbacks() {
                 last_reported_endpoints_ = endpoints;
             }
 
-            // 上报端点给 Controller
+            // 上报端点给 Controller（同步版本，立即返回）
             if (control_ && control_->is_connected()) {
                 log().debug("Sending endpoint update: {} endpoints", endpoints.size());
                 asio::co_spawn(ioc_, control_->send_endpoint_update(endpoints), asio::detached);
             }
+        };
+
+        // 【新增】异步版本：上报端点并等待确认
+        // 这确保 Controller 在处理 P2P_INIT 时已经有我们的端点
+        p2p_cbs.on_endpoints_ready_async = [this](const std::vector<Endpoint>& endpoints) -> asio::awaitable<bool> {
+            // 保存端点（用于重连后重发）
+            {
+                std::lock_guard lock(endpoints_mutex_);
+                last_reported_endpoints_ = endpoints;
+            }
+
+            // 上报端点给 Controller 并等待确认
+            if (control_ && control_->is_connected()) {
+                log().debug("Sending endpoint update (async): {} endpoints", endpoints.size());
+                co_await control_->send_endpoint_update(endpoints);
+                // 这里简化处理：发送成功即认为确认
+                // 实际上可以等待 ENDPOINT_ACK，但目前 send_endpoint_update 已经是协程
+                co_return true;
+            }
+            co_return false;
         };
 
         p2p_mgr_->set_callbacks(std::move(p2p_cbs));

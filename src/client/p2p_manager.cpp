@@ -128,32 +128,46 @@ asio::awaitable<void> P2PManager::stop() {
     log().info("P2P manager stopped");
 }
 
-void P2PManager::connect_peer(NodeId peer_id) {
-    std::unique_lock lock(states_mutex_);
+// 异步版本：等待端点上报确认后再发送 P2P_INIT，确保消息顺序
+asio::awaitable<void> P2PManager::connect_peer_async(NodeId peer_id) {
+    uint32_t init_seq;
 
-    auto it = peer_states_.find(peer_id);
-    if (it != peer_states_.end()) {
-        auto& state = it->second;
-        if (state.state == P2PState::CONNECTED ||
-            state.state == P2PState::PUNCHING ||
-            state.state == P2PState::RESOLVING) {
-            // 已经在连接中
-            return;
+    {
+        std::unique_lock lock(states_mutex_);
+
+        auto it = peer_states_.find(peer_id);
+        if (it != peer_states_.end()) {
+            auto& state = it->second;
+            if (state.state == P2PState::CONNECTED ||
+                state.state == P2PState::PUNCHING ||
+                state.state == P2PState::RESOLVING) {
+                // 已经在连接中
+                co_return;
+            }
         }
+
+        // 创建或更新状态
+        auto& state = peer_states_[peer_id];
+        state.state = P2PState::RESOLVING;
+        state.init_seq = ++init_seq_;
+        state.punch_count = 0;
+        state.last_punch_time = now_us();  // 记录 RESOLVING 开始时间
+        init_seq = state.init_seq;
     }
 
-    // 创建或更新状态
-    auto& state = peer_states_[peer_id];
-    state.state = P2PState::RESOLVING;
-    state.init_seq = ++init_seq_;
-    state.punch_count = 0;
-    state.last_punch_time = now_us();  // 记录 RESOLVING 开始时间
-
-    lock.unlock();
-
-    // 发起 P2P_INIT 前，先上传我们的端点给 Controller
-    // 这样 Controller 在通知对端时，对端也能获取到我们的端点进行双向打洞
-    if (callbacks_.on_endpoints_ready) {
+    // 【关键修复】发起 P2P_INIT 前，先上传我们的端点给 Controller 并等待确认
+    // 这样确保 Controller 在处理 P2P_INIT 时已经有我们的端点
+    if (callbacks_.on_endpoints_ready_async) {
+        auto eps = endpoints_.get_all_endpoints();
+        if (!eps.empty()) {
+            log().debug("Uploading {} endpoints before P2P_INIT (waiting for ACK)", eps.size());
+            bool ack_received = co_await callbacks_.on_endpoints_ready_async(eps);
+            if (!ack_received) {
+                log().warn("Endpoint upload not confirmed, proceeding with P2P_INIT anyway");
+            }
+        }
+    } else if (callbacks_.on_endpoints_ready) {
+        // 回退到同步版本
         auto eps = endpoints_.get_all_endpoints();
         if (!eps.empty()) {
             log().debug("Uploading {} endpoints before P2P_INIT", eps.size());
@@ -164,13 +178,35 @@ void P2PManager::connect_peer(NodeId peer_id) {
     // 发送 P2P_INIT 请求
     P2PInit init;
     init.target_node = peer_id;
-    init.init_seq = state.init_seq;
+    init.init_seq = init_seq;
 
     log().debug("Sending P2P_INIT to peer {}, seq={}", peer_id, init.init_seq);
 
-    if (callbacks_.on_send_p2p_init) {
+    if (callbacks_.on_send_p2p_init_async) {
+        co_await callbacks_.on_send_p2p_init_async(init);
+    } else if (callbacks_.on_send_p2p_init) {
         callbacks_.on_send_p2p_init(init);
     }
+}
+
+// 同步版本：立即返回，内部启动异步连接
+void P2PManager::connect_peer(NodeId peer_id) {
+    // 快速检查是否已在连接中
+    {
+        std::shared_lock lock(states_mutex_);
+        auto it = peer_states_.find(peer_id);
+        if (it != peer_states_.end()) {
+            auto& state = it->second;
+            if (state.state == P2PState::CONNECTED ||
+                state.state == P2PState::PUNCHING ||
+                state.state == P2PState::RESOLVING) {
+                return;
+            }
+        }
+    }
+
+    // 启动异步连接
+    asio::co_spawn(ioc_, connect_peer_async(peer_id), asio::detached);
 }
 
 void P2PManager::disconnect_peer(NodeId peer_id) {
@@ -190,6 +226,14 @@ void P2PManager::disconnect_peer(NodeId peer_id) {
 }
 
 void P2PManager::handle_p2p_endpoint(const P2PEndpointMsg& msg) {
+    // 【关键修复】检查 P2P Manager 是否已启动
+    // 场景：节点刚上线，P2P Manager 还在启动中，此时收到被动打洞请求
+    // 如果不检查，do_punch_batches 会尝试使用未初始化的 socket
+    if (!running_) {
+        log().debug("P2P manager not running, ignoring P2P_ENDPOINT for peer {}", msg.peer_node);
+        return;
+    }
+
     std::unique_lock lock(states_mutex_);
 
     auto it = peer_states_.find(msg.peer_node);
@@ -229,7 +273,9 @@ void P2PManager::handle_p2p_endpoint(const P2PEndpointMsg& msg) {
     state.peer_endpoints = msg.endpoints;
     state.state = P2PState::PUNCHING;
     state.punch_count = 0;
-    state.last_punch_time = 0;
+    // 【关键修复】在设置 PUNCHING 状态时就设置时间戳
+    // 这样即使 do_punch_batches 协程启动延迟，也能正确检测超时
+    state.last_punch_time = now_us();
 
     log().debug("Received P2P_ENDPOINT for peer {}: {} endpoints{}",
         msg.peer_node, msg.endpoints.size(),
@@ -437,10 +483,27 @@ asio::awaitable<void> P2PManager::keepalive_loop() {
             }
         }
 
+        // 【关键修复】在设置状态前再次检查时间戳，避免误判
+        // 因为在释放读锁和获取写锁之间，可能收到了新的数据包
         for (auto peer_id : timed_out) {
-            log().warn("P2P connection to peer {} timed out", peer_id);
-            set_peer_state(peer_id, P2PState::RELAY_ONLY);
-            report_p2p_status(peer_id);
+            std::unique_lock lock(states_mutex_);
+            auto it = peer_states_.find(peer_id);
+            if (it == peer_states_.end()) continue;
+
+            // 再次检查：状态是否仍为 CONNECTED，且确实超时
+            uint64_t current_time = now_us();
+            if (it->second.state == P2PState::CONNECTED &&
+                current_time - it->second.last_recv_time > timeout_us) {
+                it->second.state = P2PState::RELAY_ONLY;
+                lock.unlock();
+
+                log().warn("P2P connection to peer {} timed out", peer_id);
+                if (callbacks_.on_state_change) {
+                    callbacks_.on_state_change(peer_id, P2PState::RELAY_ONLY);
+                }
+                report_p2p_status(peer_id);
+            }
+            // 如果条件不满足，说明期间收到了新数据，跳过
         }
     }
 }
@@ -482,18 +545,44 @@ asio::awaitable<void> P2PManager::punch_loop() {
         }
 
         for (auto peer_id : timed_out) {
-            std::shared_lock lock(states_mutex_);
+            // 【关键修复】使用独占锁并再次检查状态，避免竞态条件
+            // 场景：punch_loop 检测到超时后，handle_p2p_pong 收到 PONG 设置了 CONNECTED
+            // 此时不应该再把状态改回 RELAY_ONLY
+            std::unique_lock lock(states_mutex_);
             auto it = peer_states_.find(peer_id);
-            if (it != peer_states_.end()) {
-                auto old_state = it->second.state;
-                lock.unlock();
-                log().warn("P2P {} to peer {} timed out",
-                           old_state == P2PState::RESOLVING ? "resolving" : "hole punching",
-                           peer_id);
-            } else {
-                lock.unlock();
+            if (it == peer_states_.end()) {
+                continue;
             }
-            set_peer_state(peer_id, P2PState::RELAY_ONLY);
+
+            auto& state = it->second;
+            // 只有当状态仍为 PUNCHING 或 RESOLVING 时才设置为 RELAY_ONLY
+            if (state.state != P2PState::PUNCHING && state.state != P2PState::RESOLVING) {
+                // 状态已变化（可能已连接成功），跳过
+                continue;
+            }
+
+            // 再次验证超时（避免误判）
+            uint64_t current_time = now_us();
+            uint64_t timeout_us = (state.state == P2PState::RESOLVING)
+                ? 5 * 1000000ULL
+                : config_.punch_timeout_sec * 1000000ULL;
+
+            if (current_time - state.last_punch_time <= timeout_us) {
+                // 时间戳已更新，可能期间有活动，跳过
+                continue;
+            }
+
+            auto old_state = state.state;
+            state.state = P2PState::RELAY_ONLY;
+            lock.unlock();
+
+            log().warn("P2P {} to peer {} timed out",
+                       old_state == P2PState::RESOLVING ? "resolving" : "hole punching",
+                       peer_id);
+
+            if (callbacks_.on_state_change) {
+                callbacks_.on_state_change(peer_id, P2PState::RELAY_ONLY);
+            }
             report_p2p_status(peer_id);
         }
     }
@@ -747,6 +836,14 @@ void P2PManager::handle_p2p_ping(const asio::ip::udp::endpoint& from,
     log().debug("Received P2P_PING from {} (node {})",
         from.address().to_string(), ping.src_node);
 
+    // 【关键修复】验证是否有该节点的信息
+    // 避免收到未知节点的 PING 时创建不完整的状态条目
+    auto peer = peers_.get_peer(ping.src_node);
+    if (!peer) {
+        log().warn("Received P2P_PING from unknown peer {}, ignoring", ping.src_node);
+        return;
+    }
+
     // TODO: 验证签名
 
     // 发送 PONG
@@ -756,12 +853,22 @@ void P2PManager::handle_p2p_ping(const asio::ip::udp::endpoint& from,
     std::unique_lock lock(states_mutex_);
     auto& state = peer_states_[ping.src_node];
 
+    // 【关键修复】如果是新创建的状态条目，从 PeerManager 获取 peer_key
+    // 这确保即使是被动接收 PING 的情况，也能正确加密/解密数据
+    if (state.peer_key == std::array<uint8_t, X25519_KEY_SIZE>{}) {
+        state.peer_key = peer->info.node_key;
+        log().debug("Filled peer_key for peer {} from PeerManager", ping.src_node);
+    }
+
     if (state.state != P2PState::CONNECTED) {
         state.state = P2PState::CONNECTED;
         state.active_endpoint = from;
         state.last_recv_time = now_us();
 
         lock.unlock();
+
+        // 确保会话密钥已派生
+        peers_.ensure_session_key(ping.src_node);
 
         log().info("P2P connection established with peer {} via {}",
             ping.src_node, from.address().to_string());

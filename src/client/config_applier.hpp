@@ -80,9 +80,23 @@ private:
     // 应用路由广播配置（需要重新向 Controller 公告）
     bool apply_advertise_routes(const std::vector<std::string>& routes);
     bool apply_exit_node(bool enable);
+    bool apply_route_announce_interval(int seconds);
 
     // 应用自动重连配置
     bool apply_auto_reconnect(bool enable);
+
+    // 应用 P2P 配置
+    bool apply_p2p_enabled(bool enabled);
+    bool apply_p2p_bind_port(int port);
+    bool apply_p2p_keepalive_interval(int seconds);
+    bool apply_p2p_keepalive_timeout(int seconds);
+    bool apply_p2p_punch_timeout(int seconds);
+    bool apply_p2p_punch_batch_count(int count);
+    bool apply_p2p_punch_batch_size(int size);
+    bool apply_p2p_punch_batch_interval(int ms);
+    bool apply_p2p_retry_interval(int seconds);
+    bool apply_p2p_stun_timeout(int ms);
+    bool apply_p2p_endpoint_refresh_interval(int seconds);
 
     // 触发重新连接
     void trigger_reconnect();

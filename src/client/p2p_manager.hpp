@@ -67,12 +67,16 @@ struct P2PCallbacks {
     std::function<void(NodeId peer_id, P2PState state)> on_state_change;
     // 收到 P2P 数据
     std::function<void(NodeId peer_id, std::span<const uint8_t> data)> on_data;
-    // 请求发送 P2P_INIT (通过 Control Channel)
+    // 请求发送 P2P_INIT (通过 Control Channel) - 同步版本
     std::function<void(const P2PInit& init)> on_send_p2p_init;
     // 请求发送 P2P_STATUS (通过 Control Channel)
     std::function<void(const P2PStatusMsg& status)> on_send_p2p_status;
-    // 端点已就绪，需要上报给 Controller
+    // 端点已就绪，需要上报给 Controller - 同步版本
     std::function<void(const std::vector<Endpoint>& endpoints)> on_endpoints_ready;
+    // 端点上报并等待确认 - 异步版本，用于确保消息顺序
+    std::function<asio::awaitable<bool>(const std::vector<Endpoint>& endpoints)> on_endpoints_ready_async;
+    // 发送 P2P_INIT 并等待 - 异步版本
+    std::function<asio::awaitable<void>(const P2PInit& init)> on_send_p2p_init_async;
 };
 
 /**
@@ -114,6 +118,10 @@ public:
     // ========================================================================
 
     // 发起 P2P 连接 (向 Controller 请求对端端点)
+    // 异步版本：等待端点上报确认后再发送 P2P_INIT，确保消息顺序
+    asio::awaitable<void> connect_peer_async(NodeId peer_id);
+
+    // 同步版本：立即返回，内部启动异步连接
     void connect_peer(NodeId peer_id);
 
     // 断开 P2P 连接

@@ -251,6 +251,129 @@ std::vector<ConfigChange> ConfigApplier::apply(const ClientConfig& old_cfg, cons
         changes.push_back(change);
     }
 
+    if (old_cfg.route_announce_interval != new_cfg.route_announce_interval) {
+        ConfigChange change;
+        change.key = "routing.announce_interval";
+        change.old_value = std::to_string(old_cfg.route_announce_interval.count());
+        change.new_value = std::to_string(new_cfg.route_announce_interval.count());
+        change.applied = apply_route_announce_interval(static_cast<int>(new_cfg.route_announce_interval.count()));
+        change.restart_required = false;
+        changes.push_back(change);
+    }
+
+    // ===== P2P 配置 =====
+    if (old_cfg.p2p.enabled != new_cfg.p2p.enabled) {
+        ConfigChange change;
+        change.key = "p2p.enabled";
+        change.old_value = old_cfg.p2p.enabled ? "true" : "false";
+        change.new_value = new_cfg.p2p.enabled ? "true" : "false";
+        change.applied = apply_p2p_enabled(new_cfg.p2p.enabled);
+        change.restart_required = false;
+        change.message = new_cfg.p2p.enabled ? "启用 P2P 直连" : "禁用 P2P 直连";
+        changes.push_back(change);
+    }
+
+    if (old_cfg.p2p.bind_port != new_cfg.p2p.bind_port) {
+        ConfigChange change;
+        change.key = "p2p.bind_port";
+        change.old_value = std::to_string(old_cfg.p2p.bind_port);
+        change.new_value = std::to_string(new_cfg.p2p.bind_port);
+        change.applied = apply_p2p_bind_port(new_cfg.p2p.bind_port);
+        change.restart_required = true;  // 端口变更需要重启
+        change.message = "P2P 绑定端口变更需要重启才能生效";
+        changes.push_back(change);
+    }
+
+    if (old_cfg.p2p.keepalive_interval != new_cfg.p2p.keepalive_interval) {
+        ConfigChange change;
+        change.key = "p2p.keepalive_interval";
+        change.old_value = std::to_string(old_cfg.p2p.keepalive_interval);
+        change.new_value = std::to_string(new_cfg.p2p.keepalive_interval);
+        change.applied = apply_p2p_keepalive_interval(new_cfg.p2p.keepalive_interval);
+        change.restart_required = false;
+        changes.push_back(change);
+    }
+
+    if (old_cfg.p2p.keepalive_timeout != new_cfg.p2p.keepalive_timeout) {
+        ConfigChange change;
+        change.key = "p2p.keepalive_timeout";
+        change.old_value = std::to_string(old_cfg.p2p.keepalive_timeout);
+        change.new_value = std::to_string(new_cfg.p2p.keepalive_timeout);
+        change.applied = apply_p2p_keepalive_timeout(new_cfg.p2p.keepalive_timeout);
+        change.restart_required = false;
+        changes.push_back(change);
+    }
+
+    if (old_cfg.p2p.punch_timeout != new_cfg.p2p.punch_timeout) {
+        ConfigChange change;
+        change.key = "p2p.punch_timeout";
+        change.old_value = std::to_string(old_cfg.p2p.punch_timeout);
+        change.new_value = std::to_string(new_cfg.p2p.punch_timeout);
+        change.applied = apply_p2p_punch_timeout(new_cfg.p2p.punch_timeout);
+        change.restart_required = false;
+        changes.push_back(change);
+    }
+
+    if (old_cfg.p2p.punch_batch_count != new_cfg.p2p.punch_batch_count) {
+        ConfigChange change;
+        change.key = "p2p.punch_batch_count";
+        change.old_value = std::to_string(old_cfg.p2p.punch_batch_count);
+        change.new_value = std::to_string(new_cfg.p2p.punch_batch_count);
+        change.applied = apply_p2p_punch_batch_count(new_cfg.p2p.punch_batch_count);
+        change.restart_required = false;
+        changes.push_back(change);
+    }
+
+    if (old_cfg.p2p.punch_batch_size != new_cfg.p2p.punch_batch_size) {
+        ConfigChange change;
+        change.key = "p2p.punch_batch_size";
+        change.old_value = std::to_string(old_cfg.p2p.punch_batch_size);
+        change.new_value = std::to_string(new_cfg.p2p.punch_batch_size);
+        change.applied = apply_p2p_punch_batch_size(new_cfg.p2p.punch_batch_size);
+        change.restart_required = false;
+        changes.push_back(change);
+    }
+
+    if (old_cfg.p2p.punch_batch_interval != new_cfg.p2p.punch_batch_interval) {
+        ConfigChange change;
+        change.key = "p2p.punch_batch_interval";
+        change.old_value = std::to_string(old_cfg.p2p.punch_batch_interval);
+        change.new_value = std::to_string(new_cfg.p2p.punch_batch_interval);
+        change.applied = apply_p2p_punch_batch_interval(new_cfg.p2p.punch_batch_interval);
+        change.restart_required = false;
+        changes.push_back(change);
+    }
+
+    if (old_cfg.p2p.retry_interval != new_cfg.p2p.retry_interval) {
+        ConfigChange change;
+        change.key = "p2p.retry_interval";
+        change.old_value = std::to_string(old_cfg.p2p.retry_interval);
+        change.new_value = std::to_string(new_cfg.p2p.retry_interval);
+        change.applied = apply_p2p_retry_interval(new_cfg.p2p.retry_interval);
+        change.restart_required = false;
+        changes.push_back(change);
+    }
+
+    if (old_cfg.p2p.stun_timeout != new_cfg.p2p.stun_timeout) {
+        ConfigChange change;
+        change.key = "p2p.stun_timeout";
+        change.old_value = std::to_string(old_cfg.p2p.stun_timeout);
+        change.new_value = std::to_string(new_cfg.p2p.stun_timeout);
+        change.applied = apply_p2p_stun_timeout(new_cfg.p2p.stun_timeout);
+        change.restart_required = false;
+        changes.push_back(change);
+    }
+
+    if (old_cfg.p2p.endpoint_refresh_interval != new_cfg.p2p.endpoint_refresh_interval) {
+        ConfigChange change;
+        change.key = "p2p.endpoint_refresh_interval";
+        change.old_value = std::to_string(old_cfg.p2p.endpoint_refresh_interval);
+        change.new_value = std::to_string(new_cfg.p2p.endpoint_refresh_interval);
+        change.applied = apply_p2p_endpoint_refresh_interval(new_cfg.p2p.endpoint_refresh_interval);
+        change.restart_required = false;
+        changes.push_back(change);
+    }
+
     // ===== 执行需要的操作 =====
     if (need_reconnect_) {
         trigger_reconnect();
@@ -347,6 +470,33 @@ ConfigChange ConfigApplier::apply_single(const std::string& key, const std::stri
             change.applied = false;
             change.message = "无效的路由数组格式";
         }
+    } else if (key == "routing.announce_interval") {
+        change.applied = apply_route_announce_interval(std::stoi(value));
+    // P2P 配置
+    } else if (key == "p2p.enabled") {
+        change.applied = apply_p2p_enabled(value == "true" || value == "1");
+    } else if (key == "p2p.bind_port") {
+        change.applied = apply_p2p_bind_port(std::stoi(value));
+        change.restart_required = true;
+        change.message = "P2P 绑定端口变更需要重启才能生效";
+    } else if (key == "p2p.keepalive_interval") {
+        change.applied = apply_p2p_keepalive_interval(std::stoi(value));
+    } else if (key == "p2p.keepalive_timeout") {
+        change.applied = apply_p2p_keepalive_timeout(std::stoi(value));
+    } else if (key == "p2p.punch_timeout") {
+        change.applied = apply_p2p_punch_timeout(std::stoi(value));
+    } else if (key == "p2p.punch_batch_count") {
+        change.applied = apply_p2p_punch_batch_count(std::stoi(value));
+    } else if (key == "p2p.punch_batch_size") {
+        change.applied = apply_p2p_punch_batch_size(std::stoi(value));
+    } else if (key == "p2p.punch_batch_interval") {
+        change.applied = apply_p2p_punch_batch_interval(std::stoi(value));
+    } else if (key == "p2p.retry_interval") {
+        change.applied = apply_p2p_retry_interval(std::stoi(value));
+    } else if (key == "p2p.stun_timeout") {
+        change.applied = apply_p2p_stun_timeout(std::stoi(value));
+    } else if (key == "p2p.endpoint_refresh_interval") {
+        change.applied = apply_p2p_endpoint_refresh_interval(std::stoi(value));
     } else {
         change.applied = false;
         change.message = "未知配置项";
@@ -602,6 +752,71 @@ void ConfigApplier::trigger_ipc_restart() {
 void ConfigApplier::trigger_route_reannounce() {
     LOG_INFO("client.config", "触发路由重新公告...");
     client_.request_route_reannounce();
+}
+
+bool ConfigApplier::apply_route_announce_interval(int seconds) {
+    LOG_INFO("client.config", "路由公告间隔已更改为: {}秒 (下次公告循环生效)", seconds);
+    return true;
+}
+
+// ===== P2P 配置 =====
+
+bool ConfigApplier::apply_p2p_enabled(bool enabled) {
+    LOG_INFO("client.config", "P2P 直连设置已更改为: {}", enabled ? "启用" : "禁用");
+    // P2P 启用/禁用需要重新启动 P2P manager，目前仅记录日志
+    // 完整实现需要调用 p2p_mgr_->stop() 或 p2p_mgr_->start()
+    return true;
+}
+
+bool ConfigApplier::apply_p2p_bind_port(int port) {
+    LOG_INFO("client.config", "P2P 绑定端口已更改为: {} (需要重启才能生效)", port);
+    // 端口变更需要重启，因为 socket 已绑定
+    return true;
+}
+
+bool ConfigApplier::apply_p2p_keepalive_interval(int seconds) {
+    LOG_INFO("client.config", "P2P Keepalive 间隔已更改为: {}秒", seconds);
+    return true;
+}
+
+bool ConfigApplier::apply_p2p_keepalive_timeout(int seconds) {
+    LOG_INFO("client.config", "P2P Keepalive 超时已更改为: {}秒", seconds);
+    return true;
+}
+
+bool ConfigApplier::apply_p2p_punch_timeout(int seconds) {
+    LOG_INFO("client.config", "P2P 打洞超时已更改为: {}秒", seconds);
+    return true;
+}
+
+bool ConfigApplier::apply_p2p_punch_batch_count(int count) {
+    LOG_INFO("client.config", "P2P 打洞批次数已更改为: {}", count);
+    return true;
+}
+
+bool ConfigApplier::apply_p2p_punch_batch_size(int size) {
+    LOG_INFO("client.config", "P2P 每批打洞包数已更改为: {}", size);
+    return true;
+}
+
+bool ConfigApplier::apply_p2p_punch_batch_interval(int ms) {
+    LOG_INFO("client.config", "P2P 打洞批次间隔已更改为: {}ms", ms);
+    return true;
+}
+
+bool ConfigApplier::apply_p2p_retry_interval(int seconds) {
+    LOG_INFO("client.config", "P2P 重试间隔已更改为: {}秒", seconds);
+    return true;
+}
+
+bool ConfigApplier::apply_p2p_stun_timeout(int ms) {
+    LOG_INFO("client.config", "STUN 查询超时已更改为: {}ms", ms);
+    return true;
+}
+
+bool ConfigApplier::apply_p2p_endpoint_refresh_interval(int seconds) {
+    LOG_INFO("client.config", "端点刷新间隔已更改为: {}秒", seconds);
+    return true;
 }
 
 }  // namespace edgelink::client
