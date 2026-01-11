@@ -714,8 +714,9 @@ int cmd_serve(int argc, char* argv[]) {
                 Logger::get("controller").error("builtin_stun.enabled=true but builtin_stun.ip is empty");
                 Logger::get("controller").warn("STUN server will NOT be started");
             } else {
+                // STUN 服务器必须绑定 0.0.0.0 以接收公网请求，不受主服务器 bind 配置影响
                 stun_server = std::make_unique<StunServer>(
-                    ioc, cfg.bind_address, cfg.builtin_stun.port);
+                    ioc, "0.0.0.0", cfg.builtin_stun.port);
                 stun_server->set_public_ip(cfg.builtin_stun.public_ip);
                 asio::co_spawn(ioc, stun_server->start(), asio::detached);
             }
