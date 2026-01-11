@@ -304,13 +304,17 @@ void Client::setup_callbacks() {
             asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
                 try {
                     bool started = co_await self->p2p_mgr_->start();
-                    if (started && self->control_ && self->control_->is_connected()) {
-                        // 上报端点给 Controller
-                        auto endpoints = self->p2p_mgr_->our_endpoints();
-                        log().debug("Reporting {} endpoints to controller", endpoints.size());
-                        if (!endpoints.empty()) {
-                            co_await self->control_->send_endpoint_update(endpoints);
-                            log().debug("Endpoint update sent successfully");
+                    if (started) {
+                        // 获取 control_ 的本地拷贝，避免 TOCTOU 问题
+                        auto ctrl = self->control_;
+                        if (ctrl && ctrl->is_connected()) {
+                            // 上报端点给 Controller
+                            auto endpoints = self->p2p_mgr_->our_endpoints();
+                            log().debug("Reporting {} endpoints to controller", endpoints.size());
+                            if (!endpoints.empty()) {
+                                co_await ctrl->send_endpoint_update(endpoints);
+                                log().debug("Endpoint update sent successfully");
+                            }
                         }
                     }
                 } catch (const std::exception& e) {
