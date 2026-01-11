@@ -129,25 +129,14 @@ void Client::setup_callbacks() {
             }
         }
 
-        // 自动对所有在线 peer 发起 P2P 连接
-        if (p2p_mgr_ && p2p_mgr_->is_running()) {
-            for (const auto& peer : config.peers) {
-                if (peer.online && peer.node_id != crypto_.node_id()) {
-                    p2p_mgr_->connect_peer(peer.node_id);
-                }
-            }
-        }
+        // P2P 打洞延迟到首次发送数据时触发
     };
 
     control_cbs.on_config_update = [this](const ConfigUpdate& update) {
         if (has_flag(update.update_flags, ConfigUpdateFlags::PEER_CHANGED)) {
             for (const auto& peer : update.add_peers) {
                 peers_.add_peer(peer);
-                // 新 peer 上线，自动发起 P2P 连接
-                if (p2p_mgr_ && p2p_mgr_->is_running() &&
-                    peer.online && peer.node_id != crypto_.node_id()) {
-                    p2p_mgr_->connect_peer(peer.node_id);
-                }
+                // P2P 打洞延迟到首次发送数据时触发
             }
             for (auto peer_id : update.del_peer_ids) {
                 peers_.remove_peer(peer_id);
@@ -298,20 +287,17 @@ void Client::setup_callbacks() {
             asio::co_spawn(ioc_, announce_configured_routes(), asio::detached);
         }
 
-        // Start P2P manager
+        // Start P2P manager (不主动打洞，等第一次发送数据时触发)
         if (p2p_mgr_) {
             auto self = shared_from_this();
             asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
                 try {
                     co_await self->p2p_mgr_->start();
-                    log().info("P2P manager started successfully");
+                    log().info("P2P manager started (will punch on first send)");
                 } catch (const std::exception& e) {
                     log().error("P2P manager failed: {}", e.what());
                 }
             }(), asio::detached);
-
-            // TODO: 端点上报暂时禁用，需要调查内存问题
-            // Endpoint reporting is temporarily disabled
         }
     };
 
