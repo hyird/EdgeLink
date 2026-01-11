@@ -339,11 +339,7 @@ jobs:
       with:
         images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-controller
         tags: |
-          type=ref,event=branch
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=sha,prefix=
-          type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value=latest
 
     - name: Docker meta (client)
       id: meta-client
@@ -351,11 +347,7 @@ jobs:
       with:
         images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-client
         tags: |
-          type=ref,event=branch
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=sha,prefix=
-          type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value=latest
 
     - name: Build and push controller
       uses: docker/build-push-action@v5
@@ -412,26 +404,16 @@ jobs:
       uses: docker/metadata-action@v5
       with:
         images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-controller
-        flavor: |
-          suffix=-debug
         tags: |
-          type=ref,event=branch
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=sha,prefix=
+          type=raw,value=latest-debug
 
     - name: Docker meta (client)
       id: meta-client
       uses: docker/metadata-action@v5
       with:
         images: ${{ secrets.DOCKERHUB_USERNAME }}/edgelink-client
-        flavor: |
-          suffix=-debug
         tags: |
-          type=ref,event=branch
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=sha,prefix=
+          type=raw,value=latest-debug
 
     - name: Build and push controller
       uses: docker/build-push-action@v5
