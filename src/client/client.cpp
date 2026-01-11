@@ -162,8 +162,11 @@ void Client::setup_callbacks() {
 
     control_cbs.on_config_update = [this](const ConfigUpdate& update) {
         if (has_flag(update.update_flags, ConfigUpdateFlags::PEER_CHANGED)) {
+            std::vector<NodeId> added_peer_ids;
+
             for (const auto& peer : update.add_peers) {
                 peers_.add_peer(peer);
+                added_peer_ids.push_back(peer.node_id);
                 // P2P 打洞延迟到首次发送数据时触发
             }
             for (auto peer_id : update.del_peer_ids) {
@@ -172,6 +175,12 @@ void Client::setup_callbacks() {
                 if (p2p_mgr_) {
                     p2p_mgr_->disconnect_peer(peer_id);
                 }
+            }
+
+            // peer 上线后，重新同步路由（之前可能因为 gateway IP 查不到而失败）
+            if (!added_peer_ids.empty() && route_mgr_ && config_.accept_routes) {
+                std::lock_guard lock(routes_mutex_);
+                route_mgr_->sync_routes(routes_);
             }
         }
     };

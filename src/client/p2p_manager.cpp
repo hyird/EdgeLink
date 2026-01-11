@@ -148,6 +148,16 @@ void P2PManager::connect_peer(NodeId peer_id) {
 
     lock.unlock();
 
+    // 发起 P2P_INIT 前，先上传我们的端点给 Controller
+    // 这样 Controller 在通知对端时，对端也能获取到我们的端点进行双向打洞
+    if (callbacks_.on_endpoints_ready) {
+        auto eps = endpoints_.get_all_endpoints();
+        if (!eps.empty()) {
+            log().debug("Uploading {} endpoints before P2P_INIT", eps.size());
+            callbacks_.on_endpoints_ready(eps);
+        }
+    }
+
     // 发送 P2P_INIT 请求
     P2PInit init;
     init.target_node = peer_id;
