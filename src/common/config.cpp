@@ -308,11 +308,14 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             if (auto v = (*p2p)["punch_timeout"].value<int64_t>()) {
                 config.p2p.punch_timeout = static_cast<uint32_t>(*v);
             }
-            if (auto v = (*p2p)["punch_attempts"].value<int64_t>()) {
-                config.p2p.punch_attempts = static_cast<uint32_t>(*v);
+            if (auto v = (*p2p)["punch_batch_count"].value<int64_t>()) {
+                config.p2p.punch_batch_count = static_cast<uint32_t>(*v);
             }
-            if (auto v = (*p2p)["punch_interval"].value<int64_t>()) {
-                config.p2p.punch_interval = static_cast<uint32_t>(*v);
+            if (auto v = (*p2p)["punch_batch_size"].value<int64_t>()) {
+                config.p2p.punch_batch_size = static_cast<uint32_t>(*v);
+            }
+            if (auto v = (*p2p)["punch_batch_interval"].value<int64_t>()) {
+                config.p2p.punch_batch_interval = static_cast<uint32_t>(*v);
             }
             if (auto v = (*p2p)["retry_interval"].value<int64_t>()) {
                 config.p2p.retry_interval = static_cast<uint32_t>(*v);

@@ -130,13 +130,17 @@ keepalive_timeout = 45
 # [热重载: 立即生效]
 punch_timeout = 10
 
-# Number of hole punching attempts per endpoint
+# Number of punch batches (EasyTier style: 5)
 # [热重载: 立即生效]
-punch_attempts = 5
+punch_batch_count = 5
 
-# Interval between punch attempts in milliseconds
+# Packets per punch batch (EasyTier style: 2)
 # [热重载: 立即生效]
-punch_interval = 200
+punch_batch_size = 2
+
+# Interval between punch batches in milliseconds (EasyTier style: 400)
+# [热重载: 立即生效]
+punch_batch_interval = 400
 
 # Retry interval in seconds (after P2P fails, retry after this)
 # [热重载: 下次循环生效]

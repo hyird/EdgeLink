@@ -63,6 +63,20 @@ struct ClientConfig {
     std::string log_level = "debug";    // 日志级别
     std::string log_file;               // 日志文件路径
 
+    // P2P 配置
+    struct P2PConfig {
+        bool enabled = true;                    // 启用 P2P 直连
+        uint16_t bind_port = 0;                 // UDP 绑定端口（0 = 随机）
+        uint32_t keepalive_interval = 15;       // Keepalive 间隔（秒）
+        uint32_t keepalive_timeout = 45;        // Keepalive 超时（秒）
+        uint32_t punch_timeout = 10;            // 打洞超时（秒）
+        uint32_t punch_batch_count = 5;         // 打洞批次数 (EasyTier: 5)
+        uint32_t punch_batch_size = 2;          // 每批发送包数 (EasyTier: 2)
+        uint32_t punch_batch_interval = 400;    // 批次间隔（毫秒, EasyTier: 400）
+        uint32_t retry_interval = 60;           // 失败后重试间隔（秒）
+        uint32_t stun_timeout = 5000;           // STUN 查询超时（毫秒）
+    } p2p;
+
     // 获取当前使用的controller host
     std::string current_controller_host() const {
         if (controller_hosts.empty()) return "localhost:8080";

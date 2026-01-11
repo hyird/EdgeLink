@@ -39,6 +39,20 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     endpoint_mgr_ = std::make_unique<EndpointManager>(ioc);
     p2p_mgr_ = std::make_unique<P2PManager>(ioc, crypto_, peers_, *endpoint_mgr_);
 
+    // 设置 P2P 配置
+    client::P2PConfig p2p_cfg;
+    p2p_cfg.enabled = config_.p2p.enabled;
+    p2p_cfg.bind_port = config_.p2p.bind_port;
+    p2p_cfg.keepalive_interval_sec = config_.p2p.keepalive_interval;
+    p2p_cfg.keepalive_timeout_sec = config_.p2p.keepalive_timeout;
+    p2p_cfg.punch_timeout_sec = config_.p2p.punch_timeout;
+    p2p_cfg.punch_batch_count = config_.p2p.punch_batch_count;
+    p2p_cfg.punch_batch_size = config_.p2p.punch_batch_size;
+    p2p_cfg.punch_batch_interval_ms = config_.p2p.punch_batch_interval;
+    p2p_cfg.retry_interval_sec = config_.p2p.retry_interval;
+    p2p_cfg.stun_timeout_ms = config_.p2p.stun_timeout;
+    p2p_mgr_->set_config(p2p_cfg);
+
     // Setup SSL context
     ssl_ctx_.set_default_verify_paths();
 

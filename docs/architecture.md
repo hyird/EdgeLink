@@ -2147,6 +2147,52 @@ Client 采用 **Relay 优先、P2P 按需** 的连接策略，确保用户体验
 > B 的 NAT 会因为没有看到 B→A 的出站流量而拒绝 A 的入站包。
 > 只有双方同时发包，才能同时在两边的 NAT 上打开洞。
 
+**分批打洞策略** (参考 EasyTier)：
+
+收到 P2P_ENDPOINT 后立即启动分批打洞协程，而非简单的周期性发包：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| punch_batch_count | 5 | 总共发送 5 批 |
+| punch_batch_size | 2 | 每批向每个端点发送 2 个 PING |
+| punch_batch_interval | 400ms | 批次之间间隔 400ms |
+
+打洞流程：
+```
+收到 P2P_ENDPOINT
+       │
+       ▼
+   ┌───────────┐
+   │  Batch 1  │ ─► 向所有端点发送 2 个 PING
+   └─────┬─────┘
+         │ 等待 400ms
+         ▼
+   ┌───────────┐
+   │  Batch 2  │ ─► 向所有端点发送 2 个 PING
+   └─────┬─────┘
+         │ 等待 400ms
+         ▼
+        ...
+         │
+         ▼
+   ┌───────────┐
+   │  Batch 5  │ ─► 向所有端点发送 2 个 PING
+   └─────┬─────┘
+         │
+         ▼
+   检查是否收到 PONG
+    │           │
+    ▼           ▼
+ [成功]      [超时]
+CONNECTED   RELAY_ONLY
+```
+
+> **为什么要分批发送？**
+>
+> 1. **增加成功率**：多次尝试覆盖网络抖动和 NAT 映射建立延迟
+> 2. **同步窗口**：400ms 间隔给对方足够时间也开始打洞
+> 3. **避免过载**：每批只发 2 个包，不会触发运营商限速
+
 **回调链路**：
 
 ```
@@ -4248,8 +4294,9 @@ level = "info"  # 全局默认等级
 | p2p.keepalive_interval   | uint32   | 15        | P2P keepalive 间隔 (秒)    |
 | p2p.keepalive_timeout    | uint32   | 45        | P2P keepalive 超时 (秒)    |
 | p2p.punch_timeout        | uint32   | 10        | 打洞超时时间 (秒)          |
-| p2p.punch_attempts       | uint32   | 5         | 打洞尝试次数               |
-| p2p.punch_interval       | uint32   | 200       | 打洞尝试间隔 (毫秒)        |
+| p2p.punch_batch_count    | uint32   | 5         | 打洞批次数 (EasyTier: 5)   |
+| p2p.punch_batch_size     | uint32   | 2         | 每批发送包数 (EasyTier: 2) |
+| p2p.punch_batch_interval | uint32   | 400       | 批次间隔 (毫秒, EasyTier: 400) |
 | p2p.retry_interval       | uint32   | 60        | 失败后重试间隔 (秒)        |
 | p2p.stun_timeout         | uint32   | 5000      | STUN 探测超时 (毫秒)       |
 | queue.capacity           | uint32   | 65536     | 消息队列最大容量           |
@@ -5207,8 +5254,9 @@ bind_port = 0                          # UDP 绑定端口 (0=随机)
 keepalive_interval = 15                # Keepalive 间隔 (秒)
 keepalive_timeout = 45                 # Keepalive 超时 (秒)
 punch_timeout = 10                     # 打洞超时 (秒)
-punch_attempts = 5                     # 打洞尝试次数
-punch_interval = 200                   # 打洞间隔 (毫秒)
+punch_batch_count = 5                  # 打洞批次数 (EasyTier: 5)
+punch_batch_size = 2                   # 每批发送包数 (EasyTier: 2)
+punch_batch_interval = 400             # 批次间隔 (毫秒, EasyTier: 400)
 retry_interval = 60                    # 失败后重试间隔 (秒)
 stun_timeout = 5000                    # STUN 查询超时 (毫秒)
 

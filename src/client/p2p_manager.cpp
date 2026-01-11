@@ -233,6 +233,9 @@ void P2PManager::handle_p2p_endpoint(const P2PEndpointMsg& msg) {
     if (callbacks_.on_state_change) {
         callbacks_.on_state_change(msg.peer_node, P2PState::PUNCHING);
     }
+
+    // 立即启动分批打洞 (EasyTier 风格)
+    asio::co_spawn(ioc_, do_punch_batches(msg.peer_node), asio::detached);
 }
 
 std::optional<PeerP2PState> P2PManager::get_peer_state(NodeId peer_id) const {
@@ -430,9 +433,9 @@ asio::awaitable<void> P2PManager::keepalive_loop() {
 }
 
 asio::awaitable<void> P2PManager::punch_loop() {
+    // 此循环只负责超时检测，打洞包发送由 do_punch_batches 协程完成
     while (running_) {
-        punch_timer_.expires_after(
-            std::chrono::milliseconds(config_.punch_interval_ms));
+        punch_timer_.expires_after(std::chrono::seconds(1));
 
         try {
             co_await punch_timer_.async_wait(asio::use_awaitable);
@@ -443,53 +446,6 @@ asio::awaitable<void> P2PManager::punch_loop() {
         if (!running_) break;
 
         uint64_t now = now_us();
-
-        // 对正在打洞的对端发送 PING
-        std::vector<std::pair<NodeId, std::vector<Endpoint>>> punching_peers;
-        {
-            std::shared_lock lock(states_mutex_);
-            for (auto& [id, state] : peer_states_) {
-                if (state.state == P2PState::PUNCHING) {
-                    // 检查是否超时
-                    uint64_t punch_start = state.last_punch_time;
-                    if (punch_start > 0 &&
-                        now - punch_start > config_.punch_timeout_sec * 1000000ULL) {
-                        // 打洞超时，标记为 RELAY_ONLY
-                        continue; // 将在下面处理
-                    }
-
-                    if (state.punch_count < config_.punch_attempts * state.peer_endpoints.size()) {
-                        punching_peers.emplace_back(id, state.peer_endpoints);
-                    }
-                }
-            }
-        }
-
-        for (const auto& [peer_id, endpoints] : punching_peers) {
-            // 轮询发送到每个端点
-            std::unique_lock lock(states_mutex_);
-            auto it = peer_states_.find(peer_id);
-            if (it == peer_states_.end()) continue;
-
-            auto& state = it->second;
-            if (state.last_punch_time == 0) {
-                state.last_punch_time = now;
-            }
-
-            if (endpoints.empty()) continue;
-
-            // 选择下一个端点
-            size_t ep_index = state.punch_count % endpoints.size();
-            const auto& ep = endpoints[ep_index];
-            state.punch_count++;
-
-            lock.unlock();
-
-            auto udp_ep = to_udp_endpoint(ep);
-            if (udp_ep) {
-                co_await send_p2p_ping(peer_id, *udp_ep);
-            }
-        }
 
         // 检查打洞超时和 RESOLVING 超时
         std::vector<NodeId> timed_out;
@@ -528,6 +484,94 @@ asio::awaitable<void> P2PManager::punch_loop() {
             report_p2p_status(peer_id);
         }
     }
+}
+
+asio::awaitable<void> P2PManager::do_punch_batches(NodeId peer_id) {
+    // EasyTier 风格的分批打洞：每批 2 个包，共 5 批，间隔 400ms
+    // 双向同时打洞 - 两端同时收到 P2P_ENDPOINT 后同时开始打洞
+
+    log().debug("Starting batch hole punching to peer {} ({} batches, {} packets/batch, {}ms interval)",
+                peer_id, config_.punch_batch_count, config_.punch_batch_size,
+                config_.punch_batch_interval_ms);
+
+    // 获取对端端点列表
+    std::vector<Endpoint> endpoints;
+    {
+        std::unique_lock lock(states_mutex_);
+        auto it = peer_states_.find(peer_id);
+        if (it == peer_states_.end() || it->second.state != P2PState::PUNCHING) {
+            co_return;
+        }
+        endpoints = it->second.peer_endpoints;
+        it->second.last_punch_time = now_us();
+    }
+
+    if (endpoints.empty()) {
+        log().warn("No endpoints to punch for peer {}", peer_id);
+        co_return;
+    }
+
+    // 转换为 UDP 端点
+    std::vector<asio::ip::udp::endpoint> udp_endpoints;
+    for (const auto& ep : endpoints) {
+        auto udp_ep = to_udp_endpoint(ep);
+        if (udp_ep) {
+            udp_endpoints.push_back(*udp_ep);
+        }
+    }
+
+    if (udp_endpoints.empty()) {
+        log().warn("No valid UDP endpoints for peer {}", peer_id);
+        co_return;
+    }
+
+    // 分批发送打洞包
+    asio::steady_timer batch_timer(ioc_);
+
+    for (uint32_t batch = 0; batch < config_.punch_batch_count && running_; ++batch) {
+        // 检查状态是否还是 PUNCHING
+        {
+            std::shared_lock lock(states_mutex_);
+            auto it = peer_states_.find(peer_id);
+            if (it == peer_states_.end() || it->second.state != P2PState::PUNCHING) {
+                // 状态已改变（可能已连接或失败），停止打洞
+                log().debug("Punch state changed for peer {}, stopping batches", peer_id);
+                co_return;
+            }
+        }
+
+        // 发送一批打洞包：每批向所有端点发送 batch_size 个包
+        for (uint32_t pkt = 0; pkt < config_.punch_batch_size; ++pkt) {
+            for (const auto& ep : udp_endpoints) {
+                co_await send_p2p_ping(peer_id, ep);
+            }
+        }
+
+        // 更新打洞计数
+        {
+            std::unique_lock lock(states_mutex_);
+            auto it = peer_states_.find(peer_id);
+            if (it != peer_states_.end()) {
+                it->second.punch_count += config_.punch_batch_size * udp_endpoints.size();
+            }
+        }
+
+        log().debug("Sent punch batch {}/{} to peer {} ({} endpoints)",
+                    batch + 1, config_.punch_batch_count, peer_id, udp_endpoints.size());
+
+        // 批次间隔等待 (最后一批不需要等待)
+        if (batch + 1 < config_.punch_batch_count) {
+            batch_timer.expires_after(
+                std::chrono::milliseconds(config_.punch_batch_interval_ms));
+            try {
+                co_await batch_timer.async_wait(asio::use_awaitable);
+            } catch (const boost::system::system_error&) {
+                break;
+            }
+        }
+    }
+
+    log().debug("Finished batch hole punching to peer {}", peer_id);
 }
 
 asio::awaitable<void> P2PManager::retry_loop() {

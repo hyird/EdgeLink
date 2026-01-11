@@ -38,8 +38,9 @@ struct P2PConfig {
     uint32_t keepalive_interval_sec = 15;       // Keepalive 间隔 (秒)
     uint32_t keepalive_timeout_sec = 45;        // Keepalive 超时 (秒)
     uint32_t punch_timeout_sec = 10;            // 打洞超时 (秒)
-    uint32_t punch_attempts = 5;                // 打洞尝试次数
-    uint32_t punch_interval_ms = 200;           // 打洞间隔 (毫秒)
+    uint32_t punch_batch_count = 5;             // 打洞批次数 (EasyTier: 5)
+    uint32_t punch_batch_size = 2;              // 每批发送包数 (EasyTier: 2)
+    uint32_t punch_batch_interval_ms = 400;     // 批次间隔 (毫秒, EasyTier: 400)
     uint32_t retry_interval_sec = 60;           // 失败后重试间隔 (秒)
     uint32_t stun_timeout_ms = 5000;            // STUN 查询超时 (毫秒)
 };
@@ -151,8 +152,11 @@ private:
     // Keepalive 循环
     asio::awaitable<void> keepalive_loop();
 
-    // 打洞循环
+    // 打洞循环 (超时检测)
     asio::awaitable<void> punch_loop();
+
+    // 执行分批打洞 (EasyTier 风格：每批 2 个包，共 5 批，间隔 400ms)
+    asio::awaitable<void> do_punch_batches(NodeId peer_id);
 
     // 重试循环
     asio::awaitable<void> retry_loop();
