@@ -345,33 +345,42 @@ asio::awaitable<StunQueryResult> EndpointManager::send_stun_request(
             std::array<uint8_t, 1500> recv_buf;
             asio::ip::udp::endpoint sender;
 
-            // 使用超时
+            // 使用超时 - 使用 shared_ptr 确保 cancel_flag 的生命周期
+            auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
             asio::steady_timer timer(ioc_);
             timer.expires_after(std::chrono::milliseconds(config_.stun_timeout_ms));
 
-            bool received = false;
-            size_t bytes_received = 0;
-
-            // 设置超时处理
-            auto timeout_handler = [&](const boost::system::error_code&) {
-                if (!received) {
-                    socket_.cancel();
+            // 设置超时处理 - 捕获 shared_ptr 和 socket 指针
+            auto* socket_ptr = &socket_;
+            timer.async_wait([cancel_flag, socket_ptr](const boost::system::error_code& ec) {
+                if (!ec && !cancel_flag->load()) {
+                    boost::system::error_code cancel_ec;
+                    socket_ptr->cancel(cancel_ec);
                 }
-            };
-            timer.async_wait(timeout_handler);
+            });
+
+            size_t bytes_received = 0;
+            bool timed_out = false;
 
             try {
                 bytes_received = co_await socket_.async_receive_from(
                     asio::buffer(recv_buf), sender, asio::use_awaitable);
-                received = true;
+                cancel_flag->store(true);
                 timer.cancel();
             } catch (const boost::system::system_error& e) {
+                cancel_flag->store(true);
+                timer.cancel();
                 if (e.code() == asio::error::operation_aborted) {
                     // 超时
                     log().debug("STUN request timeout (attempt {})", i + 1);
-                    continue;
+                    timed_out = true;
+                } else {
+                    throw;
                 }
-                throw;
+            }
+
+            if (timed_out) {
+                continue;
             }
 
             // 计算 RTT
