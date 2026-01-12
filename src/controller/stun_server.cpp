@@ -1,5 +1,6 @@
 #include "controller/stun_server.hpp"
 #include "common/logger.hpp"
+#include "common/frame.hpp"
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -9,24 +10,7 @@ namespace edgelink::controller {
 namespace {
 auto& log() { return Logger::get("controller.stun"); }
 
-// 写入 16 位大端整数
-void write_u16_be(std::vector<uint8_t>& buf, uint16_t val) {
-    buf.push_back(static_cast<uint8_t>(val >> 8));
-    buf.push_back(static_cast<uint8_t>(val & 0xFF));
-}
-
-// 写入 32 位大端整数
-void write_u32_be(std::vector<uint8_t>& buf, uint32_t val) {
-    buf.push_back(static_cast<uint8_t>(val >> 24));
-    buf.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
-    buf.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
-    buf.push_back(static_cast<uint8_t>(val & 0xFF));
-}
-
-// 读取 16 位大端整数
-uint16_t read_u16_be(const uint8_t* data) {
-    return (static_cast<uint16_t>(data[0]) << 8) | data[1];
-}
+// 使用 common/frame.hpp 中的 binary::read_u16_be, binary::write_u16_be, binary::write_u32_be
 
 } // anonymous namespace
 
@@ -122,7 +106,7 @@ void StunServer::handle_request(const asio::ip::udp::endpoint& from,
     }
 
     // 读取消息类型
-    uint16_t msg_type = read_u16_be(data.data());
+    uint16_t msg_type = binary::read_u16_be(data.data());
     if (msg_type != static_cast<uint16_t>(StunMsgType::BINDING_REQUEST)) {
         log().debug("Ignoring non-binding request: 0x{:04x}", msg_type);
         return;
@@ -166,7 +150,7 @@ bool StunServer::validate_stun_message(std::span<const uint8_t> data) {
     }
 
     // 检查消息长度
-    uint16_t msg_len = read_u16_be(data.data() + 2);
+    uint16_t msg_len = binary::read_u16_be(data.data() + 2);
     if (data.size() < STUN_HEADER_SIZE + msg_len) {
         return false;
     }
@@ -192,8 +176,8 @@ std::vector<uint8_t> StunServer::build_binding_response(
     // SOFTWARE 属性
     std::string software = "EdgeLink STUN";
     std::vector<uint8_t> software_attr;
-    write_u16_be(software_attr, static_cast<uint16_t>(StunAttrType::SOFTWARE));
-    write_u16_be(software_attr, static_cast<uint16_t>(software.size()));
+    binary::write_u16_be(software_attr, static_cast<uint16_t>(StunAttrType::SOFTWARE));
+    binary::write_u16_be(software_attr, static_cast<uint16_t>(software.size()));
     software_attr.insert(software_attr.end(), software.begin(), software.end());
     // 填充到 4 字节对齐
     while (software_attr.size() % 4 != 0) {
@@ -205,11 +189,11 @@ std::vector<uint8_t> StunServer::build_binding_response(
 
     // 写入头部
     // Message Type: Binding Response (0x0101)
-    write_u16_be(response, static_cast<uint16_t>(StunMsgType::BINDING_RESPONSE));
+    binary::write_u16_be(response, static_cast<uint16_t>(StunMsgType::BINDING_RESPONSE));
     // Message Length
-    write_u16_be(response, attrs_len);
+    binary::write_u16_be(response, attrs_len);
     // Magic Cookie
-    write_u32_be(response, STUN_MAGIC_COOKIE);
+    binary::write_u32_be(response, STUN_MAGIC_COOKIE);
     // Transaction ID (12 bytes)
     response.insert(response.end(), txn_id.begin(), txn_id.end());
 
@@ -227,11 +211,11 @@ std::vector<uint8_t> StunServer::build_xor_mapped_address(
     std::vector<uint8_t> attr;
 
     // XOR-MAPPED-ADDRESS 属性类型
-    write_u16_be(attr, static_cast<uint16_t>(StunAttrType::XOR_MAPPED_ADDRESS));
+    binary::write_u16_be(attr, static_cast<uint16_t>(StunAttrType::XOR_MAPPED_ADDRESS));
 
     if (addr.address().is_v4()) {
         // IPv4: 8 bytes value
-        write_u16_be(attr, 8);  // 属性长度
+        binary::write_u16_be(attr, 8);  // 属性长度
 
         // Reserved (1 byte) + Family (1 byte)
         attr.push_back(0x00);  // Reserved
@@ -239,7 +223,7 @@ std::vector<uint8_t> StunServer::build_xor_mapped_address(
 
         // XOR Port (port XOR 上 16 位 magic cookie)
         uint16_t xor_port = addr.port() ^ static_cast<uint16_t>(STUN_MAGIC_COOKIE >> 16);
-        write_u16_be(attr, xor_port);
+        binary::write_u16_be(attr, xor_port);
 
         // XOR Address (address XOR magic cookie)
         auto ip_bytes = addr.address().to_v4().to_bytes();
@@ -248,11 +232,11 @@ std::vector<uint8_t> StunServer::build_xor_mapped_address(
                           (static_cast<uint32_t>(ip_bytes[2]) << 8) |
                           static_cast<uint32_t>(ip_bytes[3]);
         uint32_t xor_ip = ip_u32 ^ STUN_MAGIC_COOKIE;
-        write_u32_be(attr, xor_ip);
+        binary::write_u32_be(attr, xor_ip);
 
     } else {
         // IPv6: 20 bytes value
-        write_u16_be(attr, 20);  // 属性长度
+        binary::write_u16_be(attr, 20);  // 属性长度
 
         // Reserved (1 byte) + Family (1 byte)
         attr.push_back(0x00);  // Reserved
@@ -260,7 +244,7 @@ std::vector<uint8_t> StunServer::build_xor_mapped_address(
 
         // XOR Port
         uint16_t xor_port = addr.port() ^ static_cast<uint16_t>(STUN_MAGIC_COOKIE >> 16);
-        write_u16_be(attr, xor_port);
+        binary::write_u16_be(attr, xor_port);
 
         // XOR Address (address XOR magic cookie + txn_id)
         auto ip_bytes = addr.address().to_v6().to_bytes();

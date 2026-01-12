@@ -83,7 +83,35 @@ enum class FrameError {
 
 std::string frame_error_message(FrameError error);
 
-// Binary buffer utilities
+// 独立的大端读写工具函数（用于随机访问场景）
+namespace binary {
+
+inline uint16_t read_u16_be(const uint8_t* data) {
+    return (static_cast<uint16_t>(data[0]) << 8) | data[1];
+}
+
+inline uint32_t read_u32_be(const uint8_t* data) {
+    return (static_cast<uint32_t>(data[0]) << 24) |
+           (static_cast<uint32_t>(data[1]) << 16) |
+           (static_cast<uint32_t>(data[2]) << 8) |
+           static_cast<uint32_t>(data[3]);
+}
+
+inline void write_u16_be(std::vector<uint8_t>& buf, uint16_t val) {
+    buf.push_back(static_cast<uint8_t>(val >> 8));
+    buf.push_back(static_cast<uint8_t>(val & 0xFF));
+}
+
+inline void write_u32_be(std::vector<uint8_t>& buf, uint32_t val) {
+    buf.push_back(static_cast<uint8_t>(val >> 24));
+    buf.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
+    buf.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
+    buf.push_back(static_cast<uint8_t>(val & 0xFF));
+}
+
+} // namespace binary
+
+// Binary buffer utilities (stateful sequential reader/writer)
 class BinaryReader {
 public:
     explicit BinaryReader(std::span<const uint8_t> data)

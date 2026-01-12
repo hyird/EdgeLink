@@ -1,5 +1,6 @@
 #include "client/endpoint_manager.hpp"
 #include "common/logger.hpp"
+#include "common/frame.hpp"
 #include <boost/asio/use_awaitable.hpp>
 #include <random>
 
@@ -69,18 +70,7 @@ std::vector<uint8_t> build_stun_request(const std::array<uint8_t, STUN_TXN_ID_SI
     return request;
 }
 
-// 读取 16 位大端整数
-uint16_t read_u16_be(const uint8_t* data) {
-    return (static_cast<uint16_t>(data[0]) << 8) | data[1];
-}
-
-// 读取 32 位大端整数
-uint32_t read_u32_be(const uint8_t* data) {
-    return (static_cast<uint32_t>(data[0]) << 24) |
-           (static_cast<uint32_t>(data[1]) << 16) |
-           (static_cast<uint32_t>(data[2]) << 8) |
-           static_cast<uint32_t>(data[3]);
-}
+// 使用 common/frame.hpp 中的 binary::read_u16_be 和 binary::read_u32_be
 
 // 判断 IPv4 地址是否是私有/内网 IP
 // 包括: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 (CGNAT),
@@ -453,13 +443,13 @@ std::optional<Endpoint> EndpointManager::parse_stun_response(
     }
 
     // 验证消息类型
-    uint16_t msg_type = read_u16_be(data.data());
+    uint16_t msg_type = binary::read_u16_be(data.data());
     if (msg_type != STUN_BINDING_RESPONSE) {
         return std::nullopt;
     }
 
     // 验证 Magic Cookie
-    uint32_t magic = read_u32_be(data.data() + 4);
+    uint32_t magic = binary::read_u32_be(data.data() + 4);
     if (magic != STUN_MAGIC_COOKIE) {
         return std::nullopt;
     }
@@ -470,7 +460,7 @@ std::optional<Endpoint> EndpointManager::parse_stun_response(
     }
 
     // 解析属性
-    uint16_t msg_len = read_u16_be(data.data() + 2);
+    uint16_t msg_len = binary::read_u16_be(data.data() + 2);
     size_t offset = STUN_HEADER_SIZE;
     size_t end = STUN_HEADER_SIZE + msg_len;
 
@@ -478,8 +468,8 @@ std::optional<Endpoint> EndpointManager::parse_stun_response(
     bool found = false;
 
     while (offset + 4 <= end && offset + 4 <= data.size()) {
-        uint16_t attr_type = read_u16_be(data.data() + offset);
-        uint16_t attr_len = read_u16_be(data.data() + offset + 2);
+        uint16_t attr_type = binary::read_u16_be(data.data() + offset);
+        uint16_t attr_len = binary::read_u16_be(data.data() + offset + 2);
         offset += 4;
 
         if (offset + attr_len > data.size()) {
@@ -492,11 +482,11 @@ std::optional<Endpoint> EndpointManager::parse_stun_response(
                 uint8_t family = data[offset + 1];
                 if (family == 0x01) { // IPv4
                     // XOR Port
-                    uint16_t xor_port = read_u16_be(data.data() + offset + 2);
+                    uint16_t xor_port = binary::read_u16_be(data.data() + offset + 2);
                     result.port = xor_port ^ static_cast<uint16_t>(STUN_MAGIC_COOKIE >> 16);
 
                     // XOR Address
-                    uint32_t xor_addr = read_u32_be(data.data() + offset + 4);
+                    uint32_t xor_addr = binary::read_u32_be(data.data() + offset + 4);
                     uint32_t addr = xor_addr ^ STUN_MAGIC_COOKIE;
 
                     result.address[0] = static_cast<uint8_t>(addr >> 24);
@@ -515,7 +505,7 @@ std::optional<Endpoint> EndpointManager::parse_stun_response(
             if (attr_len >= 8) {
                 uint8_t family = data[offset + 1];
                 if (family == 0x01) { // IPv4
-                    result.port = read_u16_be(data.data() + offset + 2);
+                    result.port = binary::read_u16_be(data.data() + offset + 2);
 
                     result.address[0] = data[offset + 4];
                     result.address[1] = data[offset + 5];
