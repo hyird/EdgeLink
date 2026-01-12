@@ -2,6 +2,7 @@
 #include "common/logger.hpp"
 #include "common/frame.hpp"
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <random>
 
 #ifdef _WIN32
@@ -116,6 +117,7 @@ const char* nat_type_name(NatType type) {
 EndpointManager::EndpointManager(asio::io_context& ioc)
     : ioc_(ioc)
     , socket_(ioc)
+    , stun_response_channel_(std::make_unique<StunResponseChannel>(ioc, 16))
 {
 }
 
@@ -349,49 +351,47 @@ asio::awaitable<StunQueryResult> EndpointManager::send_stun_request(
     // 发送请求 (最多重试几次)
     for (uint32_t i = 0; i < config_.stun_retry_count; ++i) {
         try {
+            // 注册 txn_id 到待处理集合
+            {
+                std::lock_guard lock(pending_stun_mutex_);
+                pending_stun_txn_ids_.insert(txn_id);
+            }
+
             // 发送 Binding Request
             co_await socket_.async_send_to(
                 asio::buffer(request), stun_server, asio::use_awaitable);
 
-            // 接收响应 (with timeout)
-            std::array<uint8_t, 1500> recv_buf;
-            asio::ip::udp::endpoint sender;
-
-            // 使用超时 - 使用 shared_ptr 确保 cancel_flag 的生命周期
-            auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
+            // 使用 channel 异步等待响应（带超时）
             asio::steady_timer timer(ioc_);
             timer.expires_after(std::chrono::milliseconds(config_.stun_timeout_ms));
 
-            // 设置超时处理 - 捕获 shared_ptr 和 socket 指针
-            auto* socket_ptr = &socket_;
-            timer.async_wait([cancel_flag, socket_ptr](const boost::system::error_code& ec) {
-                if (!ec && !cancel_flag->load()) {
-                    boost::system::error_code cancel_ec;
-                    socket_ptr->cancel(cancel_ec);
-                }
-            });
+            bool got_response = false;
+            std::vector<uint8_t> response_data;
 
-            size_t bytes_received = 0;
-            bool timed_out = false;
+            // 等待 channel 响应或超时
+            using namespace asio::experimental::awaitable_operators;
+            auto wait_result = co_await (
+                stun_response_channel_->async_receive(asio::use_awaitable) ||
+                timer.async_wait(asio::use_awaitable)
+            );
 
-            try {
-                bytes_received = co_await socket_.async_receive_from(
-                    asio::buffer(recv_buf), sender, asio::use_awaitable);
-                cancel_flag->store(true);
-                timer.cancel();
-            } catch (const boost::system::system_error& e) {
-                cancel_flag->store(true);
-                timer.cancel();
-                if (e.code() == asio::error::operation_aborted) {
-                    // 超时
-                    log().debug("STUN request timeout (attempt {})", i + 1);
-                    timed_out = true;
-                } else {
-                    throw;
+            if (wait_result.index() == 0) {
+                // 收到 channel 响应（error_code 通过异常传递，不在返回值中）
+                auto [recv_txn_id, data] = std::get<0>(wait_result);
+                if (recv_txn_id == txn_id) {
+                    got_response = true;
+                    response_data = std::move(data);
                 }
             }
 
-            if (timed_out) {
+            // 移除待处理 txn_id
+            {
+                std::lock_guard lock(pending_stun_mutex_);
+                pending_stun_txn_ids_.erase(txn_id);
+            }
+
+            if (!got_response) {
+                log().debug("STUN request timeout (attempt {})", i + 1);
                 continue;
             }
 
@@ -401,7 +401,7 @@ asio::awaitable<StunQueryResult> EndpointManager::send_stun_request(
 
             // 解析响应
             auto mapped = parse_stun_response(
-                std::span(recv_buf.data(), bytes_received), txn_id);
+                std::span(response_data.data(), response_data.size()), txn_id);
 
             if (mapped) {
                 result.success = true;
@@ -420,6 +420,9 @@ asio::awaitable<StunQueryResult> EndpointManager::send_stun_request(
 
         } catch (const std::exception& e) {
             log().debug("STUN request failed: {}", e.what());
+            // 确保移除待处理 txn_id
+            std::lock_guard lock(pending_stun_mutex_);
+            pending_stun_txn_ids_.erase(txn_id);
         }
 
         // 重试间隔
@@ -606,6 +609,55 @@ std::vector<asio::ip::address> EndpointManager::get_local_addresses() const {
 #endif
 
     return addresses;
+}
+
+// ============================================================================
+// STUN 包识别和处理（与 recv_loop 协作）
+// ============================================================================
+
+bool EndpointManager::is_stun_response(std::span<const uint8_t> data) {
+    // STUN 消息最小长度: 20 字节 (header)
+    if (data.size() < 20) {
+        return false;
+    }
+
+    // 检查消息类型: STUN Binding Response = 0x0101
+    uint16_t msg_type = (static_cast<uint16_t>(data[0]) << 8) | data[1];
+    if (msg_type != 0x0101) {
+        return false;
+    }
+
+    // 检查 Magic Cookie (字节 4-7): 0x2112A442
+    uint32_t magic = (static_cast<uint32_t>(data[4]) << 24) |
+                     (static_cast<uint32_t>(data[5]) << 16) |
+                     (static_cast<uint32_t>(data[6]) << 8) |
+                     static_cast<uint32_t>(data[7]);
+
+    return magic == 0x2112A442;
+}
+
+void EndpointManager::handle_stun_response(std::span<const uint8_t> data) {
+    if (data.size() < 20) {
+        return;
+    }
+
+    // 提取 Transaction ID (字节 8-19)
+    std::array<uint8_t, 12> txn_id;
+    std::copy(data.begin() + 8, data.begin() + 20, txn_id.begin());
+
+    // 检查是否有人在等待这个 txn_id
+    {
+        std::lock_guard lock(pending_stun_mutex_);
+        if (pending_stun_txn_ids_.find(txn_id) == pending_stun_txn_ids_.end()) {
+            // 没有人在等待这个响应，忽略
+            log().debug("Received STUN response for unknown txn_id, ignoring");
+            return;
+        }
+    }
+
+    // 通过 channel 发送响应数据（非阻塞）
+    std::vector<uint8_t> data_copy(data.begin(), data.end());
+    stun_response_channel_->try_send(boost::system::error_code{}, txn_id, std::move(data_copy));
 }
 
 } // namespace edgelink::client

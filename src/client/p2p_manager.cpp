@@ -79,6 +79,13 @@ asio::awaitable<bool> P2PManager::start() {
         co_return false;
     }
 
+    running_ = true;
+    starting_ = false;
+
+    // 【重要】先启动 recv_loop，再查询 STUN
+    // 因为 STUN 响应现在通过 recv_loop -> handle_stun_response -> channel 传递
+    asio::co_spawn(ioc_, recv_loop(), asio::detached);
+
     // 查询 STUN 端点
     auto stun_result = co_await endpoints_.query_stun_endpoint();
     if (stun_result.success) {
@@ -88,11 +95,7 @@ asio::awaitable<bool> P2PManager::start() {
             stun_result.mapped_endpoint.port);
     }
 
-    running_ = true;
-    starting_ = false;
-
-    // 启动后台任务
-    asio::co_spawn(ioc_, recv_loop(), asio::detached);
+    // 启动其他后台任务
     asio::co_spawn(ioc_, keepalive_loop(), asio::detached);
     asio::co_spawn(ioc_, punch_timeout_loop(), asio::detached);
     asio::co_spawn(ioc_, retry_loop(), asio::detached);
@@ -365,6 +368,15 @@ asio::awaitable<void> P2PManager::recv_loop() {
                 asio::buffer(buffer), sender, asio::use_awaitable);
 
             if (bytes > 0) {
+                auto data = std::span(buffer.data(), bytes);
+
+                // 【关键修复】先检查是否是 STUN 响应
+                // 避免 STUN 查询和 recv_loop 的竞态条件
+                if (EndpointManager::is_stun_response(data)) {
+                    endpoints_.handle_stun_response(data);
+                    continue;
+                }
+
                 // 过滤虚拟 IP 段 (100.64.0.0/10)
                 if (sender.address().is_v4()) {
                     auto addr = sender.address().to_v4().to_bytes();
@@ -372,7 +384,7 @@ asio::awaitable<void> P2PManager::recv_loop() {
                         continue;
                     }
                 }
-                handle_udp_packet(sender, std::span(buffer.data(), bytes));
+                handle_udp_packet(sender, data);
             }
         } catch (const boost::system::system_error& e) {
             if (e.code() == asio::error::operation_aborted) {

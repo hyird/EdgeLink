@@ -1000,6 +1000,12 @@ asio::awaitable<void> Client::reconnect() {
     // Teardown TUN on reconnect
     teardown_tun();
 
+    // 【关键修复】停止 P2P manager，确保后台任务终止
+    // 避免重连时老协程与新状态不一致导致崩溃
+    if (p2p_mgr_) {
+        try { co_await p2p_mgr_->stop(); } catch (...) {}
+    }
+
     // Close existing channels
     if (relay_) {
         try { co_await relay_->close(); } catch (...) {}

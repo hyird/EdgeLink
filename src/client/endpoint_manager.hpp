@@ -2,10 +2,13 @@
 
 #include "common/types.hpp"
 #include <boost/asio.hpp>
+#include <boost/asio/experimental/channel.hpp>
 #include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <set>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -124,6 +127,16 @@ public:
     // 获取 STUN 端点 (如果有)
     std::optional<Endpoint> stun_endpoint() const;
 
+    // ========================================================================
+    // STUN 包处理（供 P2PManager::recv_loop 调用）
+    // ========================================================================
+
+    // 判断 UDP 包是否是 STUN 响应
+    static bool is_stun_response(std::span<const uint8_t> data);
+
+    // 处理收到的 STUN 响应包（由 P2PManager::recv_loop 调用）
+    void handle_stun_response(std::span<const uint8_t> data);
+
 private:
     // 发送 STUN Binding Request
     asio::awaitable<StunQueryResult> send_stun_request(
@@ -159,6 +172,16 @@ private:
 
     // NAT 类型
     std::atomic<NatType> nat_type_{NatType::UNKNOWN};
+
+    // STUN 响应 channel（用于与 recv_loop 协作）
+    // 当 recv_loop 收到 STUN 响应时，通过 channel 发送给等待的协程
+    using StunResponseChannel = asio::experimental::channel<
+        void(boost::system::error_code, std::array<uint8_t, 12>, std::vector<uint8_t>)>;
+    std::unique_ptr<StunResponseChannel> stun_response_channel_;
+
+    // 当前等待的 STUN 请求 txn_id（用于过滤不匹配的响应）
+    mutable std::mutex pending_stun_mutex_;
+    std::set<std::array<uint8_t, 12>> pending_stun_txn_ids_;
 };
 
 } // namespace edgelink::client
