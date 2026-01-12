@@ -228,6 +228,13 @@ int cmd_authkey(int argc, char* argv[]) {
         return 1;
     }
 
+    // Initialize schema if needed
+    auto schema_result = db.init_schema();
+    if (!schema_result) {
+        std::cerr << "Error: Failed to initialize database schema\n";
+        return 1;
+    }
+
     if (action == "create") {
         // Get default network
         auto network = db.get_network_by_name("default");
