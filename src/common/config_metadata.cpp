@@ -26,8 +26,8 @@ static const std::vector<ConfigMetadata> g_config_metadata = {
     {"storage.state_dir", ConfigType::String, "状态存储目录", false, ""},
 
     // TUN 配置（热重载时重新创建 TUN 设备）
-    {"tun.enable", ConfigType::Bool, "启用 TUN 设备", true, "false"},
-    {"tun.name", ConfigType::String, "TUN 设备名称", true, ""},
+    {"tun.enable", ConfigType::Bool, "启用 TUN 设备", true, "true"},
+    {"tun.name", ConfigType::String, "TUN 设备名称", true, "edgelink"},
     {"tun.mtu", ConfigType::Int, "MTU", true, "1420"},
 
     // IPC 配置（热重载时重启 IPC 服务器）

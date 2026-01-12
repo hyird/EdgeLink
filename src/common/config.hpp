@@ -155,8 +155,8 @@ struct ClientConfig {
     std::string state_dir;  // Directory for storing keys, empty = auto
 
     // TUN device settings
-    bool enable_tun = false;       // Enable TUN device for IP-level routing
-    std::string tun_name;          // TUN device name (empty = auto)
+    bool enable_tun = true;        // Enable TUN device for IP-level routing
+    std::string tun_name = "edgelink";  // TUN device name
     uint32_t tun_mtu = 1420;       // MTU for TUN device
 
     // Subnet routing settings

@@ -228,14 +228,6 @@ url = "localhost:8080"
 tls = false
 authkey = "tskey-dev-test123"
 
-[tun]
-enable = true
-name = "edgelink"
-
-[p2p]
-enabled = true
-bind_port = 0
-
 [log]
 level = "info"
 EOF

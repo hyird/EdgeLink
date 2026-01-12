@@ -8,6 +8,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   # =============================================================================
   # Linux Release Build - Alpine musl (Full Static)
