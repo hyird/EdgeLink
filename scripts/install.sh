@@ -3,10 +3,10 @@
 # EdgeLink 一键安装脚本
 #
 # 用法:
-#   curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --debug
-#   curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --client-only
-#   curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --controller-only
+#   curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash
+#   curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --debug
+#   curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --client-only
+#   curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --controller-only
 #
 
 set -e
@@ -17,7 +17,8 @@ RELEASE_TAG="autobuild"
 BIN_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/edgelink"
 GITHUB_API="https://api.github.com/repos/${REPO}/releases/tags/${RELEASE_TAG}"
-GITHUB_DOWNLOAD="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
+# 使用 ghfast.top 加速下载
+GITHUB_DOWNLOAD="https://ghfast.top/https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
 
 # 默认选项
 BUILD_TYPE="release"

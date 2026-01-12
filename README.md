@@ -16,25 +16,25 @@ EdgeLink 是一个跨平台的 P2P VPN 解决方案，支持 NAT 穿透和端到
 
 ```bash
 # 安装 Release 版本（客户端 + 控制器）
-curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash
 
 # 安装 Debug 版本
-curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --debug
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --debug
 
 # 仅安装客户端
-curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --client-only
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --client-only
 
 # 仅安装控制器
-curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --controller-only
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --controller-only
 
 # 升级已安装的二进制文件（不修改配置和服务）
-curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --upgrade
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --upgrade
 
 # 升级为 Debug 版本
-curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --upgrade --debug
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --upgrade --debug
 
 # 卸载
-curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --uninstall
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --uninstall
 ```
 
 安装路径：
