@@ -90,8 +90,8 @@ ControlChannel::ControlChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
     write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
 }
 
-void ControlChannel::set_callbacks(ControlChannelCallbacks callbacks) {
-    callbacks_ = std::move(callbacks);
+void ControlChannel::set_channels(ControlChannelEvents channels) {
+    channels_ = channels;
 }
 
 bool ControlChannel::is_ws_open() const {
@@ -417,8 +417,8 @@ asio::awaitable<void> ControlChannel::close() {
         }
     } catch (...) {}
 
-    if (callbacks_.on_disconnected) {
-        callbacks_.on_disconnected();
+    if (channels_.disconnected) {
+        channels_.disconnected->try_send(boost::system::error_code{});
     }
 }
 
@@ -478,8 +478,8 @@ asio::awaitable<void> ControlChannel::read_loop() {
     // Only trigger callback if not already disconnected (avoid duplicate calls)
     if (state_ != ChannelState::DISCONNECTED) {
         state_ = ChannelState::DISCONNECTED;
-        if (callbacks_.on_disconnected) {
-            callbacks_.on_disconnected();
+        if (channels_.disconnected) {
+            channels_.disconnected->try_send(boost::system::error_code{});
         }
     }
 }
@@ -566,8 +566,8 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
 
     if (!resp->success) {
         log().error("Authentication failed: {} (code {})", resp->error_msg, resp->error_code);
-        if (callbacks_.on_error) {
-            callbacks_.on_error(resp->error_code, resp->error_msg);
+        if (channels_.error) {
+            channels_.error->try_send(boost::system::error_code{}, resp->error_code, resp->error_msg);
         }
         co_return;
     }
@@ -586,8 +586,8 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
     // Note: state_ is set to CONNECTED after receiving CONFIG, not here
     // This ensures peers are populated before on_connected is called
 
-    if (callbacks_.on_auth_response) {
-        callbacks_.on_auth_response(*resp);
+    if (channels_.auth_response) {
+        channels_.auth_response->try_send(boost::system::error_code{}, *resp);
     }
 }
 
@@ -608,15 +608,15 @@ asio::awaitable<void> ControlChannel::handle_config(const Frame& frame) {
         relay_token_ = config->relay_token;
     }
 
-    if (callbacks_.on_config) {
-        callbacks_.on_config(*config);
+    if (channels_.config) {
+        channels_.config->try_send(boost::system::error_code{}, *config);
     }
 
     // Mark as connected after receiving initial CONFIG (peers are now populated)
     if (state_ != ChannelState::CONNECTED) {
         state_ = ChannelState::CONNECTED;
-        if (callbacks_.on_connected) {
-            callbacks_.on_connected();
+        if (channels_.connected) {
+            channels_.connected->try_send(boost::system::error_code{});
         }
     }
 
@@ -639,8 +639,8 @@ asio::awaitable<void> ControlChannel::handle_config_update(const Frame& frame) {
         log().debug("Relay token refreshed");
     }
 
-    if (callbacks_.on_config_update) {
-        callbacks_.on_config_update(*update);
+    if (channels_.config_update) {
+        channels_.config_update->try_send(boost::system::error_code{}, *update);
     }
 }
 
@@ -654,8 +654,8 @@ asio::awaitable<void> ControlChannel::handle_route_update(const Frame& frame) {
     log().debug("Received ROUTE_UPDATE v{}: +{} routes, -{} routes",
                 update->version, update->add_routes.size(), update->del_routes.size());
 
-    if (callbacks_.on_route_update) {
-        callbacks_.on_route_update(*update);
+    if (channels_.route_update) {
+        channels_.route_update->try_send(boost::system::error_code{}, *update);
     }
 }
 
@@ -812,8 +812,8 @@ asio::awaitable<void> ControlChannel::handle_p2p_endpoint(const Frame& frame) {
     log().debug("Received P2P_ENDPOINT: peer_node={}, init_seq={}, {} endpoints",
                 msg->peer_node, msg->init_seq, msg->endpoints.size());
 
-    if (callbacks_.on_p2p_endpoint) {
-        callbacks_.on_p2p_endpoint(*msg);
+    if (channels_.p2p_endpoint) {
+        channels_.p2p_endpoint->try_send(boost::system::error_code{}, *msg);
     }
 }
 
@@ -838,8 +838,8 @@ asio::awaitable<void> ControlChannel::handle_error(const Frame& frame) {
 
     log().error("Control error {}: {}", error->error_code, error->error_msg);
 
-    if (callbacks_.on_error) {
-        callbacks_.on_error(error->error_code, error->error_msg);
+    if (channels_.error) {
+        channels_.error->try_send(boost::system::error_code{}, error->error_code, error->error_msg);
     }
 }
 
@@ -873,8 +873,8 @@ RelayChannel::RelayChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
     write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
 }
 
-void RelayChannel::set_callbacks(RelayChannelCallbacks callbacks) {
-    callbacks_ = std::move(callbacks);
+void RelayChannel::set_channels(RelayChannelEvents channels) {
+    channels_ = channels;
 }
 
 bool RelayChannel::is_ws_open() const {
@@ -1019,8 +1019,8 @@ asio::awaitable<void> RelayChannel::close() {
         }
     } catch (...) {}
 
-    if (callbacks_.on_disconnected) {
-        callbacks_.on_disconnected();
+    if (channels_.disconnected) {
+        channels_.disconnected->try_send(boost::system::error_code{});
     }
 }
 
@@ -1102,8 +1102,8 @@ asio::awaitable<void> RelayChannel::read_loop() {
     // Only trigger callback if not already disconnected (avoid duplicate calls)
     if (state_ != ChannelState::DISCONNECTED) {
         state_ = ChannelState::DISCONNECTED;
-        if (callbacks_.on_disconnected) {
-            callbacks_.on_disconnected();
+        if (channels_.disconnected) {
+            channels_.disconnected->try_send(boost::system::error_code{});
         }
     }
 }
@@ -1190,8 +1190,8 @@ asio::awaitable<void> RelayChannel::handle_relay_auth_resp(const Frame& frame) {
     state_ = ChannelState::CONNECTED;
     log().info("Relay channel connected");
 
-    if (callbacks_.on_connected) {
-        callbacks_.on_connected();
+    if (channels_.connected) {
+        channels_.connected->try_send(boost::system::error_code{});
     }
 }
 
@@ -1244,8 +1244,8 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
 
     log().debug("Relay handle_data: decrypted {} bytes from {}", plaintext->size(), peer_ip);
 
-    if (callbacks_.on_data) {
-        callbacks_.on_data(data->src_node, *plaintext);
+    if (channels_.data) {
+        channels_.data->try_send(boost::system::error_code{}, data->src_node, std::move(*plaintext));
     }
 }
 

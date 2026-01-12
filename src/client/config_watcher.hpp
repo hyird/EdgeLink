@@ -6,13 +6,17 @@
 #include <chrono>
 #include <filesystem>
 #include <boost/asio.hpp>
+#include <boost/asio/experimental/channel.hpp>
 
 namespace edgelink::client {
 
 struct ClientConfig;
 
-// 配置文件变更回调
-using ConfigChangeCallback = std::function<void(const ClientConfig&)>;
+// 配置文件变更通道
+namespace channels {
+using ConfigChangeChannel = boost::asio::experimental::channel<
+    void(boost::system::error_code, ClientConfig)>;
+}  // namespace channels
 
 // 配置文件监控器
 class ConfigWatcher : public std::enable_shared_from_this<ConfigWatcher> {
@@ -20,8 +24,11 @@ public:
     ConfigWatcher(boost::asio::io_context& ioc, const std::string& config_path);
     ~ConfigWatcher();
 
+    // 设置配置变更通道
+    void set_channel(channels::ConfigChangeChannel* channel);
+
     // 启动监控
-    void start(ConfigChangeCallback callback);
+    void start();
 
     // 停止监控
     void stop();
@@ -47,7 +54,7 @@ private:
 
     boost::asio::io_context& ioc_;
     std::string config_path_;
-    ConfigChangeCallback callback_;
+    channels::ConfigChangeChannel* channel_ = nullptr;
     std::chrono::seconds interval_{5};
     bool running_ = false;
 

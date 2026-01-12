@@ -180,11 +180,14 @@ public:
         return name_;
     }
 
-    void start_read(PacketCallback callback) override {
+    void set_packet_channel(channels::TunPacketChannel* channel) override {
+        packet_channel_ = channel;
+    }
+
+    void start_read() override {
         if (!is_open() || reading_) return;
 
         reading_ = true;
-        callback_ = std::move(callback);
 
         // Start read thread
         read_thread_ = std::thread([this]() {
@@ -202,8 +205,6 @@ public:
             }
             read_thread_.join();
         }
-
-        callback_ = nullptr;
     }
 
     std::expected<void, TunError> write(std::span<const uint8_t> packet) override {
@@ -295,12 +296,12 @@ private:
 
                     if (!packet) break;
 
-                    if (callback_ && packet_size > 0) {
-                        // Post to IO context
+                    if (packet_channel_ && packet_size > 0) {
+                        // Post to IO context and send via channel
                         std::vector<uint8_t> data(packet, packet + packet_size);
                         asio::post(ioc_, [this, data = std::move(data)]() {
-                            if (callback_) {
-                                callback_(std::span<const uint8_t>(data));
+                            if (packet_channel_) {
+                                packet_channel_->try_send(boost::system::error_code{}, std::move(const_cast<std::vector<uint8_t>&>(data)));
                             }
                         });
                     }
@@ -324,7 +325,7 @@ private:
 
     std::atomic<bool> reading_{false};
     std::thread read_thread_;
-    PacketCallback callback_;
+    channels::TunPacketChannel* packet_channel_ = nullptr;
 
     // WinTun function pointers
     WINTUN_CREATE_ADAPTER_FUNC wintun_create_adapter_ = nullptr;

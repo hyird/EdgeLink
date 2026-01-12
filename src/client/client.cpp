@@ -45,7 +45,7 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     p2p_mgr_ = std::make_unique<P2PManager>(ioc, crypto_, peers_, *endpoint_mgr_, state_machine_);
 
     // 创建 P2P 状态变化通道（由状态机使用）
-    peer_state_channel_ = std::make_unique<channels::PeerStateChannel>(ioc, 64);
+    peer_state_channel_ = std::make_unique<edgelink::channels::PeerStateChannel>(ioc, 64);
     state_machine_.set_peer_state_channel(peer_state_channel_.get());
 
     // 创建 P2P channels（用于 P2PManager 通信）
@@ -115,25 +115,95 @@ Client::~Client() {
     teardown_tun();
 }
 
-void Client::set_callbacks(ClientCallbacks callbacks) {
-    callbacks_ = std::move(callbacks);
+void Client::set_events(ClientEvents events) {
+    events_ = events;
 }
 
-void Client::setup_callbacks() {
-    // Control channel callbacks
-    ControlChannelCallbacks control_cbs;
+void Client::setup_channels() {
+    // 创建 Control Channel 事件 channels
+    ctrl_auth_response_ch_ = std::make_unique<channels::AuthResponseChannel>(ioc_, 4);
+    ctrl_config_ch_ = std::make_unique<channels::ConfigChannel>(ioc_, 4);
+    ctrl_config_update_ch_ = std::make_unique<channels::ConfigUpdateChannel>(ioc_, 16);
+    ctrl_route_update_ch_ = std::make_unique<channels::RouteUpdateChannel>(ioc_, 16);
+    ctrl_p2p_endpoint_ch_ = std::make_unique<channels::P2PEndpointMsgChannel>(ioc_, 32);
+    ctrl_error_ch_ = std::make_unique<channels::ControlErrorChannel>(ioc_, 8);
+    ctrl_connected_ch_ = std::make_unique<channels::ControlConnectedChannel>(ioc_, 4);
+    ctrl_disconnected_ch_ = std::make_unique<channels::ControlDisconnectedChannel>(ioc_, 4);
 
-    control_cbs.on_auth_response = [this](const AuthResponse& resp) {
+    // 设置 ControlChannel 的 channels
+    ControlChannelEvents ctrl_events;
+    ctrl_events.auth_response = ctrl_auth_response_ch_.get();
+    ctrl_events.config = ctrl_config_ch_.get();
+    ctrl_events.config_update = ctrl_config_update_ch_.get();
+    ctrl_events.route_update = ctrl_route_update_ch_.get();
+    ctrl_events.p2p_endpoint = ctrl_p2p_endpoint_ch_.get();
+    ctrl_events.error = ctrl_error_ch_.get();
+    ctrl_events.connected = ctrl_connected_ch_.get();
+    ctrl_events.disconnected = ctrl_disconnected_ch_.get();
+    control_->set_channels(ctrl_events);
+
+    // 创建 Relay Channel 事件 channels
+    relay_data_ch_ = std::make_unique<channels::RelayDataChannel>(ioc_, 64);
+    relay_connected_ch_ = std::make_unique<channels::RelayConnectedChannel>(ioc_, 4);
+    relay_disconnected_ch_ = std::make_unique<channels::RelayDisconnectedChannel>(ioc_, 4);
+
+    // 设置 RelayChannel 的 channels
+    RelayChannelEvents relay_events;
+    relay_events.data = relay_data_ch_.get();
+    relay_events.connected = relay_connected_ch_.get();
+    relay_events.disconnected = relay_disconnected_ch_.get();
+    relay_->set_channels(relay_events);
+
+    // 启动 Control Channel 事件处理协程
+    asio::co_spawn(ioc_, ctrl_auth_response_handler(), asio::detached);
+    asio::co_spawn(ioc_, ctrl_config_handler(), asio::detached);
+    asio::co_spawn(ioc_, ctrl_config_update_handler(), asio::detached);
+    asio::co_spawn(ioc_, ctrl_route_update_handler(), asio::detached);
+    asio::co_spawn(ioc_, ctrl_p2p_endpoint_handler(), asio::detached);
+    asio::co_spawn(ioc_, ctrl_error_handler(), asio::detached);
+    asio::co_spawn(ioc_, ctrl_connected_handler(), asio::detached);
+    asio::co_spawn(ioc_, ctrl_disconnected_handler(), asio::detached);
+
+    // 启动 Relay Channel 事件处理协程
+    asio::co_spawn(ioc_, relay_data_handler(), asio::detached);
+    asio::co_spawn(ioc_, relay_connected_handler(), asio::detached);
+    asio::co_spawn(ioc_, relay_disconnected_handler(), asio::detached);
+}
+
+// ============================================================================
+// Control Channel 事件处理协程
+// ============================================================================
+
+asio::awaitable<void> Client::ctrl_auth_response_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec, resp] = co_await ctrl_auth_response_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("ctrl_auth_response_handler channel error: {}", ec.message());
+            }
+            break;
+        }
+
         log().info("Authenticated: node_id={}, ip={}", resp.node_id, resp.virtual_ip.to_string());
-        // 更新状态机的 node_id（认证前为 0，现在获得真正的 node_id）
         state_machine_.set_node_id(crypto_.node_id());
         state_machine_.set_control_plane_state(ControlPlaneState::CONFIGURING);
-    };
+    }
+}
 
-    control_cbs.on_config = [this](const Config& config) {
+asio::awaitable<void> Client::ctrl_config_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec, config] = co_await ctrl_config_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("ctrl_config_handler channel error: {}", ec.message());
+            }
+            break;
+        }
+
         peers_.update_from_config(config.peers);
 
-        // 保存路由信息
         {
             std::lock_guard lock(routes_mutex_);
             routes_ = config.routes;
@@ -142,16 +212,12 @@ void Client::setup_callbacks() {
         log().info("Config received: {} peers, {} routes, {} stuns",
                    config.peers.size(), config.routes.size(), config.stuns.size());
 
-        // 通知状态机收到配置
         state_machine_.set_control_plane_state(ControlPlaneState::READY);
 
-        // 配置 STUN 服务器并启动 P2P manager
-        // 必须在收到 CONFIG 后启动，确保 STUN 服务器已配置
         if (endpoint_mgr_ && !config.stuns.empty()) {
             endpoint_mgr_->set_stun_servers(config.stuns);
         }
 
-        // 初始化路由管理器并同步路由到系统
         if (config_.accept_routes && is_tun_enabled()) {
             if (!route_mgr_) {
                 route_mgr_ = std::make_unique<RouteManager>(*this);
@@ -162,8 +228,6 @@ void Client::setup_callbacks() {
             }
         }
 
-        // 【关键修复】启动 P2P manager 并在成功后重发端点
-        // 确保端点重发在 P2P Manager 完全启动后执行
         if (p2p_mgr_ && !p2p_mgr_->is_running()) {
             auto self = shared_from_this();
             asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
@@ -171,8 +235,6 @@ void Client::setup_callbacks() {
                     co_await self->p2p_mgr_->start();
                     log().info("P2P manager started (STUN configured)");
 
-                    // 【关键修复】在 P2P Manager 启动成功后重发端点
-                    // 这样确保 UDP socket 已经就绪
                     std::vector<Endpoint> endpoints;
                     {
                         std::lock_guard lock(self->endpoints_mutex_);
@@ -190,40 +252,42 @@ void Client::setup_callbacks() {
                 }
             }(), asio::detached);
         }
+    }
+}
 
-        // P2P 打洞延迟到首次发送数据时触发
-    };
+asio::awaitable<void> Client::ctrl_config_update_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec, update] = co_await ctrl_config_update_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("ctrl_config_update_handler channel error: {}", ec.message());
+            }
+            break;
+        }
 
-    control_cbs.on_config_update = [this](const ConfigUpdate& update) {
         if (has_flag(update.update_flags, ConfigUpdateFlags::PEER_CHANGED)) {
             std::vector<NodeId> added_peer_ids;
 
             for (const auto& peer : update.add_peers) {
                 peers_.add_peer(peer);
                 added_peer_ids.push_back(peer.node_id);
-                // 通知状态机对端上线
                 state_machine_.add_peer(peer.node_id);
                 state_machine_.set_peer_data_path(peer.node_id, PeerDataPath::RELAY);
             }
             for (auto peer_id : update.del_peer_ids) {
-                // 通知状态机对端下线
                 state_machine_.remove_peer(peer_id);
-
                 peers_.remove_peer(peer_id);
-                // peer 下线，断开 P2P 连接
                 if (p2p_mgr_) {
                     p2p_mgr_->disconnect_peer(peer_id);
                 }
             }
 
-            // 【关键修复】peer 上线后，只同步与新 peer 相关的路由
-            // 避免与 on_route_update 竞争，使用增量更新而非全量同步
             if (!added_peer_ids.empty() && route_mgr_ && config_.accept_routes) {
                 std::vector<RouteInfo> relevant_routes;
                 {
                     std::lock_guard lock(routes_mutex_);
                     for (const auto& route : routes_) {
-                        // 检查路由的 gateway 是否是新上线的 peer
                         for (auto peer_id : added_peer_ids) {
                             if (route.gateway_node == peer_id) {
                                 relevant_routes.push_back(route);
@@ -232,7 +296,6 @@ void Client::setup_callbacks() {
                         }
                     }
                 }
-                // 只同步与新 peer 相关的路由
                 if (!relevant_routes.empty()) {
                     route_mgr_->apply_route_update(relevant_routes, {});
                     log().debug("Applied {} routes for {} newly online peers",
@@ -240,19 +303,27 @@ void Client::setup_callbacks() {
                 }
             }
         }
-    };
+    }
+}
 
-    control_cbs.on_route_update = [this](const RouteUpdate& update) {
+asio::awaitable<void> Client::ctrl_route_update_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec, update] = co_await ctrl_route_update_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("ctrl_route_update_handler channel error: {}", ec.message());
+            }
+            break;
+        }
+
         log().info("Route update v{}: +{} routes, -{} routes",
                    update.version, update.add_routes.size(), update.del_routes.size());
 
-        // 更新本地路由缓存
         {
             std::lock_guard lock(routes_mutex_);
 
-            // 添加新路由
             for (const auto& route : update.add_routes) {
-                // 检查是否已存在，如果存在则更新
                 bool found = false;
                 for (auto& r : routes_) {
                     if (r.ip_type == route.ip_type &&
@@ -270,7 +341,6 @@ void Client::setup_callbacks() {
                 log().debug("  + route /{} via node {}", route.prefix_len, route.gateway_node);
             }
 
-            // 删除路由
             for (const auto& route : update.del_routes) {
                 routes_.erase(
                     std::remove_if(routes_.begin(), routes_.end(),
@@ -285,50 +355,107 @@ void Client::setup_callbacks() {
             }
         }
 
-        // 应用路由更新到系统路由表
         if (route_mgr_) {
             route_mgr_->apply_route_update(update.add_routes, update.del_routes);
         }
-    };
+    }
+}
 
-    control_cbs.on_error = [this](uint16_t code, const std::string& msg) {
-        log().error("Control error {}: {}", code, msg);
-        if (callbacks_.on_error) {
-            callbacks_.on_error(code, msg);
+asio::awaitable<void> Client::ctrl_p2p_endpoint_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec, msg] = co_await ctrl_p2p_endpoint_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("ctrl_p2p_endpoint_handler channel error: {}", ec.message());
+            }
+            break;
         }
-    };
 
-    control_cbs.on_p2p_endpoint = [this](const P2PEndpointMsg& msg) {
-        // 转发给 P2PManager 处理
         if (p2p_mgr_) {
             p2p_mgr_->handle_p2p_endpoint(msg);
         }
-    };
+    }
+}
 
-    control_cbs.on_disconnected = [this]() {
+asio::awaitable<void> Client::ctrl_error_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec, code, msg] = co_await ctrl_error_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("ctrl_error_handler channel error: {}", ec.message());
+            }
+            break;
+        }
+
+        log().error("Control error {}: {}", code, msg);
+        if (events_.error) {
+            events_.error->try_send(boost::system::error_code{}, code, msg);
+        }
+    }
+}
+
+asio::awaitable<void> Client::ctrl_connected_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec] = co_await ctrl_connected_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("ctrl_connected_handler channel error: {}", ec.message());
+            }
+            break;
+        }
+
+        log().info("Control channel connected (CONFIG received)");
+        // 注意：这里不需要额外处理，因为 CONNECTED 状态表示 CONFIG 已收到
+        // 实际的配置处理在 ctrl_config_handler 中完成
+    }
+}
+
+asio::awaitable<void> Client::ctrl_disconnected_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec] = co_await ctrl_disconnected_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("ctrl_disconnected_handler channel error: {}", ec.message());
+            }
+            break;
+        }
+
         log().warn("Control channel disconnected");
         state_machine_.set_control_plane_state(ControlPlaneState::DISCONNECTED);
 
-        // Reconnect if we were running or in the middle of connecting
         if (config_.auto_reconnect && state_ != ClientState::STOPPED &&
             state_ != ClientState::RECONNECTING) {
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         }
-    };
+    }
+}
 
-    control_->set_callbacks(std::move(control_cbs));
+// ============================================================================
+// Relay Channel 事件处理协程
+// ============================================================================
 
-    // Relay channel callbacks
-    RelayChannelCallbacks relay_cbs;
+asio::awaitable<void> Client::relay_data_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec, src, data] = co_await relay_data_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("relay_data_handler channel error: {}", ec.message());
+            }
+            break;
+        }
 
-    relay_cbs.on_data = [this](NodeId src, std::span<const uint8_t> data) {
         auto src_peer_ip = peers_.get_peer_ip_str(src);
         log().debug("Received {} bytes from {}", data.size(), src_peer_ip);
 
-        // Check for internal ping/pong messages (type byte 0xEE/0xEF)
+        // Check for internal ping/pong messages
         if (data.size() >= 13 && (data[0] == 0xEE || data[0] == 0xEF)) {
             handle_ping_data(src, data);
-            return;
+            continue;
         }
 
         // If TUN mode is enabled, write IP packets to TUN device
@@ -346,31 +473,40 @@ void Client::setup_callbacks() {
             }
         }
 
-        // Call user callback
-        if (callbacks_.on_data_received) {
-            callbacks_.on_data_received(src, data);
+        // Call user callback via channel
+        if (events_.data_received) {
+            events_.data_received->try_send(boost::system::error_code{}, src, std::move(data));
         }
-    };
+    }
+}
 
-    relay_cbs.on_connected = [this]() {
+asio::awaitable<void> Client::relay_connected_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec] = co_await relay_connected_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("relay_connected_handler channel error: {}", ec.message());
+            }
+            break;
+        }
+
         log().info("Relay channel connected");
 
-        // 通知状态机 Relay 已连接
         std::string relay_id = relay_ ? relay_->url() : "default";
-        state_machine_.add_relay(relay_id, true);  // 添加为主 Relay
+        state_machine_.add_relay(relay_id, true);
         state_machine_.set_relay_state(relay_id, RelayConnectionState::CONNECTED);
 
         state_ = ClientState::RUNNING;
 
-        // Setup TUN if enabled
         if (config_.enable_tun) {
             if (!setup_tun()) {
                 log().warn("TUN mode requested but failed to setup TUN device");
             }
         }
 
-        if (callbacks_.on_connected) {
-            callbacks_.on_connected();
+        if (events_.connected) {
+            events_.connected->try_send(boost::system::error_code{});
         }
 
         // Start keepalive
@@ -384,7 +520,7 @@ void Client::setup_callbacks() {
             asio::co_spawn(ioc_, p2p_data_handler(), asio::detached);
         }
 
-        // Start peer state handler (处理对端状态变化)
+        // Start peer state handler
         if (peer_state_channel_) {
             asio::co_spawn(ioc_, p2p_state_handler(), asio::detached);
         }
@@ -397,37 +533,38 @@ void Client::setup_callbacks() {
             asio::co_spawn(ioc_, latency_measure_loop(), asio::detached);
         }
 
-        // Announce configured routes (advertise_routes and exit_node)
-        // 首次公告，然后启动定期公告循环
+        // Announce configured routes
         if (!config_.advertise_routes.empty() || config_.exit_node) {
             asio::co_spawn(ioc_, announce_configured_routes(), asio::detached);
 
-            // 定期重新公告路由（防止网络丢包导致 Controller 没收到）
             if (config_.route_announce_interval.count() > 0) {
                 asio::co_spawn(ioc_, route_announce_loop(), asio::detached);
             }
         }
+    }
+}
 
-        // P2P manager 现在在 on_config 回调中启动（确保 STUN 已配置）
-    };
+asio::awaitable<void> Client::relay_disconnected_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec] = co_await relay_disconnected_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("relay_disconnected_handler channel error: {}", ec.message());
+            }
+            break;
+        }
 
-    relay_cbs.on_disconnected = [this]() {
         log().warn("Relay channel disconnected");
 
-        // 通知状态机 Relay 已断开
         std::string relay_id = relay_ ? relay_->url() : "default";
         state_machine_.set_relay_state(relay_id, RelayConnectionState::DISCONNECTED);
 
-        // Reconnect if we were running or in the middle of connecting
         if (config_.auto_reconnect && state_ != ClientState::STOPPED &&
             state_ != ClientState::RECONNECTING) {
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         }
-    };
-
-    relay_->set_callbacks(std::move(relay_cbs));
-
-    // P2P channels are set in constructor, handlers are started in on_connected callback
+    }
 }
 
 bool Client::setup_tun() {
@@ -467,10 +604,13 @@ bool Client::setup_tun() {
         return false;
     }
 
-    // Start reading packets from TUN
-    tun_->start_read([this](std::span<const uint8_t> packet) {
-        on_tun_packet(packet);
-    });
+    // Create TUN packet channel and start reading
+    tun_packet_ch_ = std::make_unique<channels::TunPacketChannel>(ioc_, 64);
+    tun_->set_packet_channel(tun_packet_ch_.get());
+    tun_->start_read();
+
+    // Start packet handler coroutine
+    asio::co_spawn(ioc_, tun_packet_handler(), asio::detached);
 
     log().info("TUN device enabled: {} with IP {}", tun_->name(), vip.to_string());
     return true;
@@ -482,6 +622,26 @@ void Client::teardown_tun() {
         tun_->close();
         tun_.reset();
         log().info("TUN device closed");
+    }
+    // 关闭 channel
+    if (tun_packet_ch_) {
+        tun_packet_ch_->close();
+        tun_packet_ch_.reset();
+    }
+}
+
+asio::awaitable<void> Client::tun_packet_handler() {
+    while (state_ != ClientState::STOPPED && tun_packet_ch_) {
+        auto [ec, packet] = co_await tun_packet_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("TUN packet channel closed: {}", ec.message());
+            }
+            break;
+        }
+        // 处理接收到的 TUN 数据包
+        on_tun_packet(std::span<const uint8_t>(packet));
     }
 }
 
@@ -600,8 +760,8 @@ asio::awaitable<bool> Client::start() {
         control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, config_.tls);
         relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url, config_.tls);
 
-        // Setup callbacks
-        setup_callbacks();
+        // Setup event channels
+        setup_channels();
 
         // Connect to control channel
         state_ = ClientState::AUTHENTICATING;
@@ -741,8 +901,8 @@ asio::awaitable<void> Client::stop() {
     state_ = ClientState::STOPPED;
     log().info("Client stopped");
 
-    if (callbacks_.on_disconnected) {
-        callbacks_.on_disconnected();
+    if (events_.disconnected) {
+        events_.disconnected->try_send(boost::system::error_code{});
     }
 }
 
@@ -954,9 +1114,9 @@ asio::awaitable<void> Client::p2p_data_handler() {
                 }
             }
 
-            // Call user callback
-            if (callbacks_.on_data_received) {
-                callbacks_.on_data_received(peer_id, data);
+            // Call user callback via channel
+            if (events_.data_received) {
+                events_.data_received->try_send(boost::system::error_code{}, peer_id, std::move(data));
             }
 
         } catch (const std::exception& e) {
@@ -1233,9 +1393,11 @@ bool Client::setup_ipc() {
 
     ipc_ = std::make_shared<IpcServer>(ioc_, *this);
 
-    // Set shutdown callback if provided
-    if (callbacks_.on_shutdown_requested) {
-        ipc_->set_shutdown_callback(callbacks_.on_shutdown_requested);
+    // Set shutdown callback if provided (adapter from channel to callback)
+    if (events_.shutdown_requested) {
+        ipc_->set_shutdown_callback([ch = events_.shutdown_requested]() {
+            ch->try_send(boost::system::error_code{});
+        });
     }
 
     IpcServerConfig ipc_config;
@@ -1304,16 +1466,13 @@ asio::awaitable<uint16_t> Client::ping_peer(NodeId peer_id, std::chrono::millise
     ping_msg[11] = (now >> 8) & 0xFF;
     ping_msg[12] = now & 0xFF;
 
-    // Setup pending ping with promise
+    // Setup pending ping with channel
     uint64_t key = (static_cast<uint64_t>(peer_id) << 32) | seq;
-    auto promise = std::make_shared<std::promise<uint16_t>>();
-    auto future = promise->get_future();
+    auto response_ch = std::make_shared<PingResponseChannel>(ioc_, 1);
 
     {
         std::lock_guard lock(ping_mutex_);
-        pending_pings_[key] = PendingPing{now, [promise](uint16_t latency) {
-            promise->set_value(latency);
-        }};
+        pending_pings_[key] = PendingPing{now, response_ch};
     }
 
     // Send ping
@@ -1326,38 +1485,41 @@ asio::awaitable<uint16_t> Client::ping_peer(NodeId peer_id, std::chrono::millise
 
     log().debug("Ping sent to {} (seq={})", peer->info.virtual_ip.to_string(), seq);
 
-    // Wait for response with timeout
+    // Wait for response with timeout using parallel operations
     asio::steady_timer timer(co_await asio::this_coro::executor);
     timer.expires_after(timeout);
 
-    bool timed_out = false;
-    try {
-        co_await timer.async_wait(asio::use_awaitable);
-        timed_out = true;
-    } catch (const boost::system::system_error& e) {
-        if (e.code() == asio::error::operation_aborted) {
-            // Timer was cancelled, meaning we got a response
-        } else {
-            throw;
+    uint16_t latency = 0;
+    bool got_response = false;
+
+    // Use experimental::make_parallel_group to wait for either timer or channel
+    auto result = co_await asio::experimental::make_parallel_group(
+        timer.async_wait(asio::deferred),
+        response_ch->async_receive(asio::deferred)
+    ).async_wait(
+        asio::experimental::wait_for_one(),
+        asio::use_awaitable
+    );
+
+    // Check which operation completed first
+    // make_parallel_group returns: [completion_order, timer_ec, channel_ec, channel_value]
+    auto completion_order = std::get<0>(result);
+    if (completion_order[0] == 1) {
+        // Channel received first (pong response)
+        boost::system::error_code ec = std::get<2>(result);
+        if (!ec) {
+            latency = std::get<3>(result);
+            got_response = true;
         }
+    } else {
+        // Timer expired first (timeout)
+        log().debug("Ping timeout to {} (seq={})", peer->info.virtual_ip.to_string(), seq);
     }
 
-    // Check if we got a response
-    uint16_t latency = 0;
+    // Cleanup pending ping entry
     {
         std::lock_guard lock(ping_mutex_);
-        auto it = pending_pings_.find(key);
-        if (it != pending_pings_.end()) {
-            if (timed_out) {
-                log().debug("Ping timeout to {} (seq={})", peer->info.virtual_ip.to_string(), seq);
-            }
-            pending_pings_.erase(it);
-        }
-    }
-
-    // Try to get the future value (non-blocking)
-    if (future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-        latency = future.get();
+        pending_pings_.erase(key);
     }
 
     co_return latency;
@@ -1405,15 +1567,15 @@ void Client::handle_ping_data(NodeId src, std::span<const uint8_t> data) {
         // Update peer latency
         state_machine_.update_peer_latency(src, latency);
 
-        // Find and complete pending ping
+        // Find and complete pending ping via channel
         uint64_t key = (static_cast<uint64_t>(src) << 32) | seq;
         std::lock_guard lock(ping_mutex_);
         auto it = pending_pings_.find(key);
         if (it != pending_pings_.end()) {
-            if (it->second.callback) {
-                it->second.callback(latency);
+            if (it->second.response_ch) {
+                it->second.response_ch->try_send(boost::system::error_code{}, latency);
             }
-            pending_pings_.erase(it);
+            // 不在这里 erase，让 ping_peer 在收到响应后清理
         }
     }
 }
@@ -1680,21 +1842,17 @@ std::string Client::get_config_value(const std::string& key) const {
     return "";
 }
 
-void Client::enable_config_watch() {
-    if (config_path_.empty()) {
-        log().warn("Cannot enable config watch: config path not set");
-        return;
-    }
+asio::awaitable<void> Client::config_change_handler() {
+    while (state_ != ClientState::STOPPED && config_change_ch_) {
+        auto [ec, new_config] = co_await config_change_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("Config change channel closed: {}", ec.message());
+            }
+            break;
+        }
 
-    if (config_watcher_) {
-        log().debug("Config watcher already enabled");
-        return;
-    }
-
-    config_watcher_ = std::make_unique<ConfigWatcher>(ioc_, config_path_);
-
-    // 设置配置变更回调
-    config_watcher_->start([this](const ClientConfig& new_config) {
         log().info("Configuration file changed, applying changes...");
 
         if (config_applier_) {
@@ -1711,7 +1869,29 @@ void Client::enable_config_watch() {
             // 更新配置
             config_ = new_config;
         }
-    });
+    }
+}
+
+void Client::enable_config_watch() {
+    if (config_path_.empty()) {
+        log().warn("Cannot enable config watch: config path not set");
+        return;
+    }
+
+    if (config_watcher_) {
+        log().debug("Config watcher already enabled");
+        return;
+    }
+
+    // 创建配置变更 channel
+    config_change_ch_ = std::make_unique<channels::ConfigChangeChannel>(ioc_, 4);
+
+    config_watcher_ = std::make_unique<ConfigWatcher>(ioc_, config_path_);
+    config_watcher_->set_channel(config_change_ch_.get());
+    config_watcher_->start();
+
+    // 启动配置变更处理协程
+    asio::co_spawn(ioc_, config_change_handler(), asio::detached);
 
     log().info("Config file watching enabled: {}", config_path_);
 }
@@ -1720,8 +1900,12 @@ void Client::disable_config_watch() {
     if (config_watcher_) {
         config_watcher_->stop();
         config_watcher_.reset();
-        log().info("Config file watching disabled");
     }
+    if (config_change_ch_) {
+        config_change_ch_->close();
+        config_change_ch_.reset();
+    }
+    log().info("Config file watching disabled");
 }
 
 void Client::clear_system_routes() {

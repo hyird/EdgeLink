@@ -19,7 +19,7 @@ template<typename StreamType>
 SessionBase<StreamType>::SessionBase(StreamType&& ws, SessionManager& manager)
     : ws_(std::move(ws))
     , manager_(manager)
-    , write_channel_(ws_.get_executor(), 1024) {  // Buffer up to 1024 messages
+    , write_channel_(ws_.get_executor(), 2048) {  // Buffer up to 2048 messages (优化)
 }
 
 template<typename StreamType>

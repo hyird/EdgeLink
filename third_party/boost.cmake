@@ -1,13 +1,13 @@
 # Boost: Peer-reviewed portable C++ source libraries
 # https://www.boost.org/
-# Using Boost 1.86+ with official CMake support
+# Using Boost 1.90+ with official CMake support
 
 include(FetchContent)
 
 FetchContent_Declare(
     Boost
-    URL https://github.com/boostorg/boost/releases/download/boost-1.86.0/boost-1.86.0-cmake.tar.xz
-    URL_HASH SHA256=2c5ec5edcdff47ff55e27ed9560b0a0b94b07bd07ed9928b476150e16b0efc57
+    URL https://github.com/boostorg/boost/releases/download/boost-1.90.0/boost-1.90.0-cmake.tar.xz
+    URL_HASH SHA256=aca59f889f0f32028ad88ba6764582b63c916ce5f77b31289ad19421a96c555f
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 

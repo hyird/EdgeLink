@@ -11,7 +11,7 @@ set(CMAKE_POLICY_DEFAULT_CMP0135 NEW)
 FetchContent_Declare(
     jwt_cpp
     GIT_REPOSITORY https://github.com/Thalhammer/jwt-cpp.git
-    GIT_TAG        v0.7.0
+    GIT_TAG        v0.7.1
     GIT_SHALLOW    TRUE
 )
 

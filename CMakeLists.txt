@@ -99,6 +99,7 @@ add_library(edgelink-common STATIC
     src/common/logger.cpp
     src/common/connection_types.cpp
     src/common/node_state.cpp
+    src/common/performance_monitor.cpp
 )
 
 target_include_directories(edgelink-common PUBLIC
@@ -147,6 +148,7 @@ if(BUILD_CONTROLLER)
         src/controller/jwt_util.cpp
         src/controller/session.cpp
         src/controller/session_manager.cpp
+        src/controller/session_manager_actor.cpp
         src/controller/server.cpp
         src/controller/stun_server.cpp
     )
@@ -182,6 +184,12 @@ if(BUILD_CLIENT)
         src/client/crypto_engine.cpp
         src/client/peer_manager.cpp
         src/client/channel.cpp
+        src/client/control_channel_actor.cpp
+        src/client/relay_channel_actor.cpp
+        src/client/data_plane_actor.cpp
+        src/client/tun_device_actor.cpp
+        src/client/p2p_manager_actor.cpp
+        src/client/client_actor.cpp
         src/client/ipc_server.cpp
         src/client/route_manager.cpp
         src/client/config_watcher.cpp

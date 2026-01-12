@@ -2,6 +2,7 @@
 
 #include "common/types.hpp"
 #include <boost/asio.hpp>
+#include <boost/asio/experimental/channel.hpp>
 #include <functional>
 #include <memory>
 #include <span>
@@ -23,8 +24,11 @@ enum class TunError {
 
 std::string tun_error_message(TunError error);
 
-// Callback for received packets
-using PacketCallback = std::function<void(std::span<const uint8_t>)>;
+// TUN 数据包通道（替代 PacketCallback）
+namespace channels {
+using TunPacketChannel = asio::experimental::channel<
+    void(boost::system::error_code, std::vector<uint8_t>)>;
+}  // namespace channels
 
 // Abstract TUN device interface
 class TunDevice {
@@ -49,8 +53,11 @@ public:
     // Get device name
     virtual std::string name() const = 0;
 
-    // Start reading packets (async, calls callback for each packet)
-    virtual void start_read(PacketCallback callback) = 0;
+    // Set packet channel for receiving packets
+    virtual void set_packet_channel(channels::TunPacketChannel* channel) = 0;
+
+    // Start reading packets (async, sends to channel)
+    virtual void start_read() = 0;
 
     // Stop reading
     virtual void stop_read() = 0;

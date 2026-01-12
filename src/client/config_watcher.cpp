@@ -15,12 +15,15 @@ ConfigWatcher::~ConfigWatcher() {
     stop();
 }
 
-void ConfigWatcher::start(ConfigChangeCallback callback) {
+void ConfigWatcher::set_channel(channels::ConfigChangeChannel* channel) {
+    channel_ = channel;
+}
+
+void ConfigWatcher::start() {
     if (running_) {
         return;
     }
 
-    callback_ = std::move(callback);
     running_ = true;
 
     // 初始化文件状态
@@ -44,8 +47,8 @@ void ConfigWatcher::stop() {
 }
 
 bool ConfigWatcher::reload() {
-    if (!callback_) {
-        LOG_WARN("client.config", "配置重载失败: 未设置回调函数");
+    if (!channel_) {
+        LOG_WARN("client.config", "配置重载失败: 未设置通道");
         return false;
     }
 
@@ -87,8 +90,8 @@ bool ConfigWatcher::reload() {
     cfg.log_level = result->log_level;
     cfg.log_file = result->log_file;
 
-    // 调用回调
-    callback_(cfg);
+    // 通过 channel 发送配置变更
+    channel_->try_send(boost::system::error_code{}, std::move(cfg));
 
     LOG_INFO("client.config", "配置已重新加载");
     return true;

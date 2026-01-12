@@ -934,56 +934,101 @@ int cmd_up(int argc, char* argv[]) {
         // Create client
         auto client = std::make_shared<Client>(ioc, client_cfg);
 
-        // Setup callbacks
-        ClientCallbacks callbacks;
+        // 创建 Client 事件 channels
+        auto connected_ch = std::make_unique<client::channels::ClientConnectedChannel>(ioc, 4);
+        auto disconnected_ch = std::make_unique<client::channels::ClientDisconnectedChannel>(ioc, 4);
+        auto data_ch = std::make_unique<client::channels::ClientDataChannel>(ioc, 64);
+        auto error_ch = std::make_unique<client::channels::ClientErrorChannel>(ioc, 8);
+        auto shutdown_ch = std::make_unique<client::channels::ShutdownRequestChannel>(ioc, 4);
 
-        callbacks.on_connected = [&]() {
-            log.info("Client connected and ready");
-            log.info("  Virtual IP: {}", client->virtual_ip().to_string());
-            log.info("  Peers online: {}", client->peers().online_peer_count());
+        // 获取原始指针用于 lambda 捕获
+        auto* connected_ptr = connected_ch.get();
+        auto* disconnected_ptr = disconnected_ch.get();
+        auto* data_ptr = data_ch.get();
+        auto* error_ptr = error_ch.get();
+        auto* shutdown_ptr = shutdown_ch.get();
 
-            // Send test message if requested
-            if (!test_peer_ip.empty() && !test_message.empty()) {
-                auto peer_ip = IPv4Address::from_string(test_peer_ip);
-                std::vector<uint8_t> data(test_message.begin(), test_message.end());
+        // 设置 Client 事件 channels
+        ClientEvents events;
+        events.connected = connected_ptr;
+        events.disconnected = disconnected_ptr;
+        events.data_received = data_ptr;
+        events.error = error_ptr;
+        events.shutdown_requested = shutdown_ptr;
+        client->set_events(events);
 
-                asio::co_spawn(ioc, [client, peer_ip, data]() -> asio::awaitable<void> {
-                    // Wait a bit for peer session key to be derived
-                    asio::steady_timer timer(co_await asio::this_coro::executor);
-                    timer.expires_after(std::chrono::milliseconds(500));
-                    co_await timer.async_wait(asio::use_awaitable);
+        // 启动事件处理协程: on_connected
+        asio::co_spawn(ioc, [&ioc, &log, client, test_peer_ip, test_message,
+                             connected_ptr]() -> asio::awaitable<void> {
+            while (true) {
+                auto [ec] = co_await connected_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
+                if (ec) break;
 
-                    bool sent = co_await client->send_to_ip(peer_ip, data);
-                    auto& log = Logger::get("client");
-                    if (sent) {
-                        log.info("Test message sent to {}", peer_ip.to_string());
-                    } else {
-                        log.error("Failed to send test message");
-                    }
-                }, asio::detached);
+                log.info("Client connected and ready");
+                log.info("  Virtual IP: {}", client->virtual_ip().to_string());
+                log.info("  Peers online: {}", client->peers().online_peer_count());
+
+                // Send test message if requested
+                if (!test_peer_ip.empty() && !test_message.empty()) {
+                    auto peer_ip = IPv4Address::from_string(test_peer_ip);
+                    std::vector<uint8_t> data(test_message.begin(), test_message.end());
+
+                    asio::co_spawn(ioc, [client, peer_ip, data]() -> asio::awaitable<void> {
+                        asio::steady_timer timer(co_await asio::this_coro::executor);
+                        timer.expires_after(std::chrono::milliseconds(500));
+                        co_await timer.async_wait(asio::use_awaitable);
+
+                        bool sent = co_await client->send_to_ip(peer_ip, data);
+                        auto& log = Logger::get("client");
+                        if (sent) {
+                            log.info("Test message sent to {}", peer_ip.to_string());
+                        } else {
+                            log.error("Failed to send test message");
+                        }
+                    }, asio::detached);
+                }
             }
-        };
+        }, asio::detached);
 
-        callbacks.on_disconnected = []() {
-            Logger::get("client").warn("Client disconnected");
-        };
+        // 启动事件处理协程: on_disconnected
+        asio::co_spawn(ioc, [disconnected_ptr]() -> asio::awaitable<void> {
+            while (true) {
+                auto [ec] = co_await disconnected_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
+                if (ec) break;
+                Logger::get("client").warn("Client disconnected");
+            }
+        }, asio::detached);
 
-        callbacks.on_data_received = [&client](NodeId src, std::span<const uint8_t> data) {
-            auto src_ip = client->peers().get_peer_ip_str(src);
-            Logger::get("client").debug("Data from {}: {} bytes", src_ip, data.size());
-        };
+        // 启动事件处理协程: on_data_received
+        asio::co_spawn(ioc, [client, data_ptr]() -> asio::awaitable<void> {
+            while (true) {
+                auto [ec, src, data] = co_await data_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
+                if (ec) break;
+                auto src_ip = client->peers().get_peer_ip_str(src);
+                Logger::get("client").debug("Data from {}: {} bytes", src_ip, data.size());
+            }
+        }, asio::detached);
 
-        callbacks.on_error = [](uint16_t code, const std::string& msg) {
-            Logger::get("client").error("Error {}: {}", code, msg);
-        };
+        // 启动事件处理协程: on_error
+        asio::co_spawn(ioc, [error_ptr]() -> asio::awaitable<void> {
+            while (true) {
+                auto [ec, code, msg] = co_await error_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
+                if (ec) break;
+                Logger::get("client").error("Error {}: {}", code, msg);
+            }
+        }, asio::detached);
 
-        callbacks.on_shutdown_requested = [&ioc, &client, &log, &work_guard]() {
-            log.info("Shutdown requested via IPC, stopping...");
-            work_guard.reset();  // 允许 io_context.run() 在没有挂起操作时返回
-            asio::co_spawn(ioc, client->stop(), asio::detached);
-        };
-
-        client->set_callbacks(std::move(callbacks));
+        // 启动事件处理协程: on_shutdown_requested
+        asio::co_spawn(ioc, [&ioc, &log, client, &work_guard,
+                             shutdown_ptr]() -> asio::awaitable<void> {
+            while (true) {
+                auto [ec] = co_await shutdown_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
+                if (ec) break;
+                log.info("Shutdown requested via IPC, stopping...");
+                work_guard.reset();
+                asio::co_spawn(ioc, client->stop(), asio::detached);
+            }
+        }, asio::detached);
 
         // Enable config file watching if config file was specified
         if (!config_file.empty()) {

@@ -178,18 +178,19 @@ public:
         return name_;
     }
 
-    void start_read(PacketCallback callback) override {
+    void set_packet_channel(channels::TunPacketChannel* channel) override {
+        packet_channel_ = channel;
+    }
+
+    void start_read() override {
         if (!is_open() || reading_) return;
 
         reading_ = true;
-        callback_ = std::move(callback);
-
         do_read();
     }
 
     void stop_read() override {
         reading_ = false;
-        callback_ = nullptr;
     }
 
     std::expected<void, TunError> write(std::span<const uint8_t> packet) override {
@@ -247,8 +248,10 @@ private:
                     return;
                 }
 
-                if (bytes > 0 && callback_) {
-                    callback_(std::span<const uint8_t>(read_buffer_.data(), bytes));
+                if (bytes > 0 && packet_channel_) {
+                    // 复制数据到 vector 并通过 channel 发送
+                    std::vector<uint8_t> packet(read_buffer_.begin(), read_buffer_.begin() + bytes);
+                    packet_channel_->try_send(boost::system::error_code{}, std::move(packet));
                 }
 
                 // Continue reading
@@ -267,7 +270,7 @@ private:
     uint32_t mtu_ = 1420;
 
     bool reading_ = false;
-    PacketCallback callback_;
+    channels::TunPacketChannel* packet_channel_ = nullptr;
     std::array<uint8_t, 65536> read_buffer_;
 };
 
@@ -308,7 +311,8 @@ public:
     void close() override {}
     bool is_open() const override { return false; }
     std::string name() const override { return ""; }
-    void start_read(PacketCallback) override {}
+    void set_packet_channel(channels::TunPacketChannel*) override {}
+    void start_read() override {}
     void stop_read() override {}
 
     std::expected<void, TunError> write(std::span<const uint8_t>) override {

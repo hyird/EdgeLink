@@ -7,6 +7,7 @@
 #include "client/peer_manager.hpp"
 
 #include <boost/asio.hpp>
+#include <boost/asio/experimental/channel.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
@@ -27,6 +28,78 @@ namespace ssl = asio::ssl;
 using tcp = asio::ip::tcp;
 
 namespace edgelink::client {
+
+// ============================================================================
+// Channel 类型定义（替代回调）
+// ============================================================================
+namespace channels {
+
+// Control Channel 事件通道
+using AuthResponseChannel = asio::experimental::channel<
+    void(boost::system::error_code, AuthResponse)>;
+using ConfigChannel = asio::experimental::channel<
+    void(boost::system::error_code, Config)>;
+using ConfigUpdateChannel = asio::experimental::channel<
+    void(boost::system::error_code, ConfigUpdate)>;
+using RouteUpdateChannel = asio::experimental::channel<
+    void(boost::system::error_code, RouteUpdate)>;
+using P2PEndpointMsgChannel = asio::experimental::channel<
+    void(boost::system::error_code, P2PEndpointMsg)>;
+using ControlErrorChannel = asio::experimental::channel<
+    void(boost::system::error_code, uint16_t, std::string)>;
+using ControlConnectedChannel = asio::experimental::channel<
+    void(boost::system::error_code)>;
+using ControlDisconnectedChannel = asio::experimental::channel<
+    void(boost::system::error_code)>;
+
+// Relay Channel 事件通道
+using RelayDataChannel = asio::experimental::channel<
+    void(boost::system::error_code, NodeId, std::vector<uint8_t>)>;
+using RelayConnectedChannel = asio::experimental::channel<
+    void(boost::system::error_code)>;
+using RelayDisconnectedChannel = asio::experimental::channel<
+    void(boost::system::error_code)>;
+
+}  // namespace channels
+
+// Control Channel 事件结构体（替代 ControlChannelCallbacks）
+struct ControlChannelEvents {
+    channels::AuthResponseChannel* auth_response = nullptr;
+    channels::ConfigChannel* config = nullptr;
+    channels::ConfigUpdateChannel* config_update = nullptr;
+    channels::RouteUpdateChannel* route_update = nullptr;
+    channels::P2PEndpointMsgChannel* p2p_endpoint = nullptr;
+    channels::ControlErrorChannel* error = nullptr;
+    channels::ControlConnectedChannel* connected = nullptr;
+    channels::ControlDisconnectedChannel* disconnected = nullptr;
+};
+
+// Relay Channel 事件结构体（替代 RelayChannelCallbacks）
+struct RelayChannelEvents {
+    channels::RelayDataChannel* data = nullptr;
+    channels::RelayConnectedChannel* connected = nullptr;
+    channels::RelayDisconnectedChannel* disconnected = nullptr;
+};
+
+// Client 对外事件通道（替代 ClientCallbacks）
+namespace channels {
+using ClientConnectedChannel = asio::experimental::channel<void(boost::system::error_code)>;
+using ClientDisconnectedChannel = asio::experimental::channel<void(boost::system::error_code)>;
+using ClientDataChannel = asio::experimental::channel<
+    void(boost::system::error_code, NodeId, std::vector<uint8_t>)>;
+using ClientErrorChannel = asio::experimental::channel<
+    void(boost::system::error_code, uint16_t, std::string)>;
+using ShutdownRequestChannel = asio::experimental::channel<void(boost::system::error_code)>;
+}  // namespace channels
+
+// Client 事件结构体（替代 ClientCallbacks）
+struct ClientEvents {
+    channels::ClientConnectedChannel* connected = nullptr;
+    channels::ClientDisconnectedChannel* disconnected = nullptr;
+    channels::ClientDataChannel* data_received = nullptr;
+    channels::ClientErrorChannel* error = nullptr;
+    channels::ShutdownRequestChannel* shutdown_requested = nullptr;
+};
 
 // Channel state
 enum class ChannelState {
@@ -52,18 +125,6 @@ class Client;
 // ============================================================================
 // ControlChannel - Connection to Controller's /api/v1/control
 // ============================================================================
-
-// Callbacks for control channel events
-struct ControlChannelCallbacks {
-    std::function<void(const AuthResponse&)> on_auth_response;
-    std::function<void(const Config&)> on_config;
-    std::function<void(const ConfigUpdate&)> on_config_update;
-    std::function<void(const RouteUpdate&)> on_route_update;
-    std::function<void(const P2PEndpointMsg&)> on_p2p_endpoint;  // P2P 端点响应
-    std::function<void(uint16_t code, const std::string& msg)> on_error;
-    std::function<void()> on_connected;
-    std::function<void()> on_disconnected;
-};
 
 class ControlChannel : public std::enable_shared_from_this<ControlChannel> {
 public:
@@ -116,8 +177,8 @@ public:
     // Resend pending endpoints (called after reconnect)
     asio::awaitable<void> resend_pending_endpoints();
 
-    // Set callbacks
-    void set_callbacks(ControlChannelCallbacks callbacks);
+    // Set event channels
+    void set_channels(ControlChannelEvents channels);
 
     // State
     ChannelState state() const { return state_; }
@@ -189,19 +250,12 @@ private:
     std::vector<Endpoint> pending_endpoints_;        // 最后上报的端点（用于重发）
     std::unique_ptr<asio::steady_timer> endpoint_ack_timer_;  // ACK 等待通知定时器
 
-    ControlChannelCallbacks callbacks_;
+    ControlChannelEvents channels_;
 };
 
 // ============================================================================
 // RelayChannel - Connection to Controller's /api/v1/relay (built-in relay)
 // ============================================================================
-
-// Callbacks for relay channel events
-struct RelayChannelCallbacks {
-    std::function<void(NodeId src, std::span<const uint8_t> plaintext)> on_data;
-    std::function<void()> on_connected;
-    std::function<void()> on_disconnected;
-};
 
 class RelayChannel : public std::enable_shared_from_this<RelayChannel> {
 public:
@@ -217,8 +271,8 @@ public:
     // Send encrypted DATA to peer
     asio::awaitable<bool> send_data(NodeId peer_id, std::span<const uint8_t> plaintext);
 
-    // Set callbacks
-    void set_callbacks(RelayChannelCallbacks callbacks);
+    // Set event channels
+    void set_channels(RelayChannelEvents channels);
 
     // State
     ChannelState state() const { return state_; }
@@ -256,7 +310,7 @@ private:
     bool writing_ = false;
     asio::steady_timer write_timer_;
 
-    RelayChannelCallbacks callbacks_;
+    RelayChannelEvents channels_;
 };
 
 } // namespace edgelink::client

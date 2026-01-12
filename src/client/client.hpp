@@ -116,15 +116,6 @@ enum class ClientState {
 
 const char* client_state_name(ClientState state);
 
-// Callbacks
-struct ClientCallbacks {
-    std::function<void()> on_connected;
-    std::function<void()> on_disconnected;
-    std::function<void(NodeId peer_id, std::span<const uint8_t> data)> on_data_received;
-    std::function<void(uint16_t code, const std::string& msg)> on_error;
-    std::function<void()> on_shutdown_requested;  // Called when shutdown is requested via IPC
-};
-
 // Main client coordinator
 class Client : public std::enable_shared_from_this<Client> {
 public:
@@ -157,8 +148,8 @@ public:
     // Announce configured routes from config (advertise_routes and exit_node)
     asio::awaitable<void> announce_configured_routes();
 
-    // Set callbacks
-    void set_callbacks(ClientCallbacks callbacks);
+    // Set external event channels
+    void set_events(ClientEvents events);
 
     // Accessors
     ClientState state() const { return state_; }
@@ -214,13 +205,29 @@ public:
     void clear_system_routes();              // 清除所有系统路由
 
 private:
-    void setup_callbacks();
+    void setup_channels();       // 设置事件 channels
     void setup_state_machine();  // 设置状态机回调
+
+    // Control Channel 事件处理协程
+    asio::awaitable<void> ctrl_auth_response_handler();
+    asio::awaitable<void> ctrl_config_handler();
+    asio::awaitable<void> ctrl_config_update_handler();
+    asio::awaitable<void> ctrl_route_update_handler();
+    asio::awaitable<void> ctrl_p2p_endpoint_handler();
+    asio::awaitable<void> ctrl_error_handler();
+    asio::awaitable<void> ctrl_connected_handler();
+    asio::awaitable<void> ctrl_disconnected_handler();
+
+    // Relay Channel 事件处理协程
+    asio::awaitable<void> relay_data_handler();
+    asio::awaitable<void> relay_connected_handler();
+    asio::awaitable<void> relay_disconnected_handler();
 
     // TUN device management
     bool setup_tun();
     void teardown_tun();
     void on_tun_packet(std::span<const uint8_t> packet);
+    asio::awaitable<void> tun_packet_handler();
 
     // IPC server management
     bool setup_ipc();
@@ -241,6 +248,9 @@ private:
 
     // Route announce loop - periodically re-announce routes
     asio::awaitable<void> route_announce_loop();
+
+    // Config change handler - 处理配置文件变更
+    asio::awaitable<void> config_change_handler();
 
     // P2P state handler - 处理 P2P 状态变化（替代回调）
     asio::awaitable<void> p2p_state_handler();
@@ -277,6 +287,7 @@ private:
 
     // TUN device (optional)
     std::unique_ptr<TunDevice> tun_;
+    std::unique_ptr<channels::TunPacketChannel> tun_packet_ch_;
 
     // IPC server (optional)
     std::shared_ptr<IpcServer> ipc_;
@@ -285,6 +296,7 @@ private:
     std::string config_path_;
     std::unique_ptr<ConfigWatcher> config_watcher_;
     std::unique_ptr<ConfigApplier> config_applier_;
+    std::unique_ptr<channels::ConfigChangeChannel> config_change_ch_;
 
     // Route manager (optional, requires TUN)
     std::unique_ptr<RouteManager> route_mgr_;
@@ -293,10 +305,11 @@ private:
     std::vector<RouteInfo> routes_;
     std::mutex routes_mutex_;
 
-    // Pending ping state
+    // Pending ping state - 使用 channel 替代回调
+    using PingResponseChannel = asio::experimental::channel<void(boost::system::error_code, uint16_t)>;
     struct PendingPing {
         uint64_t send_time = 0;
-        std::function<void(uint16_t)> callback;  // latency_ms or 0 on timeout
+        std::shared_ptr<PingResponseChannel> response_ch;
     };
     std::mutex ping_mutex_;
     std::unordered_map<uint64_t, PendingPing> pending_pings_;  // key = (node_id << 32) | seq_num
@@ -305,7 +318,7 @@ private:
     // P2P support
     std::unique_ptr<EndpointManager> endpoint_mgr_;
     std::unique_ptr<P2PManager> p2p_mgr_;
-    std::unique_ptr<channels::PeerStateChannel> peer_state_channel_;  // P2P 状态变化通道
+    std::unique_ptr<edgelink::channels::PeerStateChannel> peer_state_channel_;  // P2P 状态变化通道
 
     // P2P channels（用于异步通信）
     std::unique_ptr<P2PChannels::EndpointsReadyChannel> endpoints_ready_channel_;
@@ -317,7 +330,22 @@ private:
     std::vector<Endpoint> last_reported_endpoints_;
     std::mutex endpoints_mutex_;
 
-    ClientCallbacks callbacks_;
+    // Control Channel 事件 channels
+    std::unique_ptr<channels::AuthResponseChannel> ctrl_auth_response_ch_;
+    std::unique_ptr<channels::ConfigChannel> ctrl_config_ch_;
+    std::unique_ptr<channels::ConfigUpdateChannel> ctrl_config_update_ch_;
+    std::unique_ptr<channels::RouteUpdateChannel> ctrl_route_update_ch_;
+    std::unique_ptr<channels::P2PEndpointMsgChannel> ctrl_p2p_endpoint_ch_;
+    std::unique_ptr<channels::ControlErrorChannel> ctrl_error_ch_;
+    std::unique_ptr<channels::ControlConnectedChannel> ctrl_connected_ch_;
+    std::unique_ptr<channels::ControlDisconnectedChannel> ctrl_disconnected_ch_;
+
+    // Relay Channel 事件 channels
+    std::unique_ptr<channels::RelayDataChannel> relay_data_ch_;
+    std::unique_ptr<channels::RelayConnectedChannel> relay_connected_ch_;
+    std::unique_ptr<channels::RelayDisconnectedChannel> relay_disconnected_ch_;
+
+    ClientEvents events_;
 };
 
 } // namespace edgelink::client

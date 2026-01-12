@@ -1,0 +1,116 @@
+
+name: Autobuild
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:edge
+
+    strategy:
+      matrix:
+        build_type: [Release, Debug]
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apk add --no-cache \
+            git cmake ninja g++ linux-headers \
+            openssl-dev openssl-libs-static \
+            sqlite-dev sqlite-static \
+            zlib-dev zlib-static \
+            perl
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DEDGELINK_STATIC=ON \
+            -DBUILD_CLIENT=ON \
+            -DBUILD_CONTROLLER=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Package
+        run: |
+          BUILD_TYPE_LOWER=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
+          mkdir -p dist
+          cp build/edgelink-client dist/edgelink-client-linux-amd64-${BUILD_TYPE_LOWER}
+          cp build/edgelink-controller dist/edgelink-controller-linux-amd64-${BUILD_TYPE_LOWER}
+          # 创建版本信息
+          echo "$(git rev-parse --short HEAD) $(date -u +%Y-%m-%d_%H:%M:%S)" > dist/version-${BUILD_TYPE_LOWER}.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64-${{ matrix.build_type }}
+          path: dist/
+
+  update-release:
+    needs: build-linux
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          # 合并所有构建产物
+          find artifacts -type f -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Delete existing autobuild release
+        uses: dev-drprasad/delete-tag-and-release@v1.1
+        with:
+          tag_name: autobuild
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          delete_release: true
+        continue-on-error: true
+
+      - name: Create autobuild release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: autobuild
+          name: Autobuild (Latest)
+          body: |
+            ## 自动构建版本
+
+            每次推送到 main 分支时自动更新。
+
+            ### 下载
+            - `edgelink-client-linux-amd64-release` - 客户端 (Release 优化版)
+            - `edgelink-client-linux-amd64-debug` - 客户端 (Debug 调试版)
+            - `edgelink-controller-linux-amd64-release` - 控制器 (Release 优化版)
+            - `edgelink-controller-linux-amd64-debug` - 控制器 (Debug 调试版)
+
+            ### 一键安装
+            ```bash
+            # 安装 Release 版本（默认）
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | sudo bash
+
+            # 安装 Debug 版本
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | sudo bash -s -- --debug
+            ```
+
+            ### 版本信息
+            - Commit: ${{ github.sha }}
+            - 构建时间: $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)
+          prerelease: true
+          files: release/*
