@@ -1061,12 +1061,26 @@ int cmd_up(int argc, char* argv[]) {
             log.info("Config file watching enabled: {}", abs_config_path);
         }
 
-        // Setup signal handler
+        // Setup signal handler with timeout protection
         asio::signal_set signals(ioc, SIGINT, SIGTERM);
         signals.async_wait([&](const boost::system::error_code&, int sig) {
-            log.info("Received signal {}, shutting down...", sig);
-            work_guard.reset();  // 允许 io_context.run() 在没有挂起操作时返回
+            log.info("Received signal {}, shutting down gracefully...", sig);
+
+            // Reset work guard to allow io_context to exit when done
+            work_guard.reset();
+
+            // Start graceful shutdown
             asio::co_spawn(ioc, client->stop(), asio::detached);
+
+            // Force shutdown after timeout (5 seconds)
+            auto shutdown_timer = std::make_shared<asio::steady_timer>(ioc);
+            shutdown_timer->expires_after(std::chrono::seconds(5));
+            shutdown_timer->async_wait([&ioc, &log, shutdown_timer](const boost::system::error_code& ec) {
+                if (!ec) {
+                    log.warn("Graceful shutdown timeout, forcing io_context stop");
+                    ioc.stop();  // 强制停止所有 io_context 操作
+                }
+            });
         });
 
         // Start client

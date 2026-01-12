@@ -870,6 +870,7 @@ asio::awaitable<bool> Client::start() {
 asio::awaitable<void> Client::stop() {
     log().info("Stopping client...");
 
+    log().debug("Cancelling timers...");
     keepalive_timer_.cancel();
     reconnect_timer_.cancel();
     dns_refresh_timer_.cancel();
@@ -878,28 +879,38 @@ asio::awaitable<void> Client::stop() {
 
     // Stop P2P manager
     if (p2p_mgr_) {
+        log().debug("Stopping P2P manager...");
         co_await p2p_mgr_->stop();
+        log().debug("P2P manager stopped");
     }
 
     // Stop route manager first (removes routes from system)
     if (route_mgr_) {
+        log().debug("Stopping route manager...");
         route_mgr_->stop();
         route_mgr_.reset();
+        log().debug("Route manager stopped");
     }
 
     // Teardown TUN
+    log().debug("Tearing down TUN device...");
     teardown_tun();
+    log().debug("TUN device torn down");
 
     if (relay_) {
+        log().debug("Closing relay channel...");
         co_await relay_->close();
+        log().debug("Relay channel closed");
     }
 
     if (control_) {
+        log().debug("Closing control channel...");
         co_await control_->close();
+        log().debug("Control channel closed");
     }
 
     state_ = ClientState::STOPPED;
-    log().info("Client stopped");
+    log().info("Client stopped successfully");
 
     if (events_.disconnected) {
         events_.disconnected->try_send(boost::system::error_code{});
