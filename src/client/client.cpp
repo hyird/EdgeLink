@@ -499,9 +499,6 @@ asio::awaitable<void> Client::relay_connected_handler() {
 
         state_ = ClientState::RUNNING;
 
-        // TUN 设备已在 start() 中创建，这里不需要再创建
-        // setup_tun() 已经提前到 Client::start() 中执行
-
         if (events_.connected) {
             events_.connected->try_send(boost::system::error_code{});
         }
@@ -565,10 +562,20 @@ asio::awaitable<void> Client::relay_disconnected_handler() {
 }
 
 bool Client::setup_tun() {
-    if (!control_ || !control_->is_connected()) {
-        log().error("Cannot setup TUN: not connected");
+    // 基本检查：control channel 必须存在
+    if (!control_) {
+        log().error("Cannot setup TUN: control channel does not exist");
         return false;
     }
+
+    // 检查是否已经有 virtual_ip（表示认证成功）
+    auto vip = control_->virtual_ip();
+    if (vip.to_u32() == 0) {
+        log().error("Cannot setup TUN: virtual IP not available (authentication not complete?)");
+        return false;
+    }
+
+    log().debug("Setting up TUN device with virtual IP: {}", vip.to_string());
 
     // Create TUN device
     tun_ = TunDevice::create(ioc_);
@@ -580,18 +587,18 @@ bool Client::setup_tun() {
     // Open TUN device
     auto result = tun_->open(config_.tun_name);
     if (!result) {
-        log().error("Failed to open TUN device: {}", tun_error_message(result.error()));
+        log().error("Failed to open TUN device '{}': {}", config_.tun_name, tun_error_message(result.error()));
         tun_.reset();
         return false;
     }
-
-    // Configure TUN device with our virtual IP
-    auto vip = control_->virtual_ip();
 
     // Calculate netmask from prefix length (e.g., /16 -> 255.255.0.0)
     uint8_t prefix_len = control_->subnet_mask();
     uint32_t mask = prefix_len == 0 ? 0 : (~0U << (32 - prefix_len));
     auto netmask = IPv4Address::from_u32(mask);
+
+    log().debug("Configuring TUN device: IP={}, netmask={}, MTU={}",
+                vip.to_string(), netmask.to_string(), config_.tun_mtu);
 
     result = tun_->configure(vip, netmask, config_.tun_mtu);
     if (!result) {
@@ -609,7 +616,8 @@ bool Client::setup_tun() {
     // Start packet handler coroutine
     asio::co_spawn(ioc_, tun_packet_handler(), asio::detached);
 
-    log().info("TUN device enabled: {} with IP {}", tun_->name(), vip.to_string());
+    log().info("TUN device enabled: {} with IP {} (/{} bits)",
+               tun_->name(), vip.to_string(), prefix_len);
     return true;
 }
 
@@ -831,7 +839,7 @@ asio::awaitable<bool> Client::start() {
         controller_connected = true;
         log().info("Connected to controller: {}:{}", host, port);
 
-        // Setup TUN device if enabled (提前创建，不等待 relay_connected_handler)
+        // Setup TUN device if enabled (在 control 认证成功后立即创建)
         // TUN 只需要 control channel 的 virtual_ip，不依赖 relay
         if (config_.enable_tun) {
             if (!setup_tun()) {
