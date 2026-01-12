@@ -238,9 +238,14 @@ private:
     void do_read() {
         if (!reading_ || !is_open()) return;
 
+        // 注意：捕获 this 仍有 UAF 风险，但无法避免（LinuxTunDevice 不是 shared_ptr 管理）
+        // TODO: 重构 TunDevice 为 shared_ptr 管理以彻底解决此问题
         stream_.async_read_some(
             asio::buffer(read_buffer_),
             [this](const boost::system::error_code& ec, size_t bytes) {
+                // 防御性检查：如果 reading_ 为 false，说明正在关闭，直接返回
+                if (!reading_) return;
+
                 if (ec) {
                     if (ec != asio::error::operation_aborted) {
                         log().debug("TUN read error: {}", ec.message());
@@ -248,14 +253,14 @@ private:
                     return;
                 }
 
-                if (bytes > 0 && packet_channel_) {
+                if (bytes > 0 && packet_channel_ && reading_) {
                     // 复制数据到 vector 并通过 channel 发送
                     std::vector<uint8_t> packet(read_buffer_.begin(), read_buffer_.begin() + bytes);
                     packet_channel_->try_send(boost::system::error_code{}, std::move(packet));
                 }
 
-                // Continue reading
-                if (reading_) {
+                // Continue reading (双重检查避免析构时继续读取)
+                if (reading_ && is_open()) {
                     do_read();
                 }
             });

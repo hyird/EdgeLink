@@ -367,24 +367,27 @@ void ClientActor::create_actors() {
     data_plane_actor_->set_relay_channel(relay_actor_.get());
     data_plane_actor_->set_p2p_manager(p2p_actor_.get());
 
-    // 启动所有子 Actor
-    asio::co_spawn(ioc_, [this]() -> asio::awaitable<void> {
+    // 启动所有子 Actor - 使用 shared_from_this 保证生命周期安全（多线程环境）
+    // 注意：需要将 ActorBase<ClientActor, ...> 转换为 ClientActor*
+    auto base_self = shared_from_this();
+
+    asio::co_spawn(ioc_, [base_self, this]() -> asio::awaitable<void> {
         co_await control_actor_->start();
     }, asio::detached);
 
-    asio::co_spawn(ioc_, [this]() -> asio::awaitable<void> {
+    asio::co_spawn(ioc_, [base_self, this]() -> asio::awaitable<void> {
         co_await relay_actor_->start();
     }, asio::detached);
 
-    asio::co_spawn(ioc_, [this]() -> asio::awaitable<void> {
+    asio::co_spawn(ioc_, [base_self, this]() -> asio::awaitable<void> {
         co_await data_plane_actor_->start();
     }, asio::detached);
 
-    asio::co_spawn(ioc_, [this]() -> asio::awaitable<void> {
+    asio::co_spawn(ioc_, [base_self, this]() -> asio::awaitable<void> {
         co_await p2p_actor_->start();
     }, asio::detached);
 
-    asio::co_spawn(ioc_, [this]() -> asio::awaitable<void> {
+    asio::co_spawn(ioc_, [base_self, this]() -> asio::awaitable<void> {
         co_await tun_actor_->start();
     }, asio::detached);
 

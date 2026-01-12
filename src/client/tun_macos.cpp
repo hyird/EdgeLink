@@ -225,9 +225,14 @@ private:
     void do_read() {
         if (!reading_ || !is_open()) return;
 
+        // 注意：捕获 this 仍有 UAF 风险，但无法避免（MacOSTunDevice 不是 shared_ptr 管理）
+        // TODO: 重构 TunDevice 为 shared_ptr 管理以彻底解决此问题
         stream_.async_read_some(
             asio::buffer(read_buffer_),
             [this](const boost::system::error_code& ec, size_t bytes) {
+                // 防御性检查：如果 reading_ 为 false，说明正在关闭，直接返回
+                if (!reading_) return;
+
                 if (ec) {
                     if (ec != asio::error::operation_aborted) {
                         log().debug("utun read error: {}", ec.message());
@@ -236,12 +241,12 @@ private:
                 }
 
                 // Skip the 4-byte protocol header
-                if (bytes > 4 && callback_) {
+                if (bytes > 4 && callback_ && reading_) {
                     callback_(std::span<const uint8_t>(read_buffer_.data() + 4, bytes - 4));
                 }
 
-                // Continue reading
-                if (reading_) {
+                // Continue reading (双重检查避免析构时继续读取)
+                if (reading_ && is_open()) {
                     do_read();
                 }
             });

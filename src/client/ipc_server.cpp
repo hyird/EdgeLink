@@ -360,12 +360,12 @@ std::string IpcServer::handle_ping(const std::string& target) {
         return encode_error(IpcStatus::PEER_NOT_FOUND, "Peer is offline: " + target);
     }
 
-    // Execute ping synchronously using a promise
+    // Execute ping synchronously using a promise - 使用 shared_from_this 保证生命周期安全
     auto promise = std::make_shared<std::promise<uint16_t>>();
     auto future = promise->get_future();
 
-    asio::co_spawn(ioc_, [this, ip, promise]() -> asio::awaitable<void> {
-        uint16_t latency = co_await client_.ping_ip(ip);
+    asio::co_spawn(ioc_, [self = shared_from_this(), ip, promise]() -> asio::awaitable<void> {
+        uint16_t latency = co_await self->client_.ping_ip(ip);
         promise->set_value(latency);
     }, asio::detached);
 
