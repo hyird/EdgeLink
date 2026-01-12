@@ -10,8 +10,24 @@ auto& log() { return Logger::get("controller.session_manager"); }
 }
 
 SessionManager::SessionManager(asio::io_context& ioc, Database& db, JwtUtil& jwt)
-    : ioc_(ioc), db_(db), jwt_(jwt) {
-    // 状态机回调在创建时单独设置
+    : ioc_(ioc), db_(db), jwt_(jwt), state_machine_(ioc) {
+    // 创建事件通道
+    client_online_channel_ = std::make_unique<channels::ClientOnlineChannel>(ioc, 64);
+    client_offline_channel_ = std::make_unique<channels::ClientOfflineChannel>(ioc, 64);
+    endpoint_update_channel_ = std::make_unique<channels::EndpointUpdateChannel>(ioc, 64);
+    route_change_channel_ = std::make_unique<channels::RouteChangeChannel>(ioc, 64);
+
+    // 设置状态机的事件通道
+    state_machine_.set_client_online_channel(client_online_channel_.get());
+    state_machine_.set_client_offline_channel(client_offline_channel_.get());
+    state_machine_.set_endpoint_update_channel(endpoint_update_channel_.get());
+    state_machine_.set_route_change_channel(route_change_channel_.get());
+
+    // 启动事件处理协程
+    asio::co_spawn(ioc_, client_online_handler(), asio::detached);
+    asio::co_spawn(ioc_, client_offline_handler(), asio::detached);
+    asio::co_spawn(ioc_, endpoint_update_handler(), asio::detached);
+    asio::co_spawn(ioc_, route_change_handler(), asio::detached);
 }
 
 // ============================================================================
@@ -40,11 +56,8 @@ void SessionManager::register_control_session(NodeId node_id, std::shared_ptr<IS
         network_id = node->network_id;
     }
 
-    // 创建或获取状态机
-    auto* sm = get_or_create_state_machine(node_id, network_id);
-    if (sm) {
-        sm->handle_event(node_id, NodeEvent::CONNECT);
-    }
+    // 添加客户端到状态机
+    add_client(node_id, network_id);
 
     log().debug("Registered control session for node {}", node_id);
 }
@@ -64,14 +77,8 @@ void SessionManager::unregister_control_session(NodeId node_id) {
         node_ip_cache_.erase(node_id);
     }
 
-    // 处理断开事件
-    auto* sm = get_state_machine(node_id);
-    if (sm) {
-        sm->handle_event(node_id, NodeEvent::DISCONNECT);
-    }
-
-    // 移除状态机
-    remove_state_machine(node_id);
+    // 移除客户端
+    remove_client(node_id);
 
     log().debug("Unregistered control session for node {}", node_id);
 }
@@ -298,175 +305,152 @@ void SessionManager::clear_node_endpoints(NodeId node_id) {
 // 状态机管理
 // ============================================================================
 
-NodeStateMachine* SessionManager::get_or_create_state_machine(NodeId node_id, NetworkId network_id) {
-    std::unique_lock lock(state_machines_mutex_);
-    auto it = client_state_machines_.find(node_id);
-    if (it != client_state_machines_.end()) {
-        return it->second.get();
-    }
-
-    // 创建新的状态机
-    auto sm = std::make_unique<NodeStateMachine>(node_id, NodeRole::CONTROLLER);
-    sm->add_node(node_id, network_id, NodeRole::CLIENT);
-
-    // 设置回调
-    setup_state_machine_callbacks(sm.get(), node_id);
-
-    auto* ptr = sm.get();
-    client_state_machines_[node_id] = std::move(sm);
-    log().debug("Created state machine for node {} in network {}", node_id, network_id);
-    return ptr;
+void SessionManager::add_client(NodeId node_id, NetworkId network_id) {
+    state_machine_.add_node(node_id, network_id);
+    log().debug("Added client {} to state machine in network {}", node_id, network_id);
 }
 
-NodeStateMachine* SessionManager::get_state_machine(NodeId node_id) {
-    std::shared_lock lock(state_machines_mutex_);
-    auto it = client_state_machines_.find(node_id);
-    if (it != client_state_machines_.end()) {
-        return it->second.get();
-    }
-    return nullptr;
-}
-
-void SessionManager::remove_state_machine(NodeId node_id) {
-    std::unique_lock lock(state_machines_mutex_);
-    auto it = client_state_machines_.find(node_id);
-    if (it != client_state_machines_.end()) {
-        client_state_machines_.erase(it);
-        log().debug("Removed state machine for node {}", node_id);
-    }
-}
-
-void SessionManager::setup_state_machine_callbacks(NodeStateMachine* sm, NodeId node_id) {
-    // 简化后只保留有业务逻辑的回调（状态变更日志由状态机内部输出）
-    NodeStateCallbacks cbs;
-
-    // 客户端上线（通知其他客户端、更新数据库）
-    cbs.on_client_online = [this](NodeId nid, NetworkId network_id) {
-        log().info("Client {} online in network {}", nid, network_id);
-
-        // 通知同网络的其他客户端
-        asio::co_spawn(ioc_, [this, nid, network_id]() -> asio::awaitable<void> {
-            auto sessions = get_network_control_sessions(network_id);
-            for (const auto& session : sessions) {
-                if (session->node_id() != nid) {
-                    co_await notify_peer_status(session->node_id(), nid, true);
-                }
-            }
-        }, asio::detached);
-
-        // 更新数据库
-        db_.update_node_online(nid, true);
-    };
-
-    // 客户端下线（通知其他客户端、更新数据库、清除缓存）
-    cbs.on_client_offline = [this](NodeId nid, NetworkId network_id) {
-        log().info("Client {} offline from network {}", nid, network_id);
-
-        // 通知同网络的其他客户端
-        asio::co_spawn(ioc_, [this, nid, network_id]() -> asio::awaitable<void> {
-            auto sessions = get_network_control_sessions(network_id);
-            for (const auto& session : sessions) {
-                if (session->node_id() != nid) {
-                    co_await notify_peer_status(session->node_id(), nid, false);
-                }
-            }
-        }, asio::detached);
-
-        // 更新数据库
-        db_.update_node_online(nid, false);
-
-        // 清除端点缓存
-        clear_node_endpoints(nid);
-    };
-
-    // 端点更新（更新内部缓存）
-    cbs.on_endpoint_update = [this](NodeId nid, const std::vector<Endpoint>& endpoints) {
-        update_node_endpoints(nid, endpoints);
-    };
-
-    // 路由更新（广播路由变更）
-    cbs.on_route_change = [this](NodeId nid, const std::vector<RouteInfo>& added,
-                                  const std::vector<RouteInfo>& removed) {
-        auto state = get_client_state(nid);
-        if (state) {
-            asio::co_spawn(ioc_, [this, network_id = state->network_id, nid,
-                                   added, removed]() -> asio::awaitable<void> {
-                co_await broadcast_route_update(network_id, nid, added, removed);
-            }, asio::detached);
-        }
-    };
-
-    sm->set_callbacks(std::move(cbs));
-}
-
-void SessionManager::handle_node_event(NodeId node_id, NodeEvent event) {
-    auto* sm = get_state_machine(node_id);
-    if (sm) {
-        sm->handle_event(node_id, event);
-    }
+void SessionManager::remove_client(NodeId node_id) {
+    state_machine_.remove_node(node_id);
+    clear_node_endpoints(node_id);
+    log().debug("Removed client {} from state machine", node_id);
 }
 
 void SessionManager::handle_endpoint_update(NodeId node_id, const std::vector<Endpoint>& endpoints) {
-    auto* sm = get_state_machine(node_id);
-    if (sm) {
-        sm->update_node_endpoints(node_id, endpoints);
-    }
+    state_machine_.update_node_endpoints(node_id, endpoints);
 }
 
 void SessionManager::handle_route_announce(NodeId node_id, const std::vector<RouteInfo>& routes) {
-    auto* sm = get_state_machine(node_id);
-    if (sm) {
-        std::vector<RouteInfo> empty;
-        sm->update_node_routes(node_id, routes, empty);
-    }
+    std::vector<RouteInfo> empty;
+    state_machine_.update_node_routes(node_id, routes, empty);
 }
 
 void SessionManager::handle_route_withdraw(NodeId node_id, const std::vector<RouteInfo>& routes) {
-    auto* sm = get_state_machine(node_id);
-    if (sm) {
-        std::vector<RouteInfo> empty;
-        sm->update_node_routes(node_id, empty, routes);
-    }
+    std::vector<RouteInfo> empty;
+    state_machine_.update_node_routes(node_id, empty, routes);
 }
 
 void SessionManager::handle_p2p_init(NodeId initiator, NodeId responder, uint32_t seq) {
-    auto* sm = get_state_machine(initiator);
-    if (sm) {
-        sm->handle_p2p_init_request(initiator, responder, seq);
-    }
+    state_machine_.handle_p2p_init(initiator, responder, seq);
 }
 
 void SessionManager::handle_p2p_status(NodeId node_id, NodeId peer_id, bool success) {
-    auto* sm = get_state_machine(node_id);
-    if (sm) {
-        sm->handle_p2p_status(node_id, peer_id, success);
-    }
+    state_machine_.handle_p2p_status(node_id, peer_id, success);
 }
 
-std::optional<NodeState> SessionManager::get_client_state(NodeId node_id) const {
-    std::shared_lock lock(state_machines_mutex_);
-    auto it = client_state_machines_.find(node_id);
-    if (it != client_state_machines_.end()) {
-        return it->second->get_node_state(node_id);
-    }
-    return std::nullopt;
+std::optional<ControllerNodeView> SessionManager::get_client_state(NodeId node_id) const {
+    return state_machine_.get_node_view(node_id);
 }
 
 std::vector<NodeId> SessionManager::get_online_clients() const {
-    std::vector<NodeId> result;
-    std::shared_lock lock(state_machines_mutex_);
-    for (const auto& [node_id, sm] : client_state_machines_) {
-        if (sm->is_client_online(node_id)) {
-            result.push_back(node_id);
-        }
-    }
-    return result;
+    return state_machine_.get_online_nodes();
 }
 
 void SessionManager::check_timeouts() {
-    std::shared_lock lock(state_machines_mutex_);
-    for (const auto& [node_id, sm] : client_state_machines_) {
-        sm->check_timeouts();
+    state_machine_.check_timeouts();
+}
+
+// ============================================================================
+// Channel 事件处理协程
+// ============================================================================
+
+asio::awaitable<void> SessionManager::client_online_handler() {
+    while (true) {
+        auto result = co_await client_online_channel_->async_receive(asio::as_tuple(asio::use_awaitable));
+        auto ec = std::get<0>(result);
+        if (ec) {
+            if (ec == asio::experimental::channel_errc::channel_cancelled) {
+                break;
+            }
+            continue;
+        }
+
+        auto node_id = std::get<1>(result);
+        auto network_id = std::get<2>(result);
+
+        log().info("Client {} online in network {}", node_id, network_id);
+
+        // 通知同网络的其他客户端
+        auto sessions = get_network_control_sessions(network_id);
+        for (const auto& session : sessions) {
+            if (session->node_id() != node_id) {
+                co_await notify_peer_status(session->node_id(), node_id, true);
+            }
+        }
+
+        // 更新数据库
+        db_.update_node_online(node_id, true);
+    }
+}
+
+asio::awaitable<void> SessionManager::client_offline_handler() {
+    while (true) {
+        auto result = co_await client_offline_channel_->async_receive(asio::as_tuple(asio::use_awaitable));
+        auto ec = std::get<0>(result);
+        if (ec) {
+            if (ec == asio::experimental::channel_errc::channel_cancelled) {
+                break;
+            }
+            continue;
+        }
+
+        auto node_id = std::get<1>(result);
+        auto network_id = std::get<2>(result);
+
+        log().info("Client {} offline from network {}", node_id, network_id);
+
+        // 通知同网络的其他客户端
+        auto sessions = get_network_control_sessions(network_id);
+        for (const auto& session : sessions) {
+            if (session->node_id() != node_id) {
+                co_await notify_peer_status(session->node_id(), node_id, false);
+            }
+        }
+
+        // 更新数据库
+        db_.update_node_online(node_id, false);
+    }
+}
+
+asio::awaitable<void> SessionManager::endpoint_update_handler() {
+    while (true) {
+        auto result = co_await endpoint_update_channel_->async_receive(asio::as_tuple(asio::use_awaitable));
+        auto ec = std::get<0>(result);
+        if (ec) {
+            if (ec == asio::experimental::channel_errc::channel_cancelled) {
+                break;
+            }
+            continue;
+        }
+
+        auto node_id = std::get<1>(result);
+        auto& endpoints = std::get<2>(result);
+
+        // 更新内部端点缓存
+        update_node_endpoints(node_id, endpoints);
+    }
+}
+
+asio::awaitable<void> SessionManager::route_change_handler() {
+    while (true) {
+        auto result = co_await route_change_channel_->async_receive(asio::as_tuple(asio::use_awaitable));
+        auto ec = std::get<0>(result);
+        if (ec) {
+            if (ec == asio::experimental::channel_errc::channel_cancelled) {
+                break;
+            }
+            continue;
+        }
+
+        auto node_id = std::get<1>(result);
+        auto& added = std::get<2>(result);
+        auto& removed = std::get<3>(result);
+
+        // 广播路由变更
+        auto state = get_client_state(node_id);
+        if (state) {
+            co_await broadcast_route_update(state->network_id, node_id, added, removed);
+        }
     }
 }
 

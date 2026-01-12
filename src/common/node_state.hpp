@@ -2,10 +2,11 @@
 
 #include "common/types.hpp"
 #include "common/connection_types.hpp"
+#include "common/constants.hpp"
+#include <boost/asio.hpp>
+#include <boost/asio/experimental/channel.hpp>
 #include <array>
-#include <atomic>
 #include <chrono>
-#include <functional>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -13,13 +14,34 @@
 #include <string>
 #include <optional>
 
+namespace asio = boost::asio;
+
 namespace edgelink {
 
 // ============================================================================
-// 统一节点状态机
+// Channel 类型定义（替代同步回调）
 // ============================================================================
-// 用于 Client、Controller、Relay 三方共享的状态管理
-// 每个节点维护其他节点的状态视图，通过协议消息同步
+namespace channels {
+
+// Controller 端事件通道
+using ClientOnlineChannel = asio::experimental::channel<
+    void(boost::system::error_code, NodeId, NetworkId)>;
+using ClientOfflineChannel = asio::experimental::channel<
+    void(boost::system::error_code, NodeId, NetworkId)>;
+using EndpointUpdateChannel = asio::experimental::channel<
+    void(boost::system::error_code, NodeId, std::vector<Endpoint>)>;
+using RouteChangeChannel = asio::experimental::channel<
+    void(boost::system::error_code, NodeId, std::vector<RouteInfo>, std::vector<RouteInfo>)>;
+
+// Client 端事件通道
+using ConnectionPhaseChannel = asio::experimental::channel<
+    void(boost::system::error_code, ConnectionPhase, ConnectionPhase)>;
+using PeerStateChannel = asio::experimental::channel<
+    void(boost::system::error_code, NodeId, P2PConnectionState, PeerDataPath)>;
+using DataReceivedChannel = asio::experimental::channel<
+    void(boost::system::error_code, NodeId, std::vector<uint8_t>)>;
+
+}  // namespace channels
 
 // ============================================================================
 // 节点角色
@@ -33,251 +55,7 @@ enum class NodeRole : uint8_t {
 const char* node_role_name(NodeRole role);
 
 // ============================================================================
-// 节点连接状态
-// ============================================================================
-enum class NodeConnectionState : uint8_t {
-    OFFLINE = 0,        // 离线
-    CONNECTING,         // 连接中
-    AUTHENTICATING,     // 认证中
-    ONLINE,             // 在线
-    DEGRADED,           // 降级（部分连接可用）
-    RECONNECTING,       // 重连中
-};
-
-const char* node_connection_state_name(NodeConnectionState state);
-
-// ============================================================================
-// 数据通道状态
-// ============================================================================
-enum class DataChannelState : uint8_t {
-    NONE = 0,           // 无数据通道
-    RELAY_ONLY,         // 仅通过 Relay
-    P2P_ONLY,           // 仅通过 P2P
-    HYBRID,             // 混合模式（Relay + P2P）
-};
-
-const char* data_channel_state_name(DataChannelState state);
-
-// ============================================================================
-// P2P 连接状态
-// ============================================================================
-enum class P2PConnectionState : uint8_t {
-    NONE = 0,           // 未发起
-    INITIATING,         // 发起中（发送 P2P_INIT）
-    WAITING_ENDPOINT,   // 等待端点
-    PUNCHING,           // 打洞中
-    CONNECTED,          // 已连接
-    FAILED,             // 失败
-};
-
-const char* p2p_connection_state_name(P2PConnectionState state);
-
-// ============================================================================
-// 节点详细状态
-// ============================================================================
-struct NodeState {
-    NodeId node_id = 0;
-    NetworkId network_id = 0;
-    NodeRole role = NodeRole::CLIENT;
-
-    // ========== 通用连接状态 ==========
-    NodeConnectionState connection_state = NodeConnectionState::OFFLINE;
-    DataChannelState data_channel = DataChannelState::NONE;
-
-    // ========== Controller 视角的会话状态 ==========
-    ClientSessionState session_state = ClientSessionState::DISCONNECTED;
-    RelaySessionState relay_state = RelaySessionState::DISCONNECTED;
-
-    // ========== Client 视角的控制面/数据面状态 ==========
-    ControlPlaneState control_plane = ControlPlaneState::DISCONNECTED;
-    DataPlaneState data_plane = DataPlaneState::OFFLINE;
-    ConnectionPhase connection_phase = ConnectionPhase::OFFLINE;
-    ClientEndpointSyncState endpoint_sync = ClientEndpointSyncState::NOT_READY;
-    RouteSyncState route_sync = RouteSyncState::DISABLED;
-
-    // ========== 认证信息 ==========
-    std::string auth_key_hash;
-    uint64_t auth_time = 0;
-    std::array<uint8_t, 32> session_key{};
-
-    // ========== 配置同步 ==========
-    uint64_t config_version = 0;
-    bool config_acked = false;
-    uint64_t config_send_time = 0;
-
-    // ========== 虚拟 IP ==========
-    IPv4Address virtual_ip{};
-
-    // ========== 端点信息 ==========
-    std::vector<Endpoint> endpoints;
-    uint64_t endpoint_update_time = 0;
-    uint64_t endpoint_upload_time = 0;   // Client 端：端点上报时间
-    bool endpoint_synced = false;
-    EndpointState endpoint_state = EndpointState::UNKNOWN;  // Controller 视角
-
-    // ========== 路由信息 ==========
-    std::vector<RouteInfo> announced_routes;
-    uint64_t route_update_time = 0;
-
-    // ========== 延迟信息 ==========
-    uint16_t latency_ms = 0;
-    uint64_t last_ping_time = 0;
-    uint64_t last_seen_time = 0;
-
-    // ========== Relay 连接信息（Client 端使用，支持多 Relay）==========
-    struct RelayConnection {
-        std::string relay_id;
-        RelayConnectionState state = RelayConnectionState::DISCONNECTED;
-        uint64_t last_connect_time = 0;
-        uint64_t last_recv_time = 0;
-        uint64_t last_send_time = 0;
-        uint16_t latency_ms = 0;
-        uint32_t reconnect_count = 0;
-        bool is_primary = false;
-
-        bool is_connected() const {
-            return state == RelayConnectionState::CONNECTED;
-        }
-    };
-    std::unordered_map<std::string, RelayConnection> relay_connections;
-    std::string primary_relay_id;
-
-    // ========== P2P 连接状态（与其他节点）==========
-    struct P2PLink {
-        NodeId peer_id = 0;
-        P2PConnectionState state = P2PConnectionState::NONE;
-        uint32_t init_seq = 0;
-        std::vector<Endpoint> peer_endpoints;
-        Endpoint active_endpoint{};             // 当前活跃端点
-        uint64_t connect_time = 0;
-        uint64_t last_recv_time = 0;
-        uint64_t last_send_time = 0;            // Client 端：上次发送时间
-        uint16_t rtt_ms = 0;
-        uint32_t punch_failures = 0;
-
-        // Client 端扩展字段
-        PeerDataPath data_path = PeerDataPath::UNKNOWN;
-        PeerLinkState link_state = PeerLinkState::UNKNOWN;
-        uint64_t last_resolve_time = 0;         // 上次发送 P2P_INIT 时间
-        uint64_t last_endpoint_time = 0;        // 上次收到 P2P_ENDPOINT 时间
-        uint64_t last_punch_time = 0;           // 上次发送打洞包时间
-        uint32_t punch_count = 0;               // 打洞次数
-        uint64_t next_retry_time = 0;           // 下次重试时间
-        std::array<uint8_t, 16> p2p_addr{};     // P2P 对端地址（IPv6 格式）
-        uint16_t p2p_port = 0;                  // P2P 对端端口
-
-        // 辅助方法
-        bool can_send_p2p() const {
-            return data_path == PeerDataPath::P2P;
-        }
-
-        bool is_online() const {
-            return data_path != PeerDataPath::UNKNOWN &&
-                   data_path != PeerDataPath::UNREACHABLE;
-        }
-    };
-    std::unordered_map<NodeId, P2PLink> p2p_links;
-
-    // ========== P2P 协商状态（Controller 视角，与其他客户端）==========
-    struct P2PNegotiation {
-        NodeId peer_id = 0;
-        P2PNegotiationPhase phase = P2PNegotiationPhase::NONE;
-        uint32_t init_seq = 0;
-        uint64_t init_time = 0;
-        uint64_t endpoint_send_time = 0;
-    };
-    std::unordered_map<NodeId, P2PNegotiation> p2p_negotiations;
-
-    // ========== P2P_INIT 序列号（Client 端使用）==========
-    uint32_t next_init_seq = 0;
-
-    // ========== 辅助方法 ==========
-    bool is_online() const {
-        return connection_state == NodeConnectionState::ONLINE ||
-               connection_state == NodeConnectionState::DEGRADED;
-    }
-
-    // Controller 视角：会话是否在线
-    bool is_session_online() const {
-        return session_state == ClientSessionState::ONLINE;
-    }
-
-    // Controller 视角：是否已认证
-    bool is_authenticated() const {
-        return session_state != ClientSessionState::DISCONNECTED &&
-               session_state != ClientSessionState::AUTHENTICATING;
-    }
-
-    // Controller 视角：是否有 Relay 连接
-    bool has_relay() const {
-        return relay_state == RelaySessionState::CONNECTED;
-    }
-
-    // Client 视角：控制面是否就绪
-    bool is_control_ready() const {
-        return control_plane == ControlPlaneState::READY;
-    }
-
-    // Client 视角：是否有数据通道
-    bool has_data_path() const {
-        return data_plane != DataPlaneState::OFFLINE;
-    }
-
-    // Client 视角：端点是否已同步
-    bool is_endpoint_synced() const {
-        return endpoint_sync == ClientEndpointSyncState::SYNCED;
-    }
-
-    // Client 视角：是否有已连接的 Relay
-    bool has_connected_relay() const {
-        for (const auto& [id, relay] : relay_connections) {
-            if (relay.is_connected()) return true;
-        }
-        return false;
-    }
-
-    // Client 视角：获取已连接的 Relay 数量
-    size_t connected_relay_count() const {
-        size_t count = 0;
-        for (const auto& [id, relay] : relay_connections) {
-            if (relay.is_connected()) ++count;
-        }
-        return count;
-    }
-
-    bool has_p2p(NodeId peer_id) const {
-        auto it = p2p_links.find(peer_id);
-        return it != p2p_links.end() && it->second.state == P2PConnectionState::CONNECTED;
-    }
-
-    bool can_reach(NodeId peer_id) const {
-        return data_channel != DataChannelState::NONE || has_p2p(peer_id);
-    }
-
-    // Client 视角：获取对端的链路状态
-    PeerLinkState get_peer_link_state(NodeId peer_id) const {
-        auto it = p2p_links.find(peer_id);
-        if (it == p2p_links.end()) return PeerLinkState::UNKNOWN;
-        return it->second.link_state;
-    }
-
-    // Client 视角：获取对端的数据路径
-    PeerDataPath get_peer_data_path(NodeId peer_id) const {
-        auto it = p2p_links.find(peer_id);
-        if (it == p2p_links.end()) return PeerDataPath::UNKNOWN;
-        return it->second.data_path;
-    }
-
-    // Client 视角：判断对端是否可通过 P2P 发送
-    bool is_peer_p2p_ready(NodeId peer_id) const {
-        auto it = p2p_links.find(peer_id);
-        if (it == p2p_links.end()) return false;
-        return it->second.can_send_p2p();
-    }
-};
-
-// ============================================================================
-// 节点事件
+// 节点事件（用于状态机事件驱动）
 // ============================================================================
 enum class NodeEvent : uint8_t {
     // ========== 通用连接事件 ==========
@@ -351,115 +129,239 @@ enum class NodeEvent : uint8_t {
 const char* node_event_name(NodeEvent event);
 
 // ============================================================================
-// 状态变更回调（简化版：仅保留有业务逻辑的回调，日志改用内部 log()）
+// Controller 视角：客户端节点视图
 // ============================================================================
-struct NodeStateCallbacks {
-    // ========== Controller 端回调（有实际业务逻辑）==========
+struct ControllerNodeView {
+    NodeId node_id = 0;
+    NetworkId network_id = 0;
+    IPv4Address virtual_ip{};
 
-    // 客户端上线（Controller 端使用：通知其他客户端）
-    std::function<void(NodeId node_id, NetworkId network_id)> on_client_online;
+    // 会话状态
+    ClientSessionState session_state = ClientSessionState::DISCONNECTED;
+    RelaySessionState relay_state = RelaySessionState::DISCONNECTED;
 
-    // 客户端下线（Controller 端使用：通知其他客户端）
-    std::function<void(NodeId node_id, NetworkId network_id)> on_client_offline;
+    // 配置同步
+    uint64_t config_version = 0;
+    bool config_acked = false;
+    uint64_t config_send_time = 0;
 
-    // 端点更新（Controller 端使用：更新端点缓存）
-    std::function<void(NodeId node_id, const std::vector<Endpoint>& endpoints)>
-        on_endpoint_update;
+    // 端点信息
+    std::vector<Endpoint> endpoints;
+    uint64_t endpoint_update_time = 0;
+    EndpointState endpoint_state = EndpointState::UNKNOWN;
 
-    // 路由变更（Controller 端使用：广播路由）
-    std::function<void(NodeId node_id, const std::vector<RouteInfo>& added,
-                       const std::vector<RouteInfo>& removed)>
-        on_route_change;
+    // 路由信息
+    std::vector<RouteInfo> announced_routes;
+    uint64_t route_update_time = 0;
 
-    // ========== Client 端回调（有实际业务逻辑）==========
+    // 心跳/活动
+    uint64_t last_ping_time = 0;
+    uint64_t last_seen_time = 0;
+    uint16_t latency_ms = 0;
 
-    // 全局连接阶段变更（Client 端使用：更新 ClientState 兼容状态）
-    std::function<void(ConnectionPhase old_phase, ConnectionPhase new_phase)>
-        on_connection_phase_change;
+    // P2P 协商状态（与其他客户端）
+    struct P2PNegotiation {
+        NodeId peer_id = 0;
+        P2PNegotiationPhase phase = P2PNegotiationPhase::NONE;
+        uint32_t init_seq = 0;
+        uint64_t init_time = 0;
+        uint64_t endpoint_send_time = 0;
+    };
+    std::unordered_map<NodeId, P2PNegotiation> p2p_negotiations;
+
+    // 辅助方法
+    bool is_online() const {
+        return session_state == ClientSessionState::ONLINE;
+    }
+
+    bool is_authenticated() const {
+        return session_state != ClientSessionState::DISCONNECTED &&
+               session_state != ClientSessionState::AUTHENTICATING;
+    }
+
+    bool has_relay() const {
+        return relay_state == RelaySessionState::CONNECTED;
+    }
 };
 
 // ============================================================================
-// 统一节点状态机
+// Client 视角：自身状态
 // ============================================================================
-class NodeStateMachine {
+struct ClientSelfState {
+    NodeId node_id = 0;
+    NetworkId network_id = 0;
+    IPv4Address virtual_ip{};
+
+    // 控制面/数据面状态
+    ControlPlaneState control_plane = ControlPlaneState::DISCONNECTED;
+    DataPlaneState data_plane = DataPlaneState::OFFLINE;
+    ConnectionPhase connection_phase = ConnectionPhase::OFFLINE;
+
+    // 端点同步
+    ClientEndpointSyncState endpoint_sync = ClientEndpointSyncState::NOT_READY;
+    std::vector<Endpoint> local_endpoints;
+    uint64_t endpoint_upload_time = 0;
+
+    // 路由同步
+    RouteSyncState route_sync = RouteSyncState::DISABLED;
+
+    // P2P_INIT 序列号（由 ClientStateMachine 管理，不需要 atomic）
+    uint32_t next_init_seq = 0;
+
+    // Relay 连接（支持多 Relay）
+    struct RelayConnection {
+        std::string relay_id;
+        RelayConnectionState state = RelayConnectionState::DISCONNECTED;
+        uint64_t last_connect_time = 0;
+        uint64_t last_recv_time = 0;
+        uint64_t last_send_time = 0;
+        uint16_t latency_ms = 0;
+        uint32_t reconnect_count = 0;
+        bool is_primary = false;
+
+        bool is_connected() const {
+            return state == RelayConnectionState::CONNECTED;
+        }
+    };
+    std::unordered_map<std::string, RelayConnection> relay_connections;
+    std::string primary_relay_id;
+
+    // 对端连接状态
+    struct PeerConnection {
+        NodeId peer_id = 0;
+        P2PConnectionState p2p_state = P2PConnectionState::NONE;
+        PeerDataPath data_path = PeerDataPath::UNKNOWN;
+
+        // P2P 打洞相关
+        uint32_t init_seq = 0;
+        std::vector<Endpoint> peer_endpoints;
+        asio::ip::udp::endpoint active_endpoint;
+
+        // 时间戳
+        uint64_t last_resolve_time = 0;     // 上次发送 P2P_INIT 时间
+        uint64_t last_endpoint_time = 0;    // 上次收到 P2P_ENDPOINT 时间
+        uint64_t last_punch_time = 0;       // 上次发送打洞包时间
+        uint64_t last_recv_time = 0;        // 上次收到数据时间
+        uint64_t last_send_time = 0;        // 上次发送数据时间
+        uint64_t next_retry_time = 0;       // 下次重试时间
+
+        // 统计
+        uint32_t punch_count = 0;
+        uint32_t punch_failures = 0;
+        uint16_t rtt_ms = 0;
+
+        // 辅助方法
+        bool can_send_p2p() const {
+            return data_path == PeerDataPath::P2P;
+        }
+
+        bool is_online() const {
+            return data_path != PeerDataPath::UNKNOWN &&
+                   data_path != PeerDataPath::UNREACHABLE;
+        }
+    };
+    std::unordered_map<NodeId, PeerConnection> peer_connections;
+
+    // 辅助方法
+    bool is_control_ready() const {
+        return control_plane == ControlPlaneState::READY;
+    }
+
+    bool has_data_path() const {
+        return data_plane != DataPlaneState::OFFLINE;
+    }
+
+    bool is_endpoint_synced() const {
+        return endpoint_sync == ClientEndpointSyncState::SYNCED;
+    }
+
+    bool has_connected_relay() const {
+        for (const auto& [id, relay] : relay_connections) {
+            if (relay.is_connected()) return true;
+        }
+        return false;
+    }
+
+    size_t connected_relay_count() const {
+        size_t count = 0;
+        for (const auto& [id, relay] : relay_connections) {
+            if (relay.is_connected()) ++count;
+        }
+        return count;
+    }
+
+    bool has_p2p(NodeId peer_id) const {
+        auto it = peer_connections.find(peer_id);
+        return it != peer_connections.end() &&
+               it->second.p2p_state == P2PConnectionState::CONNECTED;
+    }
+
+    bool is_peer_p2p_ready(NodeId peer_id) const {
+        auto it = peer_connections.find(peer_id);
+        if (it == peer_connections.end()) return false;
+        return it->second.can_send_p2p();
+    }
+
+    PeerDataPath get_peer_data_path(NodeId peer_id) const {
+        auto it = peer_connections.find(peer_id);
+        if (it == peer_connections.end()) return PeerDataPath::UNKNOWN;
+        return it->second.data_path;
+    }
+};
+
+// ============================================================================
+// Controller 端状态机
+// ============================================================================
+class ControllerStateMachine {
 public:
-    NodeStateMachine(NodeId self_id, NodeRole self_role);
-    ~NodeStateMachine() = default;
+    explicit ControllerStateMachine(asio::io_context& ioc);
+    ~ControllerStateMachine() = default;
 
     // 禁止拷贝
-    NodeStateMachine(const NodeStateMachine&) = delete;
-    NodeStateMachine& operator=(const NodeStateMachine&) = delete;
+    ControllerStateMachine(const ControllerStateMachine&) = delete;
+    ControllerStateMachine& operator=(const ControllerStateMachine&) = delete;
 
     // ========================================================================
-    // 配置
+    // Channel 设置
     // ========================================================================
-
-    // 设置回调
-    void set_callbacks(NodeStateCallbacks callbacks);
-
-    // 设置超时参数（毫秒）
-    void set_p2p_punch_timeout(uint32_t ms) { p2p_punch_timeout_ms_ = ms; }
-    void set_p2p_keepalive_timeout(uint32_t ms) { p2p_keepalive_timeout_ms_ = ms; }
-    void set_heartbeat_timeout(uint32_t ms) { heartbeat_timeout_ms_ = ms; }
-    void set_p2p_retry_interval(uint32_t ms) { p2p_retry_interval_ms_ = ms; }
+    void set_client_online_channel(channels::ClientOnlineChannel* ch) { client_online_channel_ = ch; }
+    void set_client_offline_channel(channels::ClientOfflineChannel* ch) { client_offline_channel_ = ch; }
+    void set_endpoint_update_channel(channels::EndpointUpdateChannel* ch) { endpoint_update_channel_ = ch; }
+    void set_route_change_channel(channels::RouteChangeChannel* ch) { route_change_channel_ = ch; }
 
     // ========================================================================
-    // 自身信息
+    // 超时参数设置
     // ========================================================================
-
-    NodeId self_id() const { return self_id_; }
-    NodeRole self_role() const { return self_role_; }
-
-    // 更新自身 NodeId（认证成功后调用）
-    void set_self_id(NodeId new_id);
-
-    // ========================================================================
-    // 事件处理
-    // ========================================================================
-
-    // 处理节点事件
-    void handle_event(NodeId node_id, NodeEvent event);
-
-    // 处理 P2P 事件
-    void handle_p2p_event(NodeId node_id, NodeId peer_id, NodeEvent event);
-
-    // 处理自身节点的 P2P 事件 (Client 端使用 self_state_)
-    void handle_self_p2p_event(NodeId peer_id, NodeEvent event);
+    void set_auth_timeout(std::chrono::milliseconds ms) { auth_timeout_ = ms; }
+    void set_config_ack_timeout(std::chrono::milliseconds ms) { config_ack_timeout_ = ms; }
+    void set_heartbeat_timeout(std::chrono::milliseconds ms) { heartbeat_timeout_ = ms; }
+    void set_p2p_negotiation_timeout(std::chrono::milliseconds ms) { p2p_negotiation_timeout_ = ms; }
 
     // ========================================================================
     // 节点管理
     // ========================================================================
 
     // 添加节点
-    void add_node(NodeId node_id, NetworkId network_id, NodeRole role = NodeRole::CLIENT);
+    void add_node(NodeId node_id, NetworkId network_id);
 
     // 移除节点
     void remove_node(NodeId node_id);
 
-    // 更新节点端点
-    void update_node_endpoints(NodeId node_id, const std::vector<Endpoint>& endpoints);
+    // 获取节点视图
+    std::optional<ControllerNodeView> get_node_view(NodeId node_id) const;
 
-    // 更新节点路由
-    void update_node_routes(NodeId node_id, const std::vector<RouteInfo>& add_routes,
-                            const std::vector<RouteInfo>& del_routes);
+    // 获取网络中的所有节点
+    std::vector<NodeId> get_network_nodes(NetworkId network_id) const;
 
-    // 更新节点 IP
-    void update_node_ip(NodeId node_id, const IPv4Address& ip);
-
-    // 更新节点延迟
-    void update_node_latency(NodeId node_id, uint16_t latency_ms);
-
-    // 记录节点活动
-    void record_node_activity(NodeId node_id);
+    // 获取所有在线节点
+    std::vector<NodeId> get_online_nodes() const;
 
     // ========================================================================
-    // 会话管理（Controller 端使用）
+    // 会话管理
     // ========================================================================
 
     // 处理认证请求
-    void handle_auth_request(NodeId node_id, NetworkId network_id,
-                             const std::string& auth_key_hash,
-                             const std::array<uint8_t, 32>& session_key);
+    void handle_auth_request(NodeId node_id, NetworkId network_id);
 
     // 处理认证结果
     void handle_auth_result(NodeId node_id, bool success);
@@ -476,16 +378,34 @@ public:
     // 设置 Relay 会话状态
     void set_relay_session_state(NodeId node_id, RelaySessionState state);
 
-    // 记录心跳
-    void record_ping(NodeId node_id);
-    void record_pong(NodeId node_id);
+    // ========================================================================
+    // 端点管理
+    // ========================================================================
+
+    // 更新节点端点
+    void update_node_endpoints(NodeId node_id, const std::vector<Endpoint>& endpoints);
+
+    // 获取节点端点
+    std::vector<Endpoint> get_node_endpoints(NodeId node_id) const;
 
     // ========================================================================
-    // P2P 协商管理（Controller 端使用）
+    // 路由管理
+    // ========================================================================
+
+    // 更新节点路由
+    void update_node_routes(NodeId node_id,
+                            const std::vector<RouteInfo>& add_routes,
+                            const std::vector<RouteInfo>& del_routes);
+
+    // 获取节点路由
+    std::vector<RouteInfo> get_node_routes(NodeId node_id) const;
+
+    // ========================================================================
+    // P2P 协商管理
     // ========================================================================
 
     // 处理 P2P 初始化请求
-    void handle_p2p_init_request(NodeId initiator, NodeId responder, uint32_t seq);
+    void handle_p2p_init(NodeId initiator, NodeId responder, uint32_t seq);
 
     // 标记 P2P 端点已发送
     void mark_p2p_endpoint_sent(NodeId node_id, NodeId peer_id);
@@ -494,48 +414,166 @@ public:
     void handle_p2p_status(NodeId node_id, NodeId peer_id, bool success);
 
     // ========================================================================
-    // P2P 管理
+    // 心跳管理
     // ========================================================================
 
-    // 发起 P2P 连接
-    void initiate_p2p(NodeId peer_id, uint32_t seq);
+    // 记录心跳
+    void record_ping(NodeId node_id);
+    void record_pong(NodeId node_id, uint16_t latency_ms);
 
-    // 收到对端端点
-    void receive_peer_endpoints(NodeId peer_id, const std::vector<Endpoint>& endpoints);
-
-    // 设置活跃 P2P 端点
-    void set_active_p2p_endpoint(NodeId peer_id, const Endpoint& endpoint);
-
-    // 更新 P2P RTT
-    void update_p2p_rtt(NodeId peer_id, uint16_t rtt_ms);
+    // 记录活动
+    void record_activity(NodeId node_id);
 
     // ========================================================================
-    // Client 端控制面/数据面管理
+    // 超时检测
+    // ========================================================================
+
+    // 检查所有超时
+    void check_timeouts();
+
+    // ========================================================================
+    // 状态查询
+    // ========================================================================
+
+    // 检查节点是否在线
+    bool is_node_online(NodeId node_id) const;
+
+    // 检查节点是否有 Relay 连接
+    bool has_node_relay(NodeId node_id) const;
+
+    // 获取当前时间（微秒）
+    static uint64_t now_us();
+
+private:
+    // 发送事件到 channel
+    void notify_client_online(NodeId node_id, NetworkId network_id);
+    void notify_client_offline(NodeId node_id, NetworkId network_id);
+    void notify_endpoint_update(NodeId node_id, const std::vector<Endpoint>& endpoints);
+    void notify_route_change(NodeId node_id,
+                             const std::vector<RouteInfo>& added,
+                             const std::vector<RouteInfo>& removed);
+
+    // 获取可修改的节点视图
+    ControllerNodeView* get_node_view_mut(NodeId node_id);
+
+    asio::io_context& ioc_;
+
+    // 节点状态
+    mutable std::shared_mutex nodes_mutex_;
+    std::unordered_map<NodeId, ControllerNodeView> nodes_;
+
+    // 事件通道
+    channels::ClientOnlineChannel* client_online_channel_ = nullptr;
+    channels::ClientOfflineChannel* client_offline_channel_ = nullptr;
+    channels::EndpointUpdateChannel* endpoint_update_channel_ = nullptr;
+    channels::RouteChangeChannel* route_change_channel_ = nullptr;
+
+    // 超时参数
+    std::chrono::milliseconds auth_timeout_{10000};
+    std::chrono::milliseconds config_ack_timeout_{5000};
+    std::chrono::milliseconds heartbeat_timeout_{30000};
+    std::chrono::milliseconds p2p_negotiation_timeout_{10000};
+};
+
+// ============================================================================
+// Client 端状态机
+// ============================================================================
+class ClientStateMachine {
+public:
+    explicit ClientStateMachine(asio::io_context& ioc);
+    ~ClientStateMachine() = default;
+
+    // 禁止拷贝
+    ClientStateMachine(const ClientStateMachine&) = delete;
+    ClientStateMachine& operator=(const ClientStateMachine&) = delete;
+
+    // ========================================================================
+    // Channel 设置
+    // ========================================================================
+    void set_phase_channel(channels::ConnectionPhaseChannel* ch) { phase_channel_ = ch; }
+    void set_peer_state_channel(channels::PeerStateChannel* ch) { peer_state_channel_ = ch; }
+
+    // ========================================================================
+    // 超时参数设置
+    // ========================================================================
+    void set_punch_timeout(std::chrono::milliseconds ms) { punch_timeout_ = ms; }
+    void set_keepalive_timeout(std::chrono::milliseconds ms) { keepalive_timeout_ = ms; }
+    void set_retry_interval(std::chrono::milliseconds ms) { retry_interval_ = ms; }
+    void set_resolve_timeout(std::chrono::milliseconds ms) { resolve_timeout_ = ms; }
+    void set_endpoint_upload_timeout(std::chrono::milliseconds ms) { endpoint_upload_timeout_ = ms; }
+
+    // ========================================================================
+    // 自身信息管理
+    // ========================================================================
+
+    // 设置自身 NodeId（认证成功后调用）
+    void set_node_id(NodeId node_id);
+    NodeId node_id() const;
+
+    // 设置网络 ID
+    void set_network_id(NetworkId network_id);
+    NetworkId network_id() const;
+
+    // 设置虚拟 IP
+    void set_virtual_ip(const IPv4Address& ip);
+    IPv4Address virtual_ip() const;
+
+    // ========================================================================
+    // 控制面状态管理
     // ========================================================================
 
     // 设置控制面状态
     void set_control_plane_state(ControlPlaneState state);
+    ControlPlaneState control_plane_state() const;
+    bool is_control_ready() const;
+
+    // ========================================================================
+    // 数据面状态管理
+    // ========================================================================
 
     // 设置数据面状态
-    void set_data_plane_state_client(DataPlaneState state);
+    void set_data_plane_state(DataPlaneState state);
+    DataPlaneState data_plane_state() const;
+    bool has_data_path() const;
+
+    // 根据 Relay 和 P2P 状态自动更新数据面
+    void update_data_plane_state();
+
+    // ========================================================================
+    // 连接阶段管理
+    // ========================================================================
 
     // 设置连接阶段
     void set_connection_phase(ConnectionPhase phase);
+    ConnectionPhase connection_phase() const;
+    bool is_connected() const;
+
+    // 根据控制面和数据面状态自动更新连接阶段
+    void update_connection_phase();
+
+    // ========================================================================
+    // 端点同步管理
+    // ========================================================================
 
     // 设置端点同步状态
     void set_endpoint_sync_state(ClientEndpointSyncState state);
+    ClientEndpointSyncState endpoint_sync_state() const;
+    bool is_endpoint_synced() const;
+
+    // 更新本地端点
+    void update_local_endpoints(const std::vector<Endpoint>& endpoints);
+    std::vector<Endpoint> local_endpoints() const;
+
+    // ========================================================================
+    // 路由同步管理
+    // ========================================================================
 
     // 设置路由同步状态
     void set_route_sync_state(RouteSyncState state);
-
-    // 更新组合连接阶段（基于控制面和数据面）
-    void update_connection_phase();
-
-    // 更新数据面状态（基于 Relay 和 P2P）
-    void update_data_plane_state_client();
+    RouteSyncState route_sync_state() const;
 
     // ========================================================================
-    // Client 端 Relay 管理（支持多 Relay）
+    // Relay 连接管理（支持多 Relay）
     // ========================================================================
 
     // 添加 Relay
@@ -548,7 +586,7 @@ public:
     void set_primary_relay(const std::string& relay_id);
 
     // 设置 Relay 连接状态
-    void set_relay_connection_state(const std::string& relay_id, RelayConnectionState state);
+    void set_relay_state(const std::string& relay_id, RelayConnectionState state);
 
     // 更新 Relay 延迟
     void update_relay_latency(const std::string& relay_id, uint16_t latency_ms);
@@ -558,14 +596,14 @@ public:
     void record_relay_send(const std::string& relay_id);
 
     // 获取 Relay 信息
-    std::optional<NodeState::RelayConnection> get_relay_info(const std::string& relay_id) const;
-    std::vector<NodeState::RelayConnection> get_all_relay_info() const;
+    std::optional<ClientSelfState::RelayConnection> get_relay_info(const std::string& relay_id) const;
+    std::vector<ClientSelfState::RelayConnection> get_all_relay_info() const;
     bool has_connected_relay() const;
     size_t connected_relay_count() const;
     std::optional<std::string> get_primary_relay() const;
 
     // ========================================================================
-    // Client 端对端管理
+    // 对端连接管理
     // ========================================================================
 
     // 添加对端
@@ -574,35 +612,47 @@ public:
     // 移除对端
     void remove_peer(NodeId peer_id);
 
-    // 设置对端链路状态
-    void set_peer_link_state(NodeId peer_id, PeerLinkState state);
+    // 设置对端 P2P 状态
+    void set_peer_p2p_state(NodeId peer_id, P2PConnectionState state);
 
     // 设置对端数据路径
     void set_peer_data_path(NodeId peer_id, PeerDataPath path);
 
-    // 更新对端活跃连接（P2P 成功后调用）
-    void update_peer_active_connection(NodeId peer_id,
-                                        const std::array<uint8_t, 16>& addr,
-                                        uint16_t port,
-                                        bool is_p2p);
+    // 原子设置对端 P2P 状态和数据路径（避免两个状态不一致）
+    // 返回 true 如果状态发生了变化，false 如果状态未变
+    bool set_peer_connection_state(NodeId peer_id, P2PConnectionState p2p_state, PeerDataPath data_path);
+
+    // 发起 P2P 连接
+    void initiate_p2p(NodeId peer_id);
+
+    // 收到对端端点
+    void receive_peer_endpoints(NodeId peer_id, const std::vector<Endpoint>& endpoints);
+
+    // 设置活跃 P2P 端点
+    void set_peer_active_endpoint(NodeId peer_id, const asio::ip::udp::endpoint& endpoint);
 
     // 更新对端延迟
-    void update_peer_latency(NodeId peer_id, uint16_t latency_ms);
+    void update_peer_latency(NodeId peer_id, uint16_t rtt_ms);
 
     // 记录对端收发时间
     void record_peer_recv(NodeId peer_id);
     void record_peer_send(NodeId peer_id);
 
-    // 更新对端链路状态（基于 P2P 和 Relay 状态）
-    void update_peer_link_state(NodeId peer_id);
+    // 标记打洞失败
+    void record_punch_failure(NodeId peer_id);
+
+    // 设置下次重试时间
+    void set_peer_next_retry(NodeId peer_id, uint64_t time);
 
     // 获取对端状态
-    PeerLinkState get_peer_link_state(NodeId peer_id) const;
-    std::optional<NodeState::P2PLink> get_peer_state(NodeId peer_id) const;
-    std::vector<std::pair<NodeId, NodeState::P2PLink>> get_all_peer_states() const;
+    std::optional<ClientSelfState::PeerConnection> get_peer_state(NodeId peer_id) const;
+    std::vector<std::pair<NodeId, ClientSelfState::PeerConnection>> get_all_peer_states() const;
 
-    // 判断对端是否可通过 P2P 发送
-    bool is_peer_p2p_ready(NodeId peer_id) const;
+    // 获取对端 P2P 连接状态
+    P2PConnectionState get_peer_p2p_state(NodeId peer_id) const;
+
+    // 获取对端 RTT（毫秒）
+    uint16_t get_peer_rtt(NodeId peer_id) const;
 
     // 获取需要重试 P2P 的对端列表
     std::vector<NodeId> get_peers_for_retry() const;
@@ -610,71 +660,11 @@ public:
     // 获取需要发送 keepalive 的对端列表
     std::vector<NodeId> get_peers_for_keepalive() const;
 
+    // 判断对端是否可通过 P2P 发送
+    bool is_peer_p2p_ready(NodeId peer_id) const;
+
     // 获取下一个 P2P_INIT 序列号
     uint32_t next_init_seq();
-
-    // ========================================================================
-    // Client 端状态查询
-    // ========================================================================
-
-    // 获取控制面状态
-    ControlPlaneState control_plane_state() const;
-    bool is_control_ready() const;
-
-    // 获取数据面状态
-    DataPlaneState data_plane_state_client() const;
-    bool has_data_path() const;
-
-    // 获取连接阶段
-    ConnectionPhase connection_phase() const;
-    bool is_client_connected() const;
-
-    // 获取端点同步状态
-    ClientEndpointSyncState endpoint_sync_state() const;
-    bool is_endpoint_synced() const;
-
-    // 获取路由同步状态
-    RouteSyncState route_sync_state() const;
-
-    // ========================================================================
-    // 状态查询
-    // ========================================================================
-
-    // 获取节点状态
-    std::optional<NodeState> get_node_state(NodeId node_id) const;
-
-    // 获取所有在线节点
-    std::vector<NodeId> get_online_nodes() const;
-
-    // 获取网络中的节点
-    std::vector<NodeId> get_network_nodes(NetworkId network_id) const;
-
-    // 获取节点端点
-    std::vector<Endpoint> get_node_endpoints(NodeId node_id) const;
-
-    // 获取节点路由
-    std::vector<RouteInfo> get_node_routes(NodeId node_id) const;
-
-    // 获取 P2P 已连接的节点
-    std::vector<NodeId> get_p2p_connected_nodes() const;
-
-    // 获取需要 P2P 重试的节点
-    std::vector<NodeId> get_p2p_retry_nodes() const;
-
-    // 检查节点是否在线
-    bool is_node_online(NodeId node_id) const;
-
-    // 检查是否有 P2P 连接
-    bool has_p2p_connection(NodeId peer_id) const;
-
-    // 检查客户端是否在线（基于会话状态）
-    bool is_client_online(NodeId node_id) const;
-
-    // 检查客户端是否有 Relay 连接
-    bool has_client_relay(NodeId node_id) const;
-
-    // 获取所有在线客户端（基于会话状态）
-    std::vector<NodeId> get_online_clients() const;
 
     // ========================================================================
     // 超时检测
@@ -683,9 +673,6 @@ public:
     // 检查所有超时
     void check_timeouts();
 
-    // 获取当前时间（微秒）
-    static uint64_t now_us();
-
     // ========================================================================
     // 重置
     // ========================================================================
@@ -693,62 +680,46 @@ public:
     // 重置所有状态
     void reset();
 
+    // ========================================================================
+    // 工具方法
+    // ========================================================================
+
+    // 获取当前时间（微秒）
+    static uint64_t now_us();
+
 private:
-    // 内部状态转换（Controller 端用于管理其他节点）
-    void set_connection_state(NodeId node_id, NodeConnectionState new_state);
-    void set_data_channel_state(NodeId node_id, DataChannelState new_state);
-    void set_p2p_state(NodeId node_id, NodeId peer_id, P2PConnectionState new_state);
-    void set_session_state_internal(NodeId node_id, ClientSessionState new_state);
-    void set_relay_state_internal(NodeId node_id, RelaySessionState new_state);
-    void set_p2p_negotiation_phase(NodeId node_id, NodeId peer_id, P2PNegotiationPhase phase);
+    // 发送事件到 channel
+    void notify_phase_change(ConnectionPhase old_phase, ConnectionPhase new_phase);
+    void notify_peer_state_change(NodeId peer_id, P2PConnectionState p2p_state, PeerDataPath data_path);
 
-    // 内部状态转换（Client 端自身状态）
-    void set_control_plane_state_internal(ControlPlaneState new_state);
-    void set_data_plane_state_internal(DataPlaneState new_state);
-    void set_connection_phase_internal(ConnectionPhase new_phase);
-    void set_endpoint_sync_state_internal(ClientEndpointSyncState new_state);
-    void set_route_sync_state_internal(RouteSyncState new_state);
-    void set_relay_connection_state_internal(const std::string& relay_id, RelayConnectionState new_state);
-    void set_peer_link_state_internal(NodeId peer_id, PeerLinkState new_state);
-    void set_peer_data_path_internal(NodeId peer_id, PeerDataPath new_path);
+    // 获取可修改的对端连接
+    ClientSelfState::PeerConnection* get_peer_mut(NodeId peer_id);
 
-    // 更新组合状态（Controller 端）
-    void update_data_channel_state(NodeId node_id);
-    void update_session_state(NodeId node_id);
+    // 获取可修改的 Relay 连接
+    ClientSelfState::RelayConnection* get_relay_mut(const std::string& relay_id);
 
-    // 获取可修改的节点状态
-    NodeState* get_node_state_mut(NodeId node_id);
+    // 根据控制面和数据面状态计算连接阶段
+    ConnectionPhase calculate_connection_phase() const;
 
-    // 获取可修改的 P2P 链路状态（Client 端自身的对端）
-    NodeState::P2PLink* get_peer_link_mut(NodeId peer_id);
+    asio::io_context& ioc_;
 
-    // 获取可修改的 Relay 连接状态（Client 端自身）
-    NodeState::RelayConnection* get_relay_connection_mut(const std::string& relay_id);
+    // 自身状态（分离锁）
+    mutable std::shared_mutex self_mutex_;      // 保护基本字段
+    mutable std::shared_mutex relays_mutex_;    // 保护 relay_connections
+    mutable std::shared_mutex peers_mutex_;     // 保护 peer_connections
 
-    // 自身信息
-    NodeId self_id_;
-    NodeRole self_role_;
+    ClientSelfState state_;
 
-    // 节点状态（Controller 端：管理其他节点的状态）
-    mutable std::shared_mutex nodes_mutex_;
-    std::unordered_map<NodeId, NodeState> node_states_;
+    // 事件通道
+    channels::ConnectionPhaseChannel* phase_channel_ = nullptr;
+    channels::PeerStateChannel* peer_state_channel_ = nullptr;
 
-    // Client 端自身状态
-    NodeState self_state_;  // 存储自身的状态（包括 Relay 连接、对端 P2P 链路等）
-
-    // 回调
-    NodeStateCallbacks callbacks_;
-
-    // 超时参数（毫秒）
-    uint32_t p2p_punch_timeout_ms_ = 10000;
-    uint32_t p2p_keepalive_timeout_ms_ = 3000;
-    uint32_t heartbeat_timeout_ms_ = 30000;
-    uint32_t p2p_retry_interval_ms_ = 60000;
-    uint32_t auth_timeout_ms_ = 10000;
-    uint32_t config_ack_timeout_ms_ = 5000;
-    uint32_t p2p_negotiation_timeout_ms_ = 10000;
-    uint32_t resolve_timeout_ms_ = 5000;        // Client 端：RESOLVING 超时
-    uint32_t endpoint_upload_timeout_ms_ = 5000; // Client 端：端点上报超时
+    // 超时参数
+    std::chrono::milliseconds punch_timeout_{10000};
+    std::chrono::milliseconds keepalive_timeout_{3000};
+    std::chrono::milliseconds retry_interval_{60000};
+    std::chrono::milliseconds resolve_timeout_{5000};
+    std::chrono::milliseconds endpoint_upload_timeout_{5000};
 };
 
-} // namespace edgelink
+}  // namespace edgelink

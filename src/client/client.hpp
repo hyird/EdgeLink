@@ -182,12 +182,12 @@ public:
 
     CryptoEngine& crypto() { return crypto_; }
     PeerManager& peers() { return peers_; }
-    NodeStateMachine& state_machine() { return state_machine_; }
-    const NodeStateMachine& state_machine() const { return state_machine_; }
+    ClientStateMachine& state_machine() { return state_machine_; }
+    const ClientStateMachine& state_machine() const { return state_machine_; }
 
     // 统一状态机状态查询
     ConnectionPhase connection_phase() const { return state_machine_.connection_phase(); }
-    bool is_online() const { return state_machine_.is_client_connected(); }
+    bool is_online() const { return state_machine_.is_connected(); }
 
     // Network routes (received from controller)
     const std::vector<RouteInfo>& routes() const { return routes_; }
@@ -257,6 +257,12 @@ private:
     // P2P state handler - 处理 P2P 状态变化（替代回调）
     asio::awaitable<void> p2p_state_handler();
 
+    // P2P channel handlers
+    asio::awaitable<void> p2p_endpoints_handler();
+    asio::awaitable<void> p2p_init_handler();
+    asio::awaitable<void> p2p_status_handler();
+    asio::awaitable<void> p2p_data_handler();
+
     // Reconnection logic
     asio::awaitable<void> reconnect();
 
@@ -267,7 +273,7 @@ private:
 
     CryptoEngine crypto_;
     PeerManager peers_;
-    NodeStateMachine state_machine_;  // 统一节点状态机
+    ClientStateMachine state_machine_;  // 客户端状态机
 
     std::shared_ptr<ControlChannel> control_;
     std::shared_ptr<RelayChannel> relay_;
@@ -311,7 +317,13 @@ private:
     // P2P support
     std::unique_ptr<EndpointManager> endpoint_mgr_;
     std::unique_ptr<P2PManager> p2p_mgr_;
-    std::unique_ptr<P2PStateChannel> p2p_state_channel_;  // P2P 状态变化通道
+    std::unique_ptr<channels::PeerStateChannel> peer_state_channel_;  // P2P 状态变化通道
+
+    // P2P channels（用于异步通信）
+    std::unique_ptr<P2PChannels::EndpointsReadyChannel> endpoints_ready_channel_;
+    std::unique_ptr<P2PChannels::P2PInitChannel> p2p_init_channel_;
+    std::unique_ptr<P2PChannels::P2PStatusChannel> p2p_status_channel_;
+    std::unique_ptr<P2PChannels::DataChannel> p2p_data_channel_;
 
     // 保存最后上报的端点（用于重连后重发）
     std::vector<Endpoint> last_reported_endpoints_;

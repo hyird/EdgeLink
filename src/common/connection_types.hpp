@@ -101,18 +101,18 @@ enum class PeerDataPath : uint8_t {
 const char* peer_data_path_name(PeerDataPath path);
 
 // ============================================================================
-// 对端连接状态（组合视图）- Client 视角
+// P2P 连接状态 - Client 视角的 P2P 打洞流程
 // ============================================================================
-enum class PeerLinkState : uint8_t {
-    UNKNOWN = 0,        // 未知（未尝试连接）
-    RESOLVING,          // 解析中（等待对端端点）
-    PUNCHING,           // 打洞中（NAT 穿透）
-    P2P_ACTIVE,         // P2P 活跃
-    RELAY_FALLBACK,     // Relay 回退（P2P 失败或超时）
-    OFFLINE,            // 对端离线
+enum class P2PConnectionState : uint8_t {
+    NONE = 0,           // 未发起
+    INITIATING,         // 发起中（发送 P2P_INIT）
+    WAITING_ENDPOINT,   // 等待端点（等待 P2P_ENDPOINT）
+    PUNCHING,           // 打洞中（发送 UDP 打洞包）
+    CONNECTED,          // 已连接
+    FAILED,             // 失败（等待重试）
 };
 
-const char* peer_link_state_name(PeerLinkState state);
+const char* p2p_connection_state_name(P2PConnectionState state);
 
 // ============================================================================
 // Relay 连接状态 - Client 视角（支持多 Relay）

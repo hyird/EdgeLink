@@ -79,17 +79,18 @@ const char* peer_data_path_name(PeerDataPath path) {
     }
 }
 
-const char* peer_link_state_name(PeerLinkState state) {
+const char* p2p_connection_state_name(P2PConnectionState state) {
     switch (state) {
-        case PeerLinkState::UNKNOWN: return "UNKNOWN";
-        case PeerLinkState::RESOLVING: return "RESOLVING";
-        case PeerLinkState::PUNCHING: return "PUNCHING";
-        case PeerLinkState::P2P_ACTIVE: return "P2P_ACTIVE";
-        case PeerLinkState::RELAY_FALLBACK: return "RELAY_FALLBACK";
-        case PeerLinkState::OFFLINE: return "OFFLINE";
+        case P2PConnectionState::NONE: return "NONE";
+        case P2PConnectionState::INITIATING: return "INITIATING";
+        case P2PConnectionState::WAITING_ENDPOINT: return "WAITING_ENDPOINT";
+        case P2PConnectionState::PUNCHING: return "PUNCHING";
+        case P2PConnectionState::CONNECTED: return "CONNECTED";
+        case P2PConnectionState::FAILED: return "FAILED";
         default: return "UNKNOWN";
     }
 }
+
 
 const char* relay_connection_state_name(RelayConnectionState state) {
     switch (state) {

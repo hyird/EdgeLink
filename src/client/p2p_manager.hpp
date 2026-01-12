@@ -2,6 +2,8 @@
 
 #include "common/types.hpp"
 #include "common/message.hpp"
+#include "common/connection_types.hpp"
+#include "common/node_state.hpp"
 #include "client/crypto_engine.hpp"
 #include "client/peer_manager.hpp"
 #include "client/endpoint_manager.hpp"
@@ -20,81 +22,81 @@ namespace asio = boost::asio;
 
 namespace edgelink::client {
 
-// P2P 连接状态
-enum class P2PState : uint8_t {
-    IDLE = 0,           // 未连接
-    RESOLVING = 1,      // 请求端点中 (等待 P2P_ENDPOINT)
-    PUNCHING = 2,       // 打洞中 (发送 P2P_PING)
-    CONNECTED = 3,      // P2P 已建立
-    RELAY_ONLY = 4,     // 仅 Relay (打洞失败，稍后重试)
+// ============================================================================
+// P2P 运行时上下文 - 仅用于网络操作，不代表逻辑状态
+// ============================================================================
+struct PeerP2PContext {
+    // P2P_INIT 序列号
+    uint32_t init_seq = 0;
+
+    // 对端公钥（用于签名验证）
+    std::array<uint8_t, X25519_KEY_SIZE> peer_key{};
+
+    // 对端端点列表（从 P2P_ENDPOINT 消息获取）
+    std::vector<Endpoint> peer_endpoints;
+
+    // 当前活跃端点（P2P 连接成功后）
+    asio::ip::udp::endpoint active_endpoint;
+
+    // 打洞相关
+    uint64_t last_punch_time = 0;   // 开始打洞的时间（微秒）
+    uint32_t punch_count = 0;       // 已发送的打洞包数量
+
+    // 心跳相关
+    uint64_t last_recv_time = 0;    // 最后收到数据的时间（微秒）
+    uint64_t last_send_time = 0;    // 最后发送数据的时间（微秒）
+    uint32_t ping_seq = 0;          // Ping 序列号
+
+    // 标记：是否正在进行打洞操作
+    bool punching = false;
+    // 标记：是否正在等待端点（RESOLVING）
+    bool resolving = false;
 };
 
-// P2P 状态名称
-const char* p2p_state_name(P2PState state);
+// ============================================================================
+// P2P Channels - 用于协程间通信
+// ============================================================================
+struct P2PChannels {
+    // 端点就绪 channel（触发上报给 Controller）
+    using EndpointsReadyChannel = asio::experimental::channel<
+        void(boost::system::error_code, std::vector<Endpoint>)>;
+    EndpointsReadyChannel* endpoints_channel = nullptr;
 
-// P2P 状态变化通道类型（用于协程间通信，替代回调）
-using P2PStateChannel = asio::experimental::channel<
-    void(boost::system::error_code, NodeId, P2PState)>;
+    // P2P_INIT 请求 channel（请求 Controller 转发）
+    using P2PInitChannel = asio::experimental::channel<
+        void(boost::system::error_code, P2PInit)>;
+    P2PInitChannel* init_channel = nullptr;
 
-// P2P 配置
-struct P2PConfig {
-    bool enabled = true;
-    uint16_t bind_port = 0;                     // 0 = 随机端口
-    uint32_t keepalive_interval_sec = 1;        // Keepalive 间隔 (秒，无感知切换需要快速检测)
-    uint32_t keepalive_timeout_sec = 3;         // Keepalive 超时 (秒，不通立马切回 Relay)
-    uint32_t punch_timeout_sec = 10;            // 打洞超时 (秒)
-    uint32_t punch_batch_count = 5;             // 打洞批次数 (EasyTier: 5)
-    uint32_t punch_batch_size = 2;              // 每批发送包数 (EasyTier: 2)
-    uint32_t punch_batch_interval_ms = 400;     // 批次间隔 (毫秒, EasyTier: 400)
-    uint32_t retry_interval_sec = 60;           // 失败后重试间隔 (秒)
-    uint32_t stun_timeout_ms = 5000;            // STUN 查询超时 (毫秒)
-    uint32_t endpoint_refresh_sec = 60;         // 端点刷新间隔 (秒)，定期广播确保同步
-};
+    // P2P_STATUS 上报 channel
+    using P2PStatusChannel = asio::experimental::channel<
+        void(boost::system::error_code, P2PStatusMsg)>;
+    P2PStatusChannel* status_channel = nullptr;
 
-// 对端 P2P 状态
-struct PeerP2PState {
-    P2PState state = P2PState::IDLE;
-    uint32_t init_seq = 0;                      // P2P_INIT 序列号
-    std::array<uint8_t, X25519_KEY_SIZE> peer_key{};  // 对端公钥
-    std::vector<Endpoint> peer_endpoints;       // 对端端点列表
-    asio::ip::udp::endpoint active_endpoint;    // 当前活跃端点
-    uint64_t last_punch_time = 0;               // 上次打洞时间
-    uint32_t punch_count = 0;                   // 打洞次数
-    uint64_t last_recv_time = 0;                // 上次收到数据时间
-    uint64_t last_send_time = 0;                // 上次发送数据时间
-    uint32_t ping_seq = 0;                      // Ping 序列号
-    uint16_t latency_ms = 0;                    // RTT 延迟
-};
-
-// P2P 回调（简化版：状态变化通过 channel 传递，不再使用回调）
-struct P2PCallbacks {
-    // 收到 P2P 数据
-    std::function<void(NodeId peer_id, std::span<const uint8_t> data)> on_data;
-    // 请求发送 P2P_INIT (通过 Control Channel) - 同步版本
-    std::function<void(const P2PInit& init)> on_send_p2p_init;
-    // 请求发送 P2P_STATUS (通过 Control Channel)
-    std::function<void(const P2PStatusMsg& status)> on_send_p2p_status;
-    // 端点已就绪，需要上报给 Controller - 同步版本
-    std::function<void(const std::vector<Endpoint>& endpoints)> on_endpoints_ready;
-    // 端点上报并等待确认 - 异步版本，用于确保消息顺序
-    std::function<asio::awaitable<bool>(const std::vector<Endpoint>& endpoints)> on_endpoints_ready_async;
-    // 发送 P2P_INIT 并等待 - 异步版本
-    std::function<asio::awaitable<void>(const P2PInit& init)> on_send_p2p_init_async;
+    // P2P 数据接收 channel
+    using DataChannel = asio::experimental::channel<
+        void(boost::system::error_code, NodeId, std::vector<uint8_t>)>;
+    DataChannel* data_channel = nullptr;
 };
 
 /**
  * P2PManager - P2P NAT 穿透管理器
  *
  * 职责:
- * - 管理每个对端的 P2P 连接状态机
- * - 发起和处理 UDP 打洞
+ * - 管理 UDP socket 和端点发现
+ * - 执行 NAT 打洞操作
  * - 维护 P2P Keepalive
  * - 发送和接收加密的 P2P 数据
+ *
+ * 注意：
+ * - 逻辑状态（P2PConnectionState, PeerDataPath）由 ClientStateMachine 管理
+ * - P2PManager 只维护网络操作所需的运行时上下文
+ * - 状态变化通过 channel 异步通知
  */
 class P2PManager {
 public:
     P2PManager(asio::io_context& ioc, CryptoEngine& crypto,
-               PeerManager& peers, EndpointManager& endpoints);
+               PeerManager& peers, EndpointManager& endpoints,
+               ClientStateMachine& state_machine);
     ~P2PManager();
 
     // ========================================================================
@@ -104,11 +106,8 @@ public:
     // 设置配置
     void set_config(const P2PConfig& config);
 
-    // 设置回调
-    void set_callbacks(P2PCallbacks callbacks);
-
-    // 设置状态变化通道（替代 on_state_change 回调）
-    void set_state_channel(P2PStateChannel* channel) { state_channel_ = channel; }
+    // 设置 channels
+    void set_channels(P2PChannels channels);
 
     // 启动 P2P 管理器
     asio::awaitable<bool> start();
@@ -123,12 +122,8 @@ public:
     // P2P 连接管理
     // ========================================================================
 
-    // 发起 P2P 连接 (向 Controller 请求对端端点)
-    // 异步版本：等待端点上报确认后再发送 P2P_INIT，确保消息顺序
-    asio::awaitable<void> connect_peer_async(NodeId peer_id);
-
-    // 同步版本：立即返回，内部启动异步连接
-    void connect_peer(NodeId peer_id);
+    // 发起 P2P 连接（异步，需要先上报端点再发送 P2P_INIT）
+    asio::awaitable<void> connect_peer(NodeId peer_id);
 
     // 断开 P2P 连接
     void disconnect_peer(NodeId peer_id);
@@ -136,17 +131,11 @@ public:
     // 处理 Controller 返回的 P2P_ENDPOINT
     void handle_p2p_endpoint(const P2PEndpointMsg& msg);
 
-    // 获取对端 P2P 状态
-    std::optional<PeerP2PState> get_peer_state(NodeId peer_id) const;
-
-    // 获取所有对端 P2P 状态
-    std::vector<std::pair<NodeId, PeerP2PState>> get_all_peer_states() const;
-
     // ========================================================================
     // 数据发送
     // ========================================================================
 
-    // 发送 P2P 数据 (如果已连接)
+    // 发送 P2P 数据（如果已连接）
     // 返回 true 表示通过 P2P 发送，false 表示需要通过 Relay
     asio::awaitable<bool> send_data(NodeId peer_id, std::span<const uint8_t> data);
 
@@ -157,7 +146,7 @@ public:
     // 端点信息
     // ========================================================================
 
-    // 获取我方所有端点 (供 P2P_ENDPOINT 使用)
+    // 获取我方所有端点
     std::vector<Endpoint> our_endpoints() const;
 
 private:
@@ -167,19 +156,19 @@ private:
     // Keepalive 循环
     asio::awaitable<void> keepalive_loop();
 
-    // 打洞循环 (超时检测)
-    asio::awaitable<void> punch_loop();
+    // 打洞超时检测循环
+    asio::awaitable<void> punch_timeout_loop();
 
-    // 执行分批打洞 (EasyTier 风格：每批 2 个包，共 5 批，间隔 400ms)
+    // 执行分批打洞
     asio::awaitable<void> do_punch_batches(NodeId peer_id);
 
     // 重试循环
     asio::awaitable<void> retry_loop();
 
-    // 端点刷新循环 (定期重新查询 STUN 并上报端点)
+    // 端点刷新循环
     asio::awaitable<void> endpoint_refresh_loop();
 
-    // 刷新端点 (重新查询 STUN 并上报给 Controller)
+    // 刷新端点
     asio::awaitable<void> refresh_endpoints();
 
     // 处理收到的 UDP 数据
@@ -214,48 +203,42 @@ private:
     // 发送 P2P_KEEPALIVE
     asio::awaitable<void> send_p2p_keepalive(NodeId peer_id);
 
-    // 更新对端状态
-    void set_peer_state(NodeId peer_id, P2PState state);
+    // 上报 P2P 状态给 Controller（通过 channel）
+    void report_p2p_status(NodeId peer_id, bool success);
 
-    // 通知状态变化（通过 channel）
-    void notify_state_change(NodeId peer_id, P2PState state);
+    // 通知端点就绪（通过 channel）
+    void notify_endpoints_ready(const std::vector<Endpoint>& endpoints);
 
-    // 上报 P2P 状态给 Controller
-    void report_p2p_status(NodeId peer_id);
-
-    // 根据端点查找对端
-    std::optional<NodeId> find_peer_by_endpoint(const asio::ip::udp::endpoint& ep) const;
+    // 请求发送 P2P_INIT（通过 channel）
+    void request_p2p_init(const P2PInit& init);
 
     // 将 Endpoint 转换为 udp::endpoint
     static std::optional<asio::ip::udp::endpoint> to_udp_endpoint(const Endpoint& ep);
 
-    // 获取当前时间 (微秒)
+    // 获取当前时间（微秒）
     static uint64_t now_us();
 
     asio::io_context& ioc_;
     CryptoEngine& crypto_;
     PeerManager& peers_;
     EndpointManager& endpoints_;
+    ClientStateMachine& state_machine_;
 
     P2PConfig config_;
-    P2PCallbacks callbacks_;
-    P2PStateChannel* state_channel_ = nullptr;  // 状态变化通道（由 Client 提供）
+    P2PChannels channels_;
 
     std::atomic<bool> running_{false};
-    std::atomic<bool> starting_{false};  // 正在启动中，防止重复进入 start()
+    std::atomic<bool> starting_{false};
 
-    // 对端 P2P 状态
-    mutable std::shared_mutex states_mutex_;
-    std::unordered_map<NodeId, PeerP2PState> peer_states_;
+    // 对端 P2P 运行时上下文（仅用于网络操作）
+    mutable std::shared_mutex contexts_mutex_;
+    std::unordered_map<NodeId, PeerP2PContext> peer_contexts_;
 
     // 定时器
     asio::steady_timer keepalive_timer_;
     asio::steady_timer punch_timer_;
     asio::steady_timer retry_timer_;
     asio::steady_timer endpoint_refresh_timer_;
-
-    // 端点刷新跟踪
-    uint64_t last_endpoint_refresh_time_ = 0;  // 上次端点刷新时间 (微秒)
 
     // P2P_INIT 序列号
     std::atomic<uint32_t> init_seq_{0};

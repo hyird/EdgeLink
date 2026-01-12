@@ -2,9 +2,9 @@
 
 #include "common/types.hpp"
 #include <boost/asio.hpp>
+#include <map>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -56,8 +56,8 @@ private:
     Client& client_;
     bool running_ = false;
 
-    // 已添加到系统的路由 (用于清理)
-    std::set<std::string> managed_routes_;
+    // 已添加到系统的路由 (用于清理时能获取完整 RouteInfo)
+    std::map<std::string, RouteInfo> managed_routes_;
     mutable std::mutex mutex_;
 
     // TUN 接口信息

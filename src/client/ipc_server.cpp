@@ -270,18 +270,25 @@ std::string IpcServer::handle_peers(bool online_only) {
         info.virtual_ip = p.info.virtual_ip.to_string();
         info.name = p.info.name;
         info.online = p.info.online;
-        info.latency_ms = p.latency_ms;
 
-        switch (p.connection_status) {
-            case P2PStatus::P2P:
-                info.connection_status = "p2p";
-                break;
-            case P2PStatus::RELAY_ONLY:
-                info.connection_status = "relay";
-                break;
-            default:
-                info.connection_status = "disconnected";
-                break;
+        // 从状态机获取连接状态和延迟
+        auto peer_state = client_.state_machine().get_peer_state(p.info.node_id);
+        if (peer_state) {
+            info.latency_ms = peer_state->rtt_ms;
+            switch (peer_state->data_path) {
+                case PeerDataPath::P2P:
+                    info.connection_status = "p2p";
+                    break;
+                case PeerDataPath::RELAY:
+                    info.connection_status = "relay";
+                    break;
+                default:
+                    info.connection_status = "disconnected";
+                    break;
+            }
+        } else {
+            info.latency_ms = 0;
+            info.connection_status = "disconnected";
         }
 
         peers.push_back(std::move(info));

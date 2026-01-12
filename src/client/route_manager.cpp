@@ -2,6 +2,7 @@
 #include "client/client.hpp"
 #include "common/logger.hpp"
 
+#include <set>
 #include <sstream>
 
 #ifdef _WIN32
@@ -79,14 +80,23 @@ void RouteManager::apply_route_update(const std::vector<RouteInfo>& add_routes,
                                       const std::vector<RouteInfo>& del_routes) {
     if (!running_) return;
 
+    std::lock_guard lock(mutex_);
+
     // 删除路由
     for (const auto& route : del_routes) {
-        del_system_route(route);
+        if (del_system_route(route)) {
+            managed_routes_.erase(route_key(route));
+        }
     }
 
     // 添加路由
     for (const auto& route : add_routes) {
-        add_system_route(route);
+        std::string key = route_key(route);
+        if (managed_routes_.find(key) == managed_routes_.end()) {
+            if (add_system_route(route)) {
+                managed_routes_.emplace(key, route);
+            }
+        }
     }
 }
 
@@ -103,10 +113,9 @@ void RouteManager::sync_routes(const std::vector<RouteInfo>& routes) {
 
     // 删除不再需要的路由
     for (auto it = managed_routes_.begin(); it != managed_routes_.end(); ) {
-        if (new_routes.find(*it) == new_routes.end()) {
-            // 解析并删除
-            // route_key 格式: "prefix/len->gateway_node"
-            // 这里简化处理，直接从 routes 参数找
+        if (new_routes.find(it->first) == new_routes.end()) {
+            // 从系统中删除路由
+            del_system_route(it->second);
             it = managed_routes_.erase(it);
         } else {
             ++it;
@@ -118,7 +127,7 @@ void RouteManager::sync_routes(const std::vector<RouteInfo>& routes) {
         std::string key = route_key(route);
         if (managed_routes_.find(key) == managed_routes_.end()) {
             if (add_system_route(route)) {
-                managed_routes_.insert(key);
+                managed_routes_.emplace(key, route);
             }
         }
     }
@@ -129,9 +138,10 @@ void RouteManager::cleanup_all() {
 
     log().debug("Cleaning up {} managed routes", managed_routes_.size());
 
-    // 由于我们只存储了 key，清理时需要遍历当前路由列表
-    // 这里简化实现：依赖 stop() 时 TUN 设备关闭会自动删除路由
-    // 更完整的实现需要保存完整的 RouteInfo
+    // 删除所有已添加的系统路由
+    for (const auto& [key, route] : managed_routes_) {
+        del_system_route(route);
+    }
 
     managed_routes_.clear();
 }

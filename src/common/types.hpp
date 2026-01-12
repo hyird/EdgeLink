@@ -1,17 +1,19 @@
 #pragma once
 
+#include "common/constants.hpp"
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace edgelink {
 
-// Protocol version
-inline constexpr uint8_t PROTOCOL_VERSION = 0x02;
-
-// Magic number for P2P UDP packets
-inline constexpr uint32_t P2P_MAGIC = 0x454C4E4B; // "ELNK"
+// ============================================================================
+// 保留旧名称的兼容别名（逐步迁移后删除）
+// ============================================================================
+inline constexpr uint8_t PROTOCOL_VERSION = protocol::VERSION;
+inline constexpr uint32_t P2P_MAGIC = protocol::P2P_MAGIC;
 
 // Core ID types
 using NodeId = uint32_t;
@@ -19,14 +21,14 @@ using NetworkId = uint32_t;
 using ServerId = uint32_t;
 using MessageId = uint32_t;
 
-// Key sizes
-inline constexpr size_t ED25519_PUBLIC_KEY_SIZE = 32;
-inline constexpr size_t ED25519_PRIVATE_KEY_SIZE = 64;
-inline constexpr size_t ED25519_SIGNATURE_SIZE = 64;
-inline constexpr size_t X25519_KEY_SIZE = 32;
-inline constexpr size_t SESSION_KEY_SIZE = 32;
-inline constexpr size_t CHACHA20_NONCE_SIZE = 12;
-inline constexpr size_t POLY1305_TAG_SIZE = 16;
+// 密钥大小别名（兼容旧代码）
+inline constexpr size_t ED25519_PUBLIC_KEY_SIZE = crypto::ED25519_PUBLIC_KEY_SIZE;
+inline constexpr size_t ED25519_PRIVATE_KEY_SIZE = crypto::ED25519_PRIVATE_KEY_SIZE;
+inline constexpr size_t ED25519_SIGNATURE_SIZE = crypto::ED25519_SIGNATURE_SIZE;
+inline constexpr size_t X25519_KEY_SIZE = crypto::X25519_KEY_SIZE;
+inline constexpr size_t SESSION_KEY_SIZE = crypto::SESSION_KEY_SIZE;
+inline constexpr size_t CHACHA20_NONCE_SIZE = crypto::CHACHA20_NONCE_SIZE;
+inline constexpr size_t POLY1305_TAG_SIZE = crypto::POLY1305_TAG_SIZE;
 
 // Key structures
 struct MachineKey {
@@ -308,5 +310,45 @@ struct LatencyEntry {
 
 // Get frame type name for logging
 const char* frame_type_name(FrameType type);
+
+// ============================================================================
+// 统一 P2P 配置（唯一定义，供 Client 和 P2PManager 使用）
+// ============================================================================
+struct P2PConfig {
+    bool enabled = true;                                                // 启用 P2P 直连
+    uint16_t bind_port = 0;                                             // UDP 绑定端口（0 = 随机）
+    std::chrono::seconds keepalive_interval{1};                         // Keepalive 间隔
+    std::chrono::seconds keepalive_timeout{3};                          // Keepalive 超时
+    std::chrono::seconds punch_timeout{10};                             // 打洞超时
+    uint32_t punch_batch_count = defaults::PUNCH_BATCH_COUNT;           // 打洞批次数
+    uint32_t punch_batch_size = defaults::PUNCH_BATCH_SIZE;             // 每批发送包数
+    std::chrono::milliseconds punch_batch_interval{defaults::PUNCH_BATCH_INTERVAL};  // 批次间隔
+    std::chrono::seconds retry_interval{60};                            // 失败后重试间隔
+    std::chrono::milliseconds stun_timeout{5000};                       // STUN 查询超时
+    std::chrono::seconds endpoint_refresh_interval{60};                 // 端点刷新间隔
+
+    // 从旧格式的秒数构造
+    static P2PConfig from_seconds(
+        bool enabled, uint16_t bind_port,
+        uint32_t keepalive_interval_sec, uint32_t keepalive_timeout_sec,
+        uint32_t punch_timeout_sec, uint32_t punch_batch_count, uint32_t punch_batch_size,
+        uint32_t punch_batch_interval_ms, uint32_t retry_interval_sec,
+        uint32_t stun_timeout_ms, uint32_t endpoint_refresh_sec
+    ) {
+        P2PConfig cfg;
+        cfg.enabled = enabled;
+        cfg.bind_port = bind_port;
+        cfg.keepalive_interval = std::chrono::seconds(keepalive_interval_sec);
+        cfg.keepalive_timeout = std::chrono::seconds(keepalive_timeout_sec);
+        cfg.punch_timeout = std::chrono::seconds(punch_timeout_sec);
+        cfg.punch_batch_count = punch_batch_count;
+        cfg.punch_batch_size = punch_batch_size;
+        cfg.punch_batch_interval = std::chrono::milliseconds(punch_batch_interval_ms);
+        cfg.retry_interval = std::chrono::seconds(retry_interval_sec);
+        cfg.stun_timeout = std::chrono::milliseconds(stun_timeout_ms);
+        cfg.endpoint_refresh_interval = std::chrono::seconds(endpoint_refresh_sec);
+        return cfg;
+    }
+};
 
 } // namespace edgelink

@@ -2,7 +2,6 @@
 
 #include "common/types.hpp"
 #include "client/crypto_engine.hpp"
-#include <functional>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -10,72 +9,68 @@
 
 namespace edgelink::client {
 
-// Extended peer info with runtime state
+// 简化的 Peer 结构 - 只包含基本信息和会话密钥状态
+// 连接状态（P2PConnectionState, PeerDataPath）由 ClientStateMachine 管理
 struct Peer {
-    PeerInfo info;
-    bool session_key_derived = false;
-    P2PStatus connection_status = P2PStatus::DISCONNECTED;
-    uint64_t last_seen = 0;
-    uint16_t latency_ms = 0;
+    PeerInfo info;                      // 基本信息（从 Controller 获取）
+    bool session_key_derived = false;   // 是否已派生会话密钥
+    uint64_t last_seen = 0;             // 最后活跃时间（毫秒时间戳）
 };
 
-// Peer state change callback
-using PeerChangeCallback = std::function<void(NodeId peer_id, bool online)>;
-
-// Peer manager - manages peer info and state
+// Peer 管理器 - 负责管理对端信息和会话密钥
+// 注意：连接状态管理已移至 ClientStateMachine
 class PeerManager {
 public:
     explicit PeerManager(CryptoEngine& crypto);
 
     // ========================================================================
-    // Peer Management
+    // Peer 管理
     // ========================================================================
 
-    // Update peers from CONFIG
+    // 从 CONFIG 消息更新所有 peer（清空现有数据）
     void update_from_config(const std::vector<PeerInfo>& peers);
 
-    // Update peer from CONFIG_UPDATE
+    // 从 CONFIG_UPDATE 消息增量更新
     void add_peer(const PeerInfo& peer);
     void remove_peer(NodeId peer_id);
     void update_peer_online(NodeId peer_id, bool online);
 
-    // Get peer info
+    // 获取 peer 信息
     std::optional<Peer> get_peer(NodeId peer_id) const;
     std::vector<Peer> get_all_peers() const;
     std::vector<Peer> get_online_peers() const;
 
-    // Get peer by virtual IP
+    // 通过虚拟 IP 查找 peer
     std::optional<Peer> get_peer_by_ip(const IPv4Address& ip) const;
 
-    // Get peer IP by node ID (for logging)
+    // 获取 peer IP 字符串（用于日志）
     std::string get_peer_ip_str(NodeId peer_id) const;
 
-    // Check if peer exists
+    // 检查 peer 是否存在
     bool has_peer(NodeId peer_id) const;
 
+    // 获取 peer 的 node_key（用于 P2P 加密）
+    std::optional<std::array<uint8_t, X25519_KEY_SIZE>> get_peer_node_key(NodeId peer_id) const;
+
     // ========================================================================
-    // Session Key Management
+    // 会话密钥管理
     // ========================================================================
 
-    // Ensure session key is derived for a peer (lazy derivation)
+    // 确保已为 peer 派生会话密钥（懒加载）
     bool ensure_session_key(NodeId peer_id);
 
+    // 检查是否已派生会话密钥
+    bool has_session_key(NodeId peer_id) const;
+
     // ========================================================================
-    // Connection Status
+    // 活跃时间
     // ========================================================================
 
-    void set_connection_status(NodeId peer_id, P2PStatus status);
-    void set_latency(NodeId peer_id, uint16_t latency_ms);
+    // 更新最后活跃时间
     void update_last_seen(NodeId peer_id);
 
     // ========================================================================
-    // Callbacks
-    // ========================================================================
-
-    void set_peer_change_callback(PeerChangeCallback callback);
-
-    // ========================================================================
-    // Statistics
+    // 统计
     // ========================================================================
 
     size_t peer_count() const;
@@ -87,10 +82,8 @@ private:
     mutable std::shared_mutex mutex_;
     std::unordered_map<NodeId, Peer> peers_;
 
-    // Virtual IP to node ID mapping for fast lookup
+    // 虚拟 IP 到 NodeId 的映射（快速查找）
     std::unordered_map<uint32_t, NodeId> ip_to_node_;
-
-    PeerChangeCallback on_peer_change_;
 };
 
 } // namespace edgelink::client

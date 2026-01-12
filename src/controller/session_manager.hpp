@@ -111,20 +111,18 @@ public:
     void clear_node_endpoints(NodeId node_id);
 
     // ========================================================================
-    // 客户端状态机（每个 Client 独立的状态机）
+    // 客户端状态机（统一管理所有客户端）
     // ========================================================================
 
-    // 获取或创建客户端状态机
-    NodeStateMachine* get_or_create_state_machine(NodeId node_id, NetworkId network_id);
+    // 获取状态机（用于直接操作）
+    ControllerStateMachine& state_machine() { return state_machine_; }
+    const ControllerStateMachine& state_machine() const { return state_machine_; }
 
-    // 获取客户端状态机
-    NodeStateMachine* get_state_machine(NodeId node_id);
+    // 添加客户端到状态机
+    void add_client(NodeId node_id, NetworkId network_id);
 
-    // 移除客户端状态机
-    void remove_state_machine(NodeId node_id);
-
-    // 处理节点事件
-    void handle_node_event(NodeId node_id, NodeEvent event);
+    // 移除客户端
+    void remove_client(NodeId node_id);
 
     // 处理端点更新
     void handle_endpoint_update(NodeId node_id, const std::vector<Endpoint>& endpoints);
@@ -142,7 +140,7 @@ public:
     void handle_p2p_status(NodeId node_id, NodeId peer_id, bool success);
 
     // 获取客户端状态
-    std::optional<NodeState> get_client_state(NodeId node_id) const;
+    std::optional<ControllerNodeView> get_client_state(NodeId node_id) const;
 
     // 获取在线客户端列表
     std::vector<NodeId> get_online_clients() const;
@@ -151,8 +149,11 @@ public:
     void check_timeouts();
 
 private:
-    // 设置状态机回调
-    void setup_state_machine_callbacks(NodeStateMachine* sm, NodeId node_id);
+    // Channel 事件处理协程
+    asio::awaitable<void> client_online_handler();
+    asio::awaitable<void> client_offline_handler();
+    asio::awaitable<void> endpoint_update_handler();
+    asio::awaitable<void> route_change_handler();
     asio::io_context& ioc_;
     Database& db_;
     JwtUtil& jwt_;
@@ -180,9 +181,14 @@ private:
     mutable std::shared_mutex endpoints_mutex_;
     std::unordered_map<NodeId, std::vector<Endpoint>> node_endpoints_;
 
-    // 客户端状态机 (每个 client 一个独立的状态机)
-    mutable std::shared_mutex state_machines_mutex_;
-    std::unordered_map<NodeId, std::unique_ptr<NodeStateMachine>> client_state_machines_;
+    // 客户端状态机（统一管理所有客户端）
+    ControllerStateMachine state_machine_;
+
+    // 事件通道
+    std::unique_ptr<channels::ClientOnlineChannel> client_online_channel_;
+    std::unique_ptr<channels::ClientOfflineChannel> client_offline_channel_;
+    std::unique_ptr<channels::EndpointUpdateChannel> endpoint_update_channel_;
+    std::unique_ptr<channels::RouteChangeChannel> route_change_channel_;
 };
 
 } // namespace edgelink::controller
