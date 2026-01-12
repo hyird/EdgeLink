@@ -287,9 +287,9 @@ std::vector<ConfigChange> ConfigApplier::apply(const ClientConfig& old_cfg, cons
     if (old_cfg.p2p.keepalive_interval != new_cfg.p2p.keepalive_interval) {
         ConfigChange change;
         change.key = "p2p.keepalive_interval";
-        change.old_value = std::to_string(old_cfg.p2p.keepalive_interval);
-        change.new_value = std::to_string(new_cfg.p2p.keepalive_interval);
-        change.applied = apply_p2p_keepalive_interval(new_cfg.p2p.keepalive_interval);
+        change.old_value = std::to_string(old_cfg.p2p.keepalive_interval.count());
+        change.new_value = std::to_string(new_cfg.p2p.keepalive_interval.count());
+        change.applied = apply_p2p_keepalive_interval(static_cast<int>(new_cfg.p2p.keepalive_interval.count()));
         change.restart_required = false;
         changes.push_back(change);
     }
@@ -297,9 +297,9 @@ std::vector<ConfigChange> ConfigApplier::apply(const ClientConfig& old_cfg, cons
     if (old_cfg.p2p.keepalive_timeout != new_cfg.p2p.keepalive_timeout) {
         ConfigChange change;
         change.key = "p2p.keepalive_timeout";
-        change.old_value = std::to_string(old_cfg.p2p.keepalive_timeout);
-        change.new_value = std::to_string(new_cfg.p2p.keepalive_timeout);
-        change.applied = apply_p2p_keepalive_timeout(new_cfg.p2p.keepalive_timeout);
+        change.old_value = std::to_string(old_cfg.p2p.keepalive_timeout.count());
+        change.new_value = std::to_string(new_cfg.p2p.keepalive_timeout.count());
+        change.applied = apply_p2p_keepalive_timeout(static_cast<int>(new_cfg.p2p.keepalive_timeout.count()));
         change.restart_required = false;
         changes.push_back(change);
     }
@@ -307,9 +307,9 @@ std::vector<ConfigChange> ConfigApplier::apply(const ClientConfig& old_cfg, cons
     if (old_cfg.p2p.punch_timeout != new_cfg.p2p.punch_timeout) {
         ConfigChange change;
         change.key = "p2p.punch_timeout";
-        change.old_value = std::to_string(old_cfg.p2p.punch_timeout);
-        change.new_value = std::to_string(new_cfg.p2p.punch_timeout);
-        change.applied = apply_p2p_punch_timeout(new_cfg.p2p.punch_timeout);
+        change.old_value = std::to_string(old_cfg.p2p.punch_timeout.count());
+        change.new_value = std::to_string(new_cfg.p2p.punch_timeout.count());
+        change.applied = apply_p2p_punch_timeout(static_cast<int>(new_cfg.p2p.punch_timeout.count()));
         change.restart_required = false;
         changes.push_back(change);
     }
@@ -337,9 +337,9 @@ std::vector<ConfigChange> ConfigApplier::apply(const ClientConfig& old_cfg, cons
     if (old_cfg.p2p.punch_batch_interval != new_cfg.p2p.punch_batch_interval) {
         ConfigChange change;
         change.key = "p2p.punch_batch_interval";
-        change.old_value = std::to_string(old_cfg.p2p.punch_batch_interval);
-        change.new_value = std::to_string(new_cfg.p2p.punch_batch_interval);
-        change.applied = apply_p2p_punch_batch_interval(new_cfg.p2p.punch_batch_interval);
+        change.old_value = std::to_string(old_cfg.p2p.punch_batch_interval.count());
+        change.new_value = std::to_string(new_cfg.p2p.punch_batch_interval.count());
+        change.applied = apply_p2p_punch_batch_interval(static_cast<int>(new_cfg.p2p.punch_batch_interval.count()));
         change.restart_required = false;
         changes.push_back(change);
     }
@@ -347,9 +347,9 @@ std::vector<ConfigChange> ConfigApplier::apply(const ClientConfig& old_cfg, cons
     if (old_cfg.p2p.retry_interval != new_cfg.p2p.retry_interval) {
         ConfigChange change;
         change.key = "p2p.retry_interval";
-        change.old_value = std::to_string(old_cfg.p2p.retry_interval);
-        change.new_value = std::to_string(new_cfg.p2p.retry_interval);
-        change.applied = apply_p2p_retry_interval(new_cfg.p2p.retry_interval);
+        change.old_value = std::to_string(old_cfg.p2p.retry_interval.count());
+        change.new_value = std::to_string(new_cfg.p2p.retry_interval.count());
+        change.applied = apply_p2p_retry_interval(static_cast<int>(new_cfg.p2p.retry_interval.count()));
         change.restart_required = false;
         changes.push_back(change);
     }
@@ -357,9 +357,9 @@ std::vector<ConfigChange> ConfigApplier::apply(const ClientConfig& old_cfg, cons
     if (old_cfg.p2p.stun_timeout != new_cfg.p2p.stun_timeout) {
         ConfigChange change;
         change.key = "p2p.stun_timeout";
-        change.old_value = std::to_string(old_cfg.p2p.stun_timeout);
-        change.new_value = std::to_string(new_cfg.p2p.stun_timeout);
-        change.applied = apply_p2p_stun_timeout(new_cfg.p2p.stun_timeout);
+        change.old_value = std::to_string(old_cfg.p2p.stun_timeout.count());
+        change.new_value = std::to_string(new_cfg.p2p.stun_timeout.count());
+        change.applied = apply_p2p_stun_timeout(static_cast<int>(new_cfg.p2p.stun_timeout.count()));
         change.restart_required = false;
         changes.push_back(change);
     }
@@ -367,9 +367,9 @@ std::vector<ConfigChange> ConfigApplier::apply(const ClientConfig& old_cfg, cons
     if (old_cfg.p2p.endpoint_refresh_interval != new_cfg.p2p.endpoint_refresh_interval) {
         ConfigChange change;
         change.key = "p2p.endpoint_refresh_interval";
-        change.old_value = std::to_string(old_cfg.p2p.endpoint_refresh_interval);
-        change.new_value = std::to_string(new_cfg.p2p.endpoint_refresh_interval);
-        change.applied = apply_p2p_endpoint_refresh_interval(new_cfg.p2p.endpoint_refresh_interval);
+        change.old_value = std::to_string(old_cfg.p2p.endpoint_refresh_interval.count());
+        change.new_value = std::to_string(new_cfg.p2p.endpoint_refresh_interval.count());
+        change.applied = apply_p2p_endpoint_refresh_interval(static_cast<int>(new_cfg.p2p.endpoint_refresh_interval.count()));
         change.restart_required = false;
         changes.push_back(change);
     }

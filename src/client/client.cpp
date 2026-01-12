@@ -62,20 +62,8 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
     p2p_channels.data_channel = p2p_data_channel_.get();
     p2p_mgr_->set_channels(p2p_channels);
 
-    // 设置 P2P 配置
-    P2PConfig p2p_cfg;
-    p2p_cfg.enabled = config_.p2p.enabled;
-    p2p_cfg.bind_port = config_.p2p.bind_port;
-    p2p_cfg.keepalive_interval = std::chrono::seconds(config_.p2p.keepalive_interval);
-    p2p_cfg.keepalive_timeout = std::chrono::seconds(config_.p2p.keepalive_timeout);
-    p2p_cfg.punch_timeout = std::chrono::seconds(config_.p2p.punch_timeout);
-    p2p_cfg.punch_batch_count = config_.p2p.punch_batch_count;
-    p2p_cfg.punch_batch_size = config_.p2p.punch_batch_size;
-    p2p_cfg.punch_batch_interval = std::chrono::milliseconds(config_.p2p.punch_batch_interval);
-    p2p_cfg.retry_interval = std::chrono::seconds(config_.p2p.retry_interval);
-    p2p_cfg.stun_timeout = std::chrono::milliseconds(config_.p2p.stun_timeout);
-    p2p_cfg.endpoint_refresh_interval = std::chrono::seconds(config_.p2p.endpoint_refresh_interval);
-    p2p_mgr_->set_config(p2p_cfg);
+    // 设置 P2P 配置（直接使用 config_.p2p，已经是统一的 P2PConfig 类型）
+    p2p_mgr_->set_config(config_.p2p);
 
     // Setup SSL context
     ssl_ctx_.set_default_verify_paths();
@@ -1738,10 +1726,10 @@ void Client::clear_system_routes() {
 }
 
 void Client::setup_state_machine() {
-    // 配置状态机超时参数
-    state_machine_.set_punch_timeout(std::chrono::milliseconds(config_.p2p.punch_timeout * 1000));
-    state_machine_.set_keepalive_timeout(std::chrono::milliseconds(config_.p2p.keepalive_timeout * 1000));
-    state_machine_.set_retry_interval(std::chrono::milliseconds(config_.p2p.retry_interval * 1000));
+    // 配置状态机超时参数（直接使用 chrono 类型，自动转换）
+    state_machine_.set_punch_timeout(std::chrono::duration_cast<std::chrono::milliseconds>(config_.p2p.punch_timeout));
+    state_machine_.set_keepalive_timeout(std::chrono::duration_cast<std::chrono::milliseconds>(config_.p2p.keepalive_timeout));
+    state_machine_.set_retry_interval(std::chrono::duration_cast<std::chrono::milliseconds>(config_.p2p.retry_interval));
 
     // 注意：状态变化现在通过 channel 通知，在 p2p_state_handler() 中处理
     // ClientState 的同步在回调中手动处理

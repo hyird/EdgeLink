@@ -150,8 +150,7 @@ asio::awaitable<void> P2PManager::connect_peer(NodeId peer_id) {
         std::unique_lock lock(contexts_mutex_);
         auto& ctx = peer_contexts_[peer_id];
         ctx.init_seq = ++init_seq_;
-        ctx.resolving = true;
-        ctx.punching = false;
+        // 状态由 state_machine_ 管理
         ctx.punch_count = 0;
         ctx.last_punch_time = now_us();
         init_seq = ctx.init_seq;
@@ -241,8 +240,6 @@ void P2PManager::handle_p2p_endpoint(const P2PEndpointMsg& msg) {
         // 保存对端信息
         ctx.peer_key = msg.peer_key;
         ctx.peer_endpoints = msg.endpoints;
-        ctx.punching = true;
-        ctx.resolving = false;
         ctx.punch_count = 0;
         ctx.last_punch_time = now_us();
     }
@@ -459,8 +456,11 @@ asio::awaitable<void> P2PManager::keepalive_loop() {
 }
 
 asio::awaitable<void> P2PManager::punch_timeout_loop() {
+    // 使用 500ms 检查间隔，平衡精度和 CPU 开销
+    constexpr auto CHECK_INTERVAL = std::chrono::milliseconds(500);
+
     while (running_) {
-        punch_timer_.expires_after(std::chrono::seconds(1));
+        punch_timer_.expires_after(CHECK_INTERVAL);
 
         try {
             co_await punch_timer_.async_wait(asio::use_awaitable);
@@ -473,7 +473,8 @@ asio::awaitable<void> P2PManager::punch_timeout_loop() {
         uint64_t now = now_us();
         auto punch_timeout_us = std::chrono::duration_cast<std::chrono::microseconds>(
             config_.punch_timeout).count();
-        constexpr uint64_t resolve_timeout_us = 5 * 1000000ULL;
+        auto resolve_timeout_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            config_.endpoint_resolve_timeout).count();
 
         std::vector<NodeId> timed_out;
         {
@@ -516,8 +517,6 @@ asio::awaitable<void> P2PManager::punch_timeout_loop() {
                 continue;
             }
 
-            it->second.punching = false;
-            it->second.resolving = false;
             lock.unlock();
 
             log().warn("P2P {} 到 peer {} 超时",
@@ -538,11 +537,16 @@ asio::awaitable<void> P2PManager::do_punch_batches(NodeId peer_id) {
                 peer_id, config_.punch_batch_count, config_.punch_batch_size,
                 config_.punch_batch_interval.count());
 
+    // 检查状态是否仍然是 PUNCHING
+    if (state_machine_.get_peer_p2p_state(peer_id) != P2PConnectionState::PUNCHING) {
+        co_return;
+    }
+
     std::vector<Endpoint> endpoints;
     {
         std::unique_lock lock(contexts_mutex_);
         auto it = peer_contexts_.find(peer_id);
-        if (it == peer_contexts_.end() || !it->second.punching) {
+        if (it == peer_contexts_.end()) {
             co_return;
         }
         endpoints = it->second.peer_endpoints;
@@ -611,8 +615,13 @@ asio::awaitable<void> P2PManager::do_punch_batches(NodeId peer_id) {
 }
 
 asio::awaitable<void> P2PManager::retry_loop() {
+    // 指数退避参数
+    constexpr uint32_t MAX_RETRY_COUNT = 10;        // 最大重试次数后使用最大间隔
+    constexpr uint64_t CHECK_INTERVAL_SEC = 5;      // 检查间隔（秒）
+
     while (running_) {
-        retry_timer_.expires_after(config_.retry_interval);
+        // 使用较短的检查间隔，让指数退避更精确
+        retry_timer_.expires_after(std::chrono::seconds(CHECK_INTERVAL_SEC));
 
         try {
             co_await retry_timer_.async_wait(asio::use_awaitable);
@@ -622,13 +631,30 @@ asio::awaitable<void> P2PManager::retry_loop() {
 
         if (!running_) break;
 
-        // 收集失败的对端进行重试
+        uint64_t now = now_us();
+
+        // 收集可以重试的对端
         std::vector<NodeId> retry_peers;
         {
-            std::shared_lock lock(contexts_mutex_);
-            for (const auto& [id, ctx] : peer_contexts_) {
+            std::unique_lock lock(contexts_mutex_);
+            for (auto& [id, ctx] : peer_contexts_) {
                 if (state_machine_.get_peer_p2p_state(id) == P2PConnectionState::FAILED) {
-                    retry_peers.push_back(id);
+                    // 检查是否到达重试时间
+                    if (now >= ctx.next_retry_time) {
+                        retry_peers.push_back(id);
+
+                        // 计算下次重试时间（指数退避）
+                        uint32_t backoff_multiplier = std::min(ctx.retry_count, MAX_RETRY_COUNT);
+                        uint64_t backoff_sec = static_cast<uint64_t>(config_.retry_interval.count())
+                                               << backoff_multiplier;  // 2^n * base_interval
+                        // 限制最大退避时间为 1 小时
+                        backoff_sec = std::min(backoff_sec, uint64_t{3600});
+                        ctx.next_retry_time = now + backoff_sec * 1000000;
+                        ctx.retry_count++;
+
+                        log().debug("peer {} 重试计数 {}，下次重试间隔 {} 秒",
+                            id, ctx.retry_count, backoff_sec);
+                    }
                 }
             }
         }
@@ -780,8 +806,6 @@ void P2PManager::handle_p2p_ping(const asio::ip::udp::endpoint& from,
 
         ctx.active_endpoint = from;
         ctx.last_recv_time = now_us();
-        ctx.punching = false;
-        ctx.resolving = false;
     }
 
     // 确保会话密钥已派生（在锁外执行避免死锁）
@@ -794,6 +818,15 @@ void P2PManager::handle_p2p_ping(const asio::ip::udp::endpoint& from,
     if (newly_connected) {
         log().info("P2P 连接已建立与 peer {} 通过 {}",
             ping.src_node, from.address().to_string());
+
+        // 重置重试计数器
+        {
+            std::unique_lock lock(contexts_mutex_);
+            if (auto it = peer_contexts_.find(ping.src_node); it != peer_contexts_.end()) {
+                it->second.retry_count = 0;
+                it->second.next_retry_time = 0;
+            }
+        }
 
         report_p2p_status(ping.src_node, true);
     }
@@ -821,8 +854,6 @@ void P2PManager::handle_p2p_pong(const asio::ip::udp::endpoint& from,
 
         it->second.active_endpoint = from;
         it->second.last_recv_time = now;
-        it->second.punching = false;
-        it->second.resolving = false;
     }
 
     // 原子更新状态机，返回值表示是否是新建立的连接
@@ -833,6 +864,15 @@ void P2PManager::handle_p2p_pong(const asio::ip::udp::endpoint& from,
     if (newly_connected) {
         log().info("P2P 连接已建立与 peer {} 通过 {} (延迟: {}ms)",
             pong.src_node, from.address().to_string(), latency_ms);
+
+        // 重置重试计数器
+        {
+            std::unique_lock lock(contexts_mutex_);
+            if (auto it = peer_contexts_.find(pong.src_node); it != peer_contexts_.end()) {
+                it->second.retry_count = 0;
+                it->second.next_retry_time = 0;
+            }
+        }
 
         report_p2p_status(pong.src_node, true);
     }

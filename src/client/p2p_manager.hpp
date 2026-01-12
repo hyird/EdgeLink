@@ -47,10 +47,11 @@ struct PeerP2PContext {
     uint64_t last_send_time = 0;    // 最后发送数据的时间（微秒）
     uint32_t ping_seq = 0;          // Ping 序列号
 
-    // 标记：是否正在进行打洞操作
-    bool punching = false;
-    // 标记：是否正在等待端点（RESOLVING）
-    bool resolving = false;
+    // 重试相关（指数退避）
+    uint32_t retry_count = 0;       // 连续失败次数（成功后重置）
+    uint64_t next_retry_time = 0;   // 下次重试时间（微秒）
+
+    // 注：打洞/解析状态由 ClientStateMachine 统一管理（P2PConnectionState）
 };
 
 // ============================================================================

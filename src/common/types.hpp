@@ -320,6 +320,7 @@ struct P2PConfig {
     std::chrono::seconds keepalive_interval{1};                         // Keepalive 间隔
     std::chrono::seconds keepalive_timeout{3};                          // Keepalive 超时
     std::chrono::seconds punch_timeout{10};                             // 打洞超时
+    std::chrono::seconds endpoint_resolve_timeout{5};                   // 端点解析超时（等待 P2P_ENDPOINT）
     uint32_t punch_batch_count = defaults::PUNCH_BATCH_COUNT;           // 打洞批次数
     uint32_t punch_batch_size = defaults::PUNCH_BATCH_SIZE;             // 每批发送包数
     std::chrono::milliseconds punch_batch_interval{defaults::PUNCH_BATCH_INTERVAL};  // 批次间隔

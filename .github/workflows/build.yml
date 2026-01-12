@@ -465,6 +465,109 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # =============================================================================
+  # Autobuild Release - 每次推送到 main 更新
+  # =============================================================================
+  autobuild-release:
+    needs: [build-linux-release, build-linux-debug, build-windows-release, build-windows-debug]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Prepare release files
+      run: |
+        mkdir -p release
+        # 解压 Linux 包
+        tar -xzvf artifacts/edgelink-linux-x64-release/edgelink-linux-x64-release.tar.gz -C release
+        mv release/linux/edgelink-client release/edgelink-client-linux-amd64-release
+        mv release/linux/edgelink-controller release/edgelink-controller-linux-amd64-release
+        rm -rf release/linux
+
+        tar -xzvf artifacts/edgelink-linux-x64-debug/edgelink-linux-x64-debug.tar.gz -C release
+        mv release/linux/edgelink-client release/edgelink-client-linux-amd64-debug
+        mv release/linux/edgelink-controller release/edgelink-controller-linux-amd64-debug
+        rm -rf release/linux
+
+        # 复制 Windows 包
+        cp artifacts/edgelink-windows-x64-release/edgelink-windows-x64-release.zip release/
+        cp artifacts/edgelink-windows-x64-debug/edgelink-windows-x64-debug.zip release/
+
+        # 创建版本信息
+        echo "commit: $(git rev-parse --short HEAD)" > release/version.txt
+        echo "build_time: $(date -u +%Y-%m-%d_%H:%M:%S_UTC)" >> release/version.txt
+
+        ls -la release/
+
+    - name: Delete existing autobuild release
+      uses: dev-drprasad/delete-tag-and-release@v1.1
+      with:
+        tag_name: autobuild
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        delete_release: true
+      continue-on-error: true
+
+    - name: Create autobuild release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: autobuild
+        name: Autobuild (Latest)
+        body: |
+          ## 自动构建版本
+
+          每次推送到 main 分支时自动更新。
+
+          ### Linux 二进制文件
+          | 文件 | 说明 |
+          |------|------|
+          | `edgelink-client-linux-amd64-release` | 客户端 (Release 优化版) |
+          | `edgelink-client-linux-amd64-debug` | 客户端 (Debug 调试版) |
+          | `edgelink-controller-linux-amd64-release` | 控制器 (Release 优化版) |
+          | `edgelink-controller-linux-amd64-debug` | 控制器 (Debug 调试版) |
+
+          ### Windows 打包文件
+          | 文件 | 说明 |
+          |------|------|
+          | `edgelink-windows-x64-release.zip` | Windows Release 版 |
+          | `edgelink-windows-x64-debug.zip` | Windows Debug 版 |
+
+          ### 一键安装 (Linux)
+          ```bash
+          # 安装 Release 版本（默认）
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
+
+          # 安装 Debug 版本
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash -s -- --debug
+
+          # 仅安装客户端
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash -s -- --client-only
+
+          # 仅安装控制器
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash -s -- --controller-only
+          ```
+
+          ### 版本信息
+          - Commit: `${{ github.sha }}`
+          - 构建时间: $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)
+        prerelease: true
+        files: |
+          release/edgelink-client-linux-amd64-release
+          release/edgelink-client-linux-amd64-debug
+          release/edgelink-controller-linux-amd64-release
+          release/edgelink-controller-linux-amd64-debug
+          release/edgelink-windows-x64-release.zip
+          release/edgelink-windows-x64-debug.zip
+          release/version.txt
+
+  # =============================================================================
   # Cleanup Old Workflow Runs
   # =============================================================================
   cleanup:
