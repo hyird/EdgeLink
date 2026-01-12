@@ -368,6 +368,29 @@ show_install_info() {
     echo ""
 }
 
+# 重启服务
+restart_services() {
+    if [[ ! -d /etc/systemd/system ]]; then
+        return
+    fi
+
+    if $INSTALL_CLIENT; then
+        if $SUDO systemctl is-active --quiet edgelink-client 2>/dev/null; then
+            log_info "重启 edgelink-client 服务..."
+            $SUDO systemctl restart edgelink-client
+            log_success "edgelink-client 已重启"
+        fi
+    fi
+
+    if $INSTALL_CONTROLLER; then
+        if $SUDO systemctl is-active --quiet edgelink-controller 2>/dev/null; then
+            log_info "重启 edgelink-controller 服务..."
+            $SUDO systemctl restart edgelink-controller
+            log_success "edgelink-controller 已重启"
+        fi
+    fi
+}
+
 # 显示升级完成信息
 show_upgrade_info() {
     echo ""
@@ -383,14 +406,6 @@ show_upgrade_info() {
     fi
     if $INSTALL_CONTROLLER; then
         echo "  - ${BIN_DIR}/edgelink-controller"
-    fi
-    echo ""
-    echo "如果服务正在运行，请重启以使用新版本:"
-    if $INSTALL_CLIENT; then
-        echo "  systemctl restart edgelink-client"
-    fi
-    if $INSTALL_CONTROLLER; then
-        echo "  systemctl restart edgelink-controller"
     fi
     echo ""
 }
@@ -449,8 +464,9 @@ main() {
         install_binary "controller" || exit 1
     fi
 
-    # 升级模式跳过配置和服务设置
+    # 升级模式：重启服务
     if $UPGRADE_ONLY; then
+        restart_services
         show_upgrade_info
     else
         setup_config_dir
