@@ -383,11 +383,37 @@ asio::awaitable<void> ControlChannel::close() {
 
     state_ = ChannelState::DISCONNECTED;
 
+    // 使用超时保护的关闭操作，避免卡住
     try {
+        asio::steady_timer timeout_timer(ioc_);
+        timeout_timer.expires_after(std::chrono::seconds(3));
+
+        bool closed = false;
+
         if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
-            co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+            // 尝试优雅关闭，但有超时保护
+            auto result = co_await (
+                tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable) ||
+                timeout_timer.async_wait(asio::use_awaitable)
+            );
+            closed = (result.index() == 0);
+            if (!closed) {
+                // 超时，直接关闭底层连接
+                log().debug("WebSocket close timeout, forcing shutdown");
+                boost::system::error_code ec;
+                tls_ws_->next_layer().next_layer().socket().close(ec);
+            }
         } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
-            co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+            auto result = co_await (
+                plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable) ||
+                timeout_timer.async_wait(asio::use_awaitable)
+            );
+            closed = (result.index() == 0);
+            if (!closed) {
+                log().debug("WebSocket close timeout, forcing shutdown");
+                boost::system::error_code ec;
+                plain_ws_->next_layer().socket().close(ec);
+            }
         }
     } catch (...) {}
 
@@ -961,11 +987,35 @@ asio::awaitable<void> RelayChannel::close() {
 
     state_ = ChannelState::DISCONNECTED;
 
+    // 使用超时保护的关闭操作，避免卡住
     try {
+        asio::steady_timer timeout_timer(ioc_);
+        timeout_timer.expires_after(std::chrono::seconds(3));
+
+        bool closed = false;
+
         if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
-            co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+            auto result = co_await (
+                tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable) ||
+                timeout_timer.async_wait(asio::use_awaitable)
+            );
+            closed = (result.index() == 0);
+            if (!closed) {
+                log().debug("Relay WebSocket close timeout, forcing shutdown");
+                boost::system::error_code ec;
+                tls_ws_->next_layer().next_layer().socket().close(ec);
+            }
         } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
-            co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+            auto result = co_await (
+                plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable) ||
+                timeout_timer.async_wait(asio::use_awaitable)
+            );
+            closed = (result.index() == 0);
+            if (!closed) {
+                log().debug("Relay WebSocket close timeout, forcing shutdown");
+                boost::system::error_code ec;
+                plain_ws_->next_layer().socket().close(ec);
+            }
         }
     } catch (...) {}
 
