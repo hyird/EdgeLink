@@ -225,13 +225,15 @@ private:
     void do_read() {
         if (!reading_ || !is_open()) return;
 
-        // 注意：捕获 this 仍有 UAF 风险，但无法避免（MacOSTunDevice 不是 shared_ptr 管理）
-        // TODO: 重构 TunDevice 为 shared_ptr 管理以彻底解决此问题
+        // 使用 shared_from_this 保证 MacOSTunDevice 在回调时仍存活
+        auto self = shared_from_this();
         stream_.async_read_some(
             asio::buffer(read_buffer_),
-            [this](const boost::system::error_code& ec, size_t bytes) {
+            [self](const boost::system::error_code& ec, size_t bytes) {
+                auto* macos_tun = static_cast<MacOSTunDevice*>(self.get());
+
                 // 防御性检查：如果 reading_ 为 false，说明正在关闭，直接返回
-                if (!reading_) return;
+                if (!macos_tun->reading_) return;
 
                 if (ec) {
                     if (ec != asio::error::operation_aborted) {
@@ -241,13 +243,13 @@ private:
                 }
 
                 // Skip the 4-byte protocol header
-                if (bytes > 4 && callback_ && reading_) {
-                    callback_(std::span<const uint8_t>(read_buffer_.data() + 4, bytes - 4));
+                if (bytes > 4 && macos_tun->callback_ && macos_tun->reading_) {
+                    macos_tun->callback_(std::span<const uint8_t>(macos_tun->read_buffer_.data() + 4, bytes - 4));
                 }
 
                 // Continue reading (双重检查避免析构时继续读取)
-                if (reading_ && is_open()) {
-                    do_read();
+                if (macos_tun->reading_ && macos_tun->is_open()) {
+                    macos_tun->do_read();
                 }
             });
     }
@@ -265,8 +267,8 @@ private:
     std::array<uint8_t, 65536> read_buffer_;
 };
 
-std::unique_ptr<TunDevice> TunDevice::create(asio::io_context& ioc) {
-    return std::make_unique<MacOSTunDevice>(ioc);
+std::shared_ptr<TunDevice> TunDevice::create(asio::io_context& ioc) {
+    return std::make_shared<MacOSTunDevice>(ioc);
 }
 
 } // namespace edgelink::client
@@ -314,8 +316,8 @@ public:
     }
 };
 
-std::unique_ptr<TunDevice> TunDevice::create(asio::io_context& ioc) {
-    return std::make_unique<StubTunDevice>(ioc);
+std::shared_ptr<TunDevice> TunDevice::create(asio::io_context& ioc) {
+    return std::make_shared<StubTunDevice>(ioc);
 }
 
 } // namespace edgelink::client

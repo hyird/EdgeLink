@@ -31,7 +31,8 @@ using TunPacketChannel = asio::experimental::channel<
 }  // namespace channels
 
 // Abstract TUN device interface
-class TunDevice {
+// 注意：使用 shared_ptr 管理以避免异步操作中的 UAF
+class TunDevice : public std::enable_shared_from_this<TunDevice> {
 public:
     virtual ~TunDevice() = default;
 
@@ -70,7 +71,8 @@ public:
         std::span<const uint8_t> packet) = 0;
 
     // Factory method - creates platform-specific TUN device
-    static std::unique_ptr<TunDevice> create(asio::io_context& ioc);
+    // 返回 shared_ptr 以支持在异步操作中安全使用
+    static std::shared_ptr<TunDevice> create(asio::io_context& ioc);
 };
 
 // IP packet utilities

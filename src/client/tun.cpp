@@ -238,13 +238,15 @@ private:
     void do_read() {
         if (!reading_ || !is_open()) return;
 
-        // 注意：捕获 this 仍有 UAF 风险，但无法避免（LinuxTunDevice 不是 shared_ptr 管理）
-        // TODO: 重构 TunDevice 为 shared_ptr 管理以彻底解决此问题
+        // 使用 shared_from_this 保证 LinuxTunDevice 在回调时仍存活
+        auto self = shared_from_this();
         stream_.async_read_some(
             asio::buffer(read_buffer_),
-            [this](const boost::system::error_code& ec, size_t bytes) {
+            [self](const boost::system::error_code& ec, size_t bytes) {
+                auto* linux_tun = static_cast<LinuxTunDevice*>(self.get());
+
                 // 防御性检查：如果 reading_ 为 false，说明正在关闭，直接返回
-                if (!reading_) return;
+                if (!linux_tun->reading_) return;
 
                 if (ec) {
                     if (ec != asio::error::operation_aborted) {
@@ -253,15 +255,16 @@ private:
                     return;
                 }
 
-                if (bytes > 0 && packet_channel_ && reading_) {
+                if (bytes > 0 && linux_tun->packet_channel_ && linux_tun->reading_) {
                     // 复制数据到 vector 并通过 channel 发送
-                    std::vector<uint8_t> packet(read_buffer_.begin(), read_buffer_.begin() + bytes);
-                    packet_channel_->try_send(boost::system::error_code{}, std::move(packet));
+                    std::vector<uint8_t> packet(linux_tun->read_buffer_.begin(),
+                                                linux_tun->read_buffer_.begin() + bytes);
+                    linux_tun->packet_channel_->try_send(boost::system::error_code{}, std::move(packet));
                 }
 
                 // Continue reading (双重检查避免析构时继续读取)
-                if (reading_ && is_open()) {
-                    do_read();
+                if (linux_tun->reading_ && linux_tun->is_open()) {
+                    linux_tun->do_read();
                 }
             });
     }
@@ -279,8 +282,8 @@ private:
     std::array<uint8_t, 65536> read_buffer_;
 };
 
-std::unique_ptr<TunDevice> TunDevice::create(asio::io_context& ioc) {
-    return std::make_unique<LinuxTunDevice>(ioc);
+std::shared_ptr<TunDevice> TunDevice::create(asio::io_context& ioc) {
+    return std::make_shared<LinuxTunDevice>(ioc);
 }
 
 } // namespace edgelink::client
@@ -329,8 +332,8 @@ public:
     }
 };
 
-std::unique_ptr<TunDevice> TunDevice::create(asio::io_context& ioc) {
-    return std::make_unique<StubTunDevice>(ioc);
+std::shared_ptr<TunDevice> TunDevice::create(asio::io_context& ioc) {
+    return std::make_shared<StubTunDevice>(ioc);
 }
 
 } // namespace edgelink::client

@@ -189,9 +189,12 @@ public:
 
         reading_ = true;
 
-        // Start read thread
-        read_thread_ = std::thread([this]() {
-            read_loop();
+        // Start read thread - 使用 shared_from_this 保证生命周期安全
+        auto self = shared_from_this();
+        read_thread_ = std::thread([self]() {
+            // 转换为 WinTunDevice* 以访问 read_loop()
+            auto* win_tun = static_cast<WinTunDevice*>(self.get());
+            win_tun->read_loop();
         });
     }
 
@@ -298,14 +301,14 @@ private:
 
                     if (packet_channel_ && packet_size > 0) {
                         // Post to IO context and send via channel
-                        // 注意：捕获 packet_channel_ 裸指针仍有 UAF 风险，需要重构为 shared_ptr 管理
+                        // 使用 shared_from_this 保证 WinTunDevice 在回调时仍存活
                         std::vector<uint8_t> data(packet, packet + packet_size);
-                        auto channel = packet_channel_;  // 捕获指针副本
-                        auto reading = &reading_;         // 捕获 reading_ 地址用于检查
-                        asio::post(ioc_, [channel, reading, data = std::move(data)]() mutable {
-                            // 防御性检查：如果 reading_ 已经为 false，说明正在析构
-                            if (channel && reading->load()) {
-                                channel->try_send(boost::system::error_code{}, std::move(data));
+                        auto self = shared_from_this();
+                        asio::post(ioc_, [self, data = std::move(data)]() mutable {
+                            auto* win_tun = static_cast<WinTunDevice*>(self.get());
+                            // 检查设备仍在运行
+                            if (win_tun->packet_channel_ && win_tun->reading_.load()) {
+                                win_tun->packet_channel_->try_send(boost::system::error_code{}, std::move(data));
                             }
                         });
                     }
@@ -344,8 +347,8 @@ private:
     WINTUN_GET_ADAPTER_LUID_FUNC wintun_get_adapter_luid_ = nullptr;
 };
 
-std::unique_ptr<TunDevice> TunDevice::create(asio::io_context& ioc) {
-    return std::make_unique<WinTunDevice>(ioc);
+std::shared_ptr<TunDevice> TunDevice::create(asio::io_context& ioc) {
+    return std::make_shared<WinTunDevice>(ioc);
 }
 
 } // namespace edgelink::client

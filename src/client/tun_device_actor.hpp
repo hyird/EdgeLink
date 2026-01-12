@@ -120,8 +120,8 @@ private:
 
     asio::experimental::concurrent_channel<void(boost::system::error_code, TunEvent)>* event_channel_;
 
-    // TUN 设备实例
-    std::unique_ptr<TunDevice> tun_device_;
+    // TUN 设备实例 - 使用 shared_ptr 以支持异步操作中的安全访问
+    std::shared_ptr<TunDevice> tun_device_;
 
     // TUN 数据包接收通道（从 TunDevice 读取）
     std::unique_ptr<channels::TunPacketChannel> packet_channel_;

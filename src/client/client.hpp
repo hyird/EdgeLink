@@ -289,8 +289,8 @@ private:
     // Cached DNS resolution results for change detection
     std::string cached_controller_endpoints_;
 
-    // TUN device (optional)
-    std::unique_ptr<TunDevice> tun_;
+    // TUN device (optional) - 使用 shared_ptr 以支持异步操作中的安全访问
+    std::shared_ptr<TunDevice> tun_;
     std::unique_ptr<channels::TunPacketChannel> tun_packet_ch_;
 
     // IPC server (optional)
