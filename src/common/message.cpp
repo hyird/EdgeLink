@@ -257,6 +257,7 @@ std::vector<uint8_t> AuthRequest::get_sign_data() const {
     writer.write_string(arch);
     writer.write_string(version);
     writer.write_u64_be(timestamp);
+    writer.write_u32_be(connection_id);  // 连接标识符
     writer.write_u16_be(static_cast<uint16_t>(auth_data.size()));
     writer.write_bytes(auth_data);
     return writer.take();
@@ -272,6 +273,7 @@ std::vector<uint8_t> AuthRequest::serialize() const {
     writer.write_string(arch);
     writer.write_string(version);
     writer.write_u64_be(timestamp);
+    writer.write_u32_be(connection_id);  // 连接标识符
     writer.write_array(signature);
     writer.write_u16_be(static_cast<uint16_t>(auth_data.size()));
     writer.write_bytes(auth_data);
@@ -290,11 +292,12 @@ std::expected<AuthRequest, ParseError> AuthRequest::parse(std::span<const uint8_
     auto arch = reader.read_string();
     auto version = reader.read_string();
     auto timestamp = reader.read_u64_be();
+    auto connection_id = reader.read_u32_be();  // 连接标识符
     auto signature = reader.read_array<ED25519_SIGNATURE_SIZE>();
     auto auth_data_len = reader.read_u16_be();
 
     if (!auth_type || !machine_key || !node_key || !hostname || !os ||
-        !arch || !version || !timestamp || !signature || !auth_data_len) {
+        !arch || !version || !timestamp || !connection_id || !signature || !auth_data_len) {
         return std::unexpected(ParseError::INSUFFICIENT_DATA);
     }
 
@@ -309,6 +312,7 @@ std::expected<AuthRequest, ParseError> AuthRequest::parse(std::span<const uint8_
     req.arch = *arch;
     req.version = *version;
     req.timestamp = *timestamp;
+    req.connection_id = *connection_id;
     req.signature = *signature;
     req.auth_data = *auth_data;
 
@@ -688,6 +692,89 @@ std::expected<LatencyReport, ParseError> LatencyReport::parse(std::span<const ui
     }
 
     return report;
+}
+
+// ============================================================================
+// ConnectionMetrics
+// ============================================================================
+
+std::vector<uint8_t> ConnectionMetrics::serialize() const {
+    BinaryWriter writer;
+    writer.write_u64_be(timestamp);
+    writer.write_u8(channel_type);
+    writer.write_u16_be(static_cast<uint16_t>(connections.size()));
+
+    for (const auto& conn : connections) {
+        writer.write_u32_be(conn.connection_id);
+        writer.write_u16_be(conn.rtt_ms);
+        writer.write_u8(conn.packet_loss);
+        writer.write_u8(conn.is_active);
+    }
+
+    return writer.take();
+}
+
+std::expected<ConnectionMetrics, ParseError> ConnectionMetrics::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    ConnectionMetrics metrics;
+
+    auto timestamp = reader.read_u64_be();
+    auto channel_type = reader.read_u8();
+    auto count = reader.read_u16_be();
+
+    if (!timestamp || !channel_type || !count) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    metrics.timestamp = *timestamp;
+    metrics.channel_type = *channel_type;
+    metrics.connections.reserve(*count);
+
+    for (uint16_t i = 0; i < *count; ++i) {
+        auto conn_id = reader.read_u32_be();
+        auto rtt_ms = reader.read_u16_be();
+        auto packet_loss = reader.read_u8();
+        auto is_active = reader.read_u8();
+
+        if (!conn_id || !rtt_ms || !packet_loss || !is_active) {
+            return std::unexpected(ParseError::INSUFFICIENT_DATA);
+        }
+
+        metrics.connections.push_back({*conn_id, *rtt_ms, *packet_loss, *is_active});
+    }
+
+    return metrics;
+}
+
+// ============================================================================
+// PathSelection
+// ============================================================================
+
+std::vector<uint8_t> PathSelection::serialize() const {
+    BinaryWriter writer;
+    writer.write_u32_be(preferred_connection_id);
+    writer.write_u8(channel_type);
+    writer.write_string(reason);
+    return writer.take();
+}
+
+std::expected<PathSelection, ParseError> PathSelection::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    PathSelection selection;
+
+    auto conn_id = reader.read_u32_be();
+    auto channel_type = reader.read_u8();
+    auto reason = reader.read_string();
+
+    if (!conn_id || !channel_type || !reason) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    selection.preferred_connection_id = *conn_id;
+    selection.channel_type = *channel_type;
+    selection.reason = *reason;
+
+    return selection;
 }
 
 // ============================================================================

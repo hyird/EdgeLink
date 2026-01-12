@@ -1171,7 +1171,7 @@ asio::awaitable<void> Client::reconnect() {
     log().info("Attempting to reconnect...");
 
     // Clear DNS cache so it will be re-initialized after reconnect
-    cached_controller_endpoints_.clear();
+    cached_controller_endpoints_set_.clear();
 
     // Teardown TUN on reconnect
     teardown_tun();
@@ -1246,21 +1246,35 @@ asio::awaitable<void> Client::dns_refresh_loop() {
             asio::ip::tcp::resolver resolver(ioc_);
             auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
 
-            // Build endpoints string for comparison
-            std::string new_endpoints;
+            // Build endpoints set for comparison (ignore order)
+            std::set<std::string> new_endpoints_set;
+            std::string new_endpoints_str;
             for (const auto& ep : endpoints) {
-                if (!new_endpoints.empty()) {
-                    new_endpoints += ",";
+                std::string endpoint_str = ep.endpoint().address().to_string() + ":" +
+                                          std::to_string(ep.endpoint().port());
+                new_endpoints_set.insert(endpoint_str);
+
+                if (!new_endpoints_str.empty()) {
+                    new_endpoints_str += ",";
                 }
-                new_endpoints += ep.endpoint().address().to_string();
-                new_endpoints += ":";
-                new_endpoints += std::to_string(ep.endpoint().port());
+                new_endpoints_str += endpoint_str;
             }
 
-            // Check if DNS resolution changed
-            if (!cached_controller_endpoints_.empty() &&
-                cached_controller_endpoints_ != new_endpoints) {
-                log().info("DNS resolution changed: {} -> {}", cached_controller_endpoints_, new_endpoints);
+            // Check if DNS resolution changed (compare sets to ignore order)
+            if (!cached_controller_endpoints_set_.empty() &&
+                cached_controller_endpoints_set_ != new_endpoints_set) {
+                // Build readable strings for logging
+                std::string old_str, new_str;
+                for (const auto& ep : cached_controller_endpoints_set_) {
+                    if (!old_str.empty()) old_str += ",";
+                    old_str += ep;
+                }
+                for (const auto& ep : new_endpoints_set) {
+                    if (!new_str.empty()) new_str += ",";
+                    new_str += ep;
+                }
+                log().info("DNS resolution changed: {} -> {}", old_str, new_str);
+
                 // Trigger reconnect to use new endpoints
                 if (config_.auto_reconnect) {
                     asio::co_spawn(ioc_, reconnect(), asio::detached);
@@ -1269,9 +1283,9 @@ asio::awaitable<void> Client::dns_refresh_loop() {
             }
 
             // Update cache (first time or unchanged)
-            if (cached_controller_endpoints_.empty()) {
-                cached_controller_endpoints_ = new_endpoints;
-                log().debug("DNS cache initialized: {}", new_endpoints);
+            if (cached_controller_endpoints_set_.empty()) {
+                cached_controller_endpoints_set_ = new_endpoints_set;
+                log().debug("DNS cache initialized: {}", new_endpoints_str);
             }
 
         } catch (const boost::system::system_error& e) {

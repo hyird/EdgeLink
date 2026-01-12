@@ -33,6 +33,7 @@ struct AuthRequest {
     std::string arch;
     std::string version;
     uint64_t timestamp = 0;
+    ConnectionId connection_id = 0;  // 连接标识符（用于多路连接场景）
     std::array<uint8_t, ED25519_SIGNATURE_SIZE> signature{};
     std::vector<uint8_t> auth_data; // Content depends on auth_type
 
@@ -189,6 +190,33 @@ struct LatencyReport {
 
     std::vector<uint8_t> serialize() const;
     static std::expected<LatencyReport, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// CONNECTION_METRICS (0x33) - Client 上报连接延迟指标
+struct ConnectionMetricsEntry {
+    ConnectionId connection_id = 0;  // 连接标识符
+    uint16_t rtt_ms = 0;             // 往返延迟（毫秒）
+    uint8_t packet_loss = 0;         // 丢包率（百分比，0-100）
+    uint8_t is_active = 1;           // 是否活跃（1=活跃，0=失效）
+};
+
+struct ConnectionMetrics {
+    uint64_t timestamp = 0;                          // 测量时间戳
+    uint8_t channel_type = 0;                        // 0 = control, 1 = relay
+    std::vector<ConnectionMetricsEntry> connections; // 连接指标列表
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<ConnectionMetrics, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// PATH_SELECTION (0x34) - Controller 指示连接路径选择
+struct PathSelection {
+    ConnectionId preferred_connection_id = 0;  // 优选连接 ID
+    uint8_t channel_type = 0;                  // 0 = control, 1 = relay
+    std::string reason;                        // 选择原因（用于调试）
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<PathSelection, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ============================================================================

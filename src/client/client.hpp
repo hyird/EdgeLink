@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -286,8 +287,8 @@ private:
     asio::steady_timer latency_timer_;
     asio::steady_timer route_announce_timer_;
 
-    // Cached DNS resolution results for change detection
-    std::string cached_controller_endpoints_;
+    // Cached DNS resolution results for change detection (using set to ignore order)
+    std::set<std::string> cached_controller_endpoints_set_;
 
     // TUN device (optional) - 使用 shared_ptr 以支持异步操作中的安全访问
     std::shared_ptr<TunDevice> tun_;

@@ -20,6 +20,7 @@ using NodeId = uint32_t;
 using NetworkId = uint32_t;
 using ServerId = uint32_t;
 using MessageId = uint32_t;
+using ConnectionId = uint32_t;  // 连接标识符（用于多路连接）
 
 // 密钥大小别名（兼容旧代码）
 inline constexpr size_t ED25519_PUBLIC_KEY_SIZE = crypto::ED25519_PUBLIC_KEY_SIZE;
@@ -68,6 +69,8 @@ enum class FrameType : uint8_t {
     PING = 0x30,
     PONG = 0x31,
     LATENCY_REPORT = 0x32,
+    CONNECTION_METRICS = 0x33,  // Client 上报连接延迟指标
+    PATH_SELECTION = 0x34,      // Controller 指示连接路径选择
 
     // P2P (0x40-0x4F)
     P2P_INIT = 0x40,
