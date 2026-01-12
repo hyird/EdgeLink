@@ -688,11 +688,11 @@ void Client::on_tun_packet(std::span<const uint8_t> packet) {
     log().debug("Forwarding to {} ({})", peer->info.virtual_ip.to_string(),
                   peer->info.online ? "online" : "offline");
 
-    // Send via relay
-    asio::co_spawn(ioc_, [this, peer_id = peer->info.node_id,
+    // Send via relay - 使用 shared_from_this 保证生命周期安全（多线程环境）
+    asio::co_spawn(ioc_, [self = shared_from_this(), peer_id = peer->info.node_id,
                           data = std::vector<uint8_t>(packet.begin(), packet.end())]()
                           -> asio::awaitable<void> {
-        co_await send_to_peer(peer_id, data);
+        co_await self->send_to_peer(peer_id, data);
     }, asio::detached);
 }
 
@@ -1607,8 +1607,9 @@ void Client::send_pong(NodeId peer_id, uint32_t seq_num, uint64_t timestamp) {
     pong_msg[11] = (timestamp >> 8) & 0xFF;
     pong_msg[12] = timestamp & 0xFF;
 
-    asio::co_spawn(ioc_, [this, peer_id, pong_msg = std::move(pong_msg)]() -> asio::awaitable<void> {
-        co_await relay_->send_data(peer_id, pong_msg);
+    // 使用 shared_from_this 保证生命周期安全（多线程环境）
+    asio::co_spawn(ioc_, [self = shared_from_this(), peer_id, pong_msg = std::move(pong_msg)]() -> asio::awaitable<void> {
+        co_await self->relay_->send_data(peer_id, pong_msg);
     }, asio::detached);
 }
 
