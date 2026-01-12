@@ -76,6 +76,9 @@ struct ControllerConfig {
 // ============================================================================
 
 struct ClientConfig {
+    // Thread model settings
+    size_t num_threads = 1;  // Number of worker threads (default: 1 = single-threaded)
+
     // Connection settings
     // 格式: host 或 host:port (port可省略，TLS时默认443，否则80)
     // 例如: "controller.example.com" 或 "192.168.1.100:8080"

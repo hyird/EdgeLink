@@ -97,69 +97,104 @@ for (auto& t : threads) {
 
 ### 架构
 
-**单线程事件循环模型**
+**可配置多线程 I/O 池模型** (默认单线程)
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                  asio::io_context                       │
-│                  (单线程运行)                            │
+│           (concurrency_hint = num_threads)              │
 └─────────────────────────────────────────────────────────┘
-                         │
-                    ┌────▼────┐
-                    │  Main   │
-                    │ Thread  │
-                    └─────────┘
                          │
         ┌────────────────┼────────────────┐
         │                │                │
-    ┌───▼───┐       ┌───▼───┐       ┌───▼───┐
-    │Control│       │ Relay │       │ P2P   │
-    │ Actor │       │ Actor │       │Manager│
-    └───────┘       └───────┘       └───────┘
+   ┌────▼────┐     ┌────▼────┐     ┌────▼────┐
+   │ Thread 0│     │ Thread 1│ ... │ Thread N│
+   │ (Main)  │     │(Worker) │     │(Worker) │
+   └─────────┘     └─────────┘     └─────────┘
         │                │                │
         └────────────────┼────────────────┘
                          │
-              所有 Actor 共享单线程
+         所有 Actor/协程 由线程池处理
 ```
 
-### 实现细节 (src/client/main.cpp:891-1083)
+### 实现细节 (src/client/main.cpp:890-1119)
 
 ```cpp
-// 1. 创建单线程 io_context
-asio::io_context ioc;  // 默认 concurrency_hint = 1
+// 1. 确定线程数（默认 1，可配置）
+size_t num_threads = cfg.num_threads > 0 ? cfg.num_threads : 1;
 
-// 2. 使用 work_guard 防止提前退出
+// 2. 创建多线程 io_context
+asio::io_context ioc(static_cast<int>(num_threads));
+
+// 3. 使用 work_guard 防止提前退出
 auto work_guard = asio::make_work_guard(ioc);
 
-// 3. 启动所有协程和 Actor
+// 4. 启动所有协程
 asio::co_spawn(ioc, client->start(), asio::detached);
-asio::co_spawn(ioc, event_handler_1(), asio::detached);
-asio::co_spawn(ioc, event_handler_2(), asio::detached);
+asio::co_spawn(ioc, event_handlers(), asio::detached);
 // ...
 
-// 4. 在主线程运行事件循环
-ioc.run();  // 阻塞直到所有工作完成
+// 5. 多线程模式：启动工作线程池
+std::vector<std::thread> worker_threads;
+if (num_threads > 1) {
+    for (size_t i = 1; i < num_threads; ++i) {
+        worker_threads.emplace_back([&ioc] {
+            ioc.run();  // 每个线程运行事件循环
+        });
+    }
+}
+
+// 6. 主线程也参与工作
+ioc.run();
+
+// 7. 等待所有工作线程结束
+for (auto& t : worker_threads) {
+    t.join();
+}
 ```
 
 ### 线程配置
 
-**当前实现**: 硬编码单线程
-**配置方式**: 无配置选项（未来可扩展）
+**默认值**: 1 (单线程，保持向后兼容)
 
-### 为什么使用单线程？
+**配置方式**:
+- 命令行: `--threads N`
+- 配置文件: `num_threads = N`
+- 程序化: `ClientConfig::num_threads = N`
 
-**优点**:
-1. **简化设计**: 无需考虑跨线程同步
-2. **性能充足**:
-   - 单个客户端通常只需处理少量连接（1-2 Controller + N Peers）
-   - I/O 密集而非 CPU 密集
-   - 协程天然高并发，单线程可轻松处理数千并发操作
-3. **更低延迟**: 避免线程切换开销
-4. **调试友好**: 单线程更容易调试和追踪
+**推荐配置**:
+- **单用户场景** (默认): 1 线程（延迟最低）
+- **多 peer 高负载**: 2-4 线程（利用多核）
+- **CPU 密集场景**: 4-8 线程（如大量加解密）
 
-**局限性**:
-- CPU 密集型任务会阻塞整个事件循环
-- 无法利用多核 CPU（但客户端通常不需要）
+### 单线程 vs 多线程
+
+**单线程模式** (num_threads = 1):
+- **优点**:
+  - 更低延迟（无线程切换）
+  - 更简单调试
+  - 更低内存开销
+  - 适合绝大多数场景
+- **局限性**:
+  - CPU 密集型任务可能阻塞
+  - 无法利用多核（通常不需要）
+
+**多线程模式** (num_threads > 1):
+- **优点**:
+  - 充分利用多核 CPU
+  - 并发处理多个操作
+  - CPU 密集任务不阻塞
+- **局限性**:
+  - 线程切换开销
+  - 稍高内存使用 (~4MB/线程)
+  - 更复杂调试
+
+### 线程安全
+
+所有 Actor 和协程已经通过 Boost.Asio 自动串行化，无需手动加锁：
+- 同一协程内操作天然线程安全
+- 不同协程通过 channel 通信
+- Actor 使用 strand 保证消息串行
 
 ---
 

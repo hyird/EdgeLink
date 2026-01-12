@@ -842,6 +842,8 @@ int cmd_up(int argc, char* argv[]) {
             cfg.controller_hosts.push_back(argv[++i]);
         } else if ((arg == "-a" || arg == "--authkey") && i + 1 < argc) {
             cfg.authkey = argv[++i];
+        } else if (arg == "--threads" && i + 1 < argc) {
+            cfg.num_threads = static_cast<size_t>(std::stoul(argv[++i]));
         } else if ((arg == "-t" || arg == "--test") && i + 2 < argc) {
             test_peer_ip = argv[++i];
             test_message = argv[++i];
@@ -888,7 +890,14 @@ int cmd_up(int argc, char* argv[]) {
     }
 
     try {
-        asio::io_context ioc;
+        // 确定线程数配置（默认 1 = 单线程）
+        size_t num_threads = 1;
+        if (cfg.num_threads > 0) {
+            num_threads = cfg.num_threads;
+        }
+
+        // 创建 io_context（多线程模式需要设置 concurrency_hint）
+        asio::io_context ioc(static_cast<int>(num_threads));
 
         // 使用 work_guard 防止 io_context.run() 在没有挂起操作时提前返回
         // 这在容器环境中特别重要，因为某些协程可能异步完成
@@ -1078,9 +1087,36 @@ int cmd_up(int argc, char* argv[]) {
         if (cfg.enable_tun) {
             log.info("  TUN mode: enabled (MTU={})", cfg.tun_mtu);
         }
+        log.info("  Thread mode: {} thread(s)", num_threads);
 
-        // Run IO context
+        // 多线程模式：启动工作线程池
+        std::vector<std::thread> worker_threads;
+        if (num_threads > 1) {
+            log.info("Starting {} worker threads...", num_threads - 1);
+            worker_threads.reserve(num_threads - 1);
+
+            for (size_t i = 1; i < num_threads; ++i) {
+                worker_threads.emplace_back([&ioc, i, &log] {
+                    try {
+                        log.debug("Worker thread {} started", i);
+                        ioc.run();
+                        log.debug("Worker thread {} stopped", i);
+                    } catch (const std::exception& e) {
+                        log.error("Worker thread {} exception: {}", i, e.what());
+                    }
+                });
+            }
+        }
+
+        // 主线程也参与工作
         ioc.run();
+
+        // 等待所有工作线程结束
+        for (auto& t : worker_threads) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
 
         log.info("Client stopped");
 

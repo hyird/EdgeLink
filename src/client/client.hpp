@@ -27,6 +27,10 @@ namespace edgelink::client {
 
 // Client configuration
 struct ClientConfig {
+    // 线程模型设置
+    size_t num_threads = 1;                    // 工作线程数（默认 1 = 单线程）
+    bool separate_data_plane_thread = false;   // 是否分离数据面到独立线程（需要 num_threads >= 2）
+
     // 连接设置 - 格式: host 或 host:port (port可省略，TLS时默认443，否则80)
     std::vector<std::string> controller_hosts = {"edge.a-z.xin"};  // 默认 controller
     std::string authkey;
