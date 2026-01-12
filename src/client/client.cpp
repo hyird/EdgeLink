@@ -499,11 +499,8 @@ asio::awaitable<void> Client::relay_connected_handler() {
 
         state_ = ClientState::RUNNING;
 
-        if (config_.enable_tun) {
-            if (!setup_tun()) {
-                log().warn("TUN mode requested but failed to setup TUN device");
-            }
-        }
+        // TUN 设备已在 start() 中创建，这里不需要再创建
+        // setup_tun() 已经提前到 Client::start() 中执行
 
         if (events_.connected) {
             events_.connected->try_send(boost::system::error_code{});
@@ -833,6 +830,14 @@ asio::awaitable<bool> Client::start() {
         // 连接成功
         controller_connected = true;
         log().info("Connected to controller: {}:{}", host, port);
+
+        // Setup TUN device if enabled (提前创建，不等待 relay_connected_handler)
+        // TUN 只需要 control channel 的 virtual_ip，不依赖 relay
+        if (config_.enable_tun) {
+            if (!setup_tun()) {
+                log().warn("TUN mode requested but failed to setup TUN device");
+            }
+        }
     }
 
     // 所有 controller 都失败了
