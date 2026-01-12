@@ -23,6 +23,7 @@ GITHUB_DOWNLOAD="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
 BUILD_TYPE="release"
 INSTALL_CLIENT=true
 INSTALL_CONTROLLER=true
+UPGRADE_ONLY=false
 
 # 颜色输出
 RED='\033[0;31m'
@@ -58,6 +59,7 @@ EdgeLink 安装脚本
   --debug           安装 Debug 版本
   --client-only     仅安装客户端
   --controller-only 仅安装控制器
+  --upgrade         仅更新二进制文件（不修改配置和服务）
   --uninstall       卸载 EdgeLink
   -h, --help        显示帮助信息
 
@@ -73,6 +75,12 @@ EdgeLink 安装脚本
 
   # 安装 Debug 版本的控制器
   ./install.sh --debug --controller-only
+
+  # 更新已安装的二进制文件
+  ./install.sh --upgrade
+
+  # 更新为 Debug 版本
+  ./install.sh --upgrade --debug
 
   # 卸载
   ./install.sh --uninstall
@@ -100,6 +108,10 @@ parse_args() {
             --controller-only)
                 INSTALL_CLIENT=false
                 INSTALL_CONTROLLER=true
+                shift
+                ;;
+            --upgrade)
+                UPGRADE_ONLY=true
                 shift
                 ;;
             --uninstall)
@@ -207,66 +219,47 @@ setup_config_dir() {
         $SUDO mkdir -p "$CONFIG_DIR"
     fi
 
-    # 创建示例配置文件（如果不存在）
-    if [[ ! -f "${CONFIG_DIR}/client.toml" ]]; then
-        $SUDO tee "${CONFIG_DIR}/client.toml.example" > /dev/null << 'EOF'
-# EdgeLink 客户端配置示例
-# 复制此文件为 client.toml 并修改
-
+    # 创建客户端配置（如果不存在）
+    if $INSTALL_CLIENT && [[ ! -f "${CONFIG_DIR}/client.toml" ]]; then
+        log_info "创建客户端配置..."
+        $SUDO tee "${CONFIG_DIR}/client.toml" > /dev/null << 'EOF'
 [controller]
-# 控制器地址
-url = "wss://controller.example.com:8443"
-
-[auth]
-# 认证密钥
-authkey = "your-auth-key-here"
+url = "localhost:8080"
+tls = false
+authkey = "tskey-dev-test123"
 
 [tun]
-# TUN 设备名称
-name = "edgelink0"
+enable = true
+name = "edgelink"
 
 [p2p]
-# 是否启用 P2P 直连
 enabled = true
-# P2P 绑定端口 (0 = 随机)
 bind_port = 0
 
 [log]
-# 日志级别: trace, debug, info, warn, error
 level = "info"
 EOF
-        log_info "已创建示例配置: ${CONFIG_DIR}/client.toml.example"
+        log_success "已创建: ${CONFIG_DIR}/client.toml"
     fi
 
-    if [[ ! -f "${CONFIG_DIR}/controller.toml" ]]; then
-        $SUDO tee "${CONFIG_DIR}/controller.toml.example" > /dev/null << 'EOF'
-# EdgeLink 控制器配置示例
-# 复制此文件为 controller.toml 并修改
-
+    # 创建控制器配置（如果不存在）
+    if $INSTALL_CONTROLLER && [[ ! -f "${CONFIG_DIR}/controller.toml" ]]; then
+        log_info "创建控制器配置..."
+        $SUDO tee "${CONFIG_DIR}/controller.toml" > /dev/null << 'EOF'
 [server]
-# 监听地址
-listen = "0.0.0.0"
-# 监听端口
-port = 8443
-
-[tls]
-# TLS 证书路径
-cert = "/etc/edgelink/server.crt"
-key = "/etc/edgelink/server.key"
+bind = "0.0.0.0"
+port = 8080
 
 [database]
-# 数据库路径
-path = "/var/lib/edgelink/edgelink.db"
+path = "/etc/edgelink/edgelink.db"
 
 [jwt]
-# JWT 密钥（请修改为随机字符串）
 secret = "change-me-to-random-string"
 
 [log]
-# 日志级别: trace, debug, info, warn, error
 level = "info"
 EOF
-        log_info "已创建示例配置: ${CONFIG_DIR}/controller.toml.example"
+        log_success "已创建: ${CONFIG_DIR}/controller.toml"
     fi
 }
 
@@ -383,11 +376,42 @@ show_install_info() {
     echo ""
 }
 
+# 显示升级完成信息
+show_upgrade_info() {
+    echo ""
+    echo "======================================"
+    echo -e "${GREEN}EdgeLink 升级完成!${NC}"
+    echo "======================================"
+    echo ""
+    echo "版本: ${BUILD_TYPE}"
+    echo ""
+    echo "已更新的二进制文件:"
+    if $INSTALL_CLIENT; then
+        echo "  - ${BIN_DIR}/edgelink-client"
+    fi
+    if $INSTALL_CONTROLLER; then
+        echo "  - ${BIN_DIR}/edgelink-controller"
+    fi
+    echo ""
+    echo "如果服务正在运行，请重启以使用新版本:"
+    if $INSTALL_CLIENT; then
+        echo "  systemctl restart edgelink-client"
+    fi
+    if $INSTALL_CONTROLLER; then
+        echo "  systemctl restart edgelink-controller"
+    fi
+    echo ""
+}
+
 # 主函数
 main() {
     echo ""
     echo "======================================"
-    echo "     EdgeLink 安装脚本"
+    if $UPGRADE_ONLY; then
+        echo "     EdgeLink 升级脚本"
+    else
+        echo "     EdgeLink 安装脚本"
+    fi
     echo "======================================"
     echo ""
 
@@ -397,11 +421,34 @@ main() {
     check_deps
 
     log_info "构建类型: ${BUILD_TYPE}"
-    log_info "安装客户端: ${INSTALL_CLIENT}"
-    log_info "安装控制器: ${INSTALL_CONTROLLER}"
+    if $UPGRADE_ONLY; then
+        log_info "模式: 升级"
+    else
+        log_info "安装客户端: ${INSTALL_CLIENT}"
+        log_info "安装控制器: ${INSTALL_CONTROLLER}"
+    fi
     echo ""
 
-    # 安装二进制文件
+    # 升级模式：检测已安装的组件
+    if $UPGRADE_ONLY; then
+        INSTALL_CLIENT=false
+        INSTALL_CONTROLLER=false
+        if [[ -f "${BIN_DIR}/edgelink-client" ]]; then
+            INSTALL_CLIENT=true
+            log_info "检测到已安装: edgelink-client"
+        fi
+        if [[ -f "${BIN_DIR}/edgelink-controller" ]]; then
+            INSTALL_CONTROLLER=true
+            log_info "检测到已安装: edgelink-controller"
+        fi
+        if ! $INSTALL_CLIENT && ! $INSTALL_CONTROLLER; then
+            log_error "未检测到已安装的 EdgeLink 组件"
+            exit 1
+        fi
+        echo ""
+    fi
+
+    # 安装/更新二进制文件
     if $INSTALL_CLIENT; then
         install_binary "client" || exit 1
     fi
@@ -410,11 +457,14 @@ main() {
         install_binary "controller" || exit 1
     fi
 
-    # 设置配置和服务
-    setup_config_dir
-    setup_systemd
-
-    show_install_info
+    # 升级模式跳过配置和服务设置
+    if $UPGRADE_ONLY; then
+        show_upgrade_info
+    else
+        setup_config_dir
+        setup_systemd
+        show_install_info
+    fi
 }
 
 main "$@"

@@ -27,6 +27,12 @@ curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install
 # 仅安装控制器
 curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --controller-only
 
+# 升级已安装的二进制文件（不修改配置和服务）
+curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --upgrade
+
+# 升级为 Debug 版本
+curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --upgrade --debug
+
 # 卸载
 curl -fsSL https://raw.githubusercontent.com/hyird/EdgeLink/main/scripts/install.sh | bash -s -- --uninstall
 ```
