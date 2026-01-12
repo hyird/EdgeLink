@@ -2,6 +2,7 @@
 
 #include "client/tun_device_actor.hpp"
 #include "common/logger.hpp"
+#include "common/performance_monitor.hpp"
 
 namespace edgelink::client {
 
@@ -30,6 +31,11 @@ TunDeviceActor::TunDeviceActor(
 
 asio::awaitable<void> TunDeviceActor::on_start() {
     log().info("[{}] Actor started", name_);
+
+    // 注册性能监控（邮箱队列容量为 64，数据包队列为 128）
+    perf::PerformanceMonitor::instance().register_queue("TunDevice.Mailbox", 64);
+    perf::PerformanceMonitor::instance().register_queue("TunDevice.PacketQueue", 128);
+
     co_return;
 }
 
@@ -140,6 +146,8 @@ asio::awaitable<void> TunDeviceActor::handle_close_cmd() {
 }
 
 asio::awaitable<void> TunDeviceActor::handle_write_packet_cmd(const TunMessage& msg) {
+    PERF_MEASURE_LATENCY("TunDevice.WritePacket");
+
     if (device_state_ != TunDeviceState::OPEN) {
         log().warn("[{}] Cannot write packet: device not open (state={})",
                    name_, tun_device_state_name(device_state_));
@@ -163,6 +171,7 @@ asio::awaitable<void> TunDeviceActor::handle_write_packet_cmd(const TunMessage& 
         if (!result) {
             log().error("[{}] Failed to write packet: {}",
                         name_, tun_error_message(result.error()));
+            PERF_INCREMENT("TunDevice.WriteErrors");
 
             // 发送错误事件
             TunEvent event;
@@ -171,9 +180,12 @@ asio::awaitable<void> TunDeviceActor::handle_write_packet_cmd(const TunMessage& 
             send_event(event);
         } else {
             log().debug("[{}] Packet written: {} bytes", name_, msg.packet->size());
+            PERF_INCREMENT("TunDevice.PacketsWritten");
+            PERF_ADD("TunDevice.BytesWritten", msg.packet->size());
         }
     } catch (const std::exception& e) {
         log().error("[{}] Exception writing packet: {}", name_, e.what());
+        PERF_INCREMENT("TunDevice.WriteErrors");
 
         TunEvent event;
         event.type = TunEventType::TUN_ERROR;
@@ -290,6 +302,10 @@ asio::awaitable<void> TunDeviceActor::read_loop() {
 
             log().debug("[{}] Received packet: {} bytes", name_, packet.size());
 
+            // 性能统计
+            PERF_INCREMENT("TunDevice.PacketsRead");
+            PERF_ADD("TunDevice.BytesRead", packet.size());
+
             // 解析目标 IP
             IPv4Address dst_ip = ip_packet::dst_ipv4(packet);
 
@@ -308,6 +324,7 @@ asio::awaitable<void> TunDeviceActor::read_loop() {
             }
 
             log().error("[{}] TUN read error: {}", name_, e.what());
+            PERF_INCREMENT("TunDevice.ReadErrors");
 
             // 发送错误事件
             TunEvent event;
@@ -320,6 +337,7 @@ asio::awaitable<void> TunDeviceActor::read_loop() {
 
         } catch (const std::exception& e) {
             log().error("[{}] Unexpected error in read loop: {}", name_, e.what());
+            PERF_INCREMENT("TunDevice.ReadErrors");
 
             TunEvent event;
             event.type = TunEventType::TUN_ERROR;

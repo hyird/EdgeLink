@@ -3,6 +3,7 @@
 #include "common/crypto.hpp"
 #include "common/config.hpp"
 #include "common/logger.hpp"
+#include "common/performance_monitor.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>
@@ -1027,6 +1028,19 @@ int cmd_up(int argc, char* argv[]) {
                 log.info("Shutdown requested via IPC, stopping...");
                 work_guard.reset();
                 asio::co_spawn(ioc, client->stop(), asio::detached);
+            }
+        }, asio::detached);
+
+        // 启动性能监控输出协程（每60秒打印一次）
+        asio::co_spawn(ioc, [&ioc, &log]() -> asio::awaitable<void> {
+            asio::steady_timer timer(ioc);
+            while (true) {
+                timer.expires_after(std::chrono::seconds(60));
+                co_await timer.async_wait(asio::use_awaitable);
+
+                // 打印性能摘要
+                auto summary = edgelink::perf::PerformanceMonitor::instance().get_summary();
+                log.info("{}", summary);
             }
         }, asio::detached);
 

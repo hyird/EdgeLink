@@ -4,6 +4,7 @@
 #include "common/logger.hpp"
 #include "common/frame.hpp"
 #include "common/message.hpp"
+#include "common/performance_monitor.hpp"
 
 #include <chrono>
 
@@ -47,6 +48,10 @@ P2PManagerActor::~P2PManagerActor() {
 
 asio::awaitable<void> P2PManagerActor::on_start() {
     log().info("[{}] Actor started", name_);
+
+    // 注册性能监控（邮箱队列容量为 128）
+    perf::PerformanceMonitor::instance().register_queue("P2PManager.Mailbox", 128);
+
     co_return;
 }
 
@@ -244,9 +249,14 @@ asio::awaitable<void> P2PManagerActor::handle_p2p_endpoint_cmd(const P2PManagerC
 }
 
 asio::awaitable<void> P2PManagerActor::handle_send_data_cmd(const P2PManagerCmd& cmd) {
+    PERF_MEASURE_LATENCY("P2P.SendData");
+    PERF_INCREMENT("P2P.PacketsSent");
+    PERF_ADD("P2P.BytesSent", cmd.plaintext->size());
+
     auto it = peer_contexts_.find(cmd.peer_id);
     if (it == peer_contexts_.end() || !it->second.connected) {
         log().debug("[{}] Cannot send data to {}: not connected", name_, cmd.peer_id);
+        PERF_INCREMENT("P2P.SendNotConnected");
         co_return;
     }
 
@@ -257,6 +267,7 @@ asio::awaitable<void> P2PManagerActor::handle_send_data_cmd(const P2PManagerCmd&
     auto encrypted = crypto_.encrypt(cmd.peer_id, *cmd.plaintext, nonce);
     if (!encrypted) {
         log().error("[{}] Failed to encrypt data for peer {}", name_, cmd.peer_id);
+        PERF_INCREMENT("P2P.EncryptErrors");
         co_return;
     }
 
@@ -284,6 +295,7 @@ asio::awaitable<void> P2PManagerActor::handle_send_data_cmd(const P2PManagerCmd&
     } catch (const std::exception& e) {
         log().error("[{}] Failed to send data to peer {}: {}",
                     name_, cmd.peer_id, e.what());
+        PERF_INCREMENT("P2P.SendErrors");
     }
 }
 
@@ -334,6 +346,9 @@ asio::awaitable<void> P2PManagerActor::recv_loop() {
                 continue;
             }
 
+            PERF_INCREMENT("P2P.PacketsReceived");
+            PERF_ADD("P2P.BytesReceived", bytes_recvd);
+
             // 处理数据包
             handle_udp_packet(udp_recv_endpoint_,
                               std::span<const uint8_t>(udp_recv_buffer_.data(), bytes_recvd));
@@ -345,10 +360,12 @@ asio::awaitable<void> P2PManagerActor::recv_loop() {
             }
 
             log().error("[{}] UDP receive error: {}", name_, e.what());
+            PERF_INCREMENT("P2P.RecvErrors");
             continue;
 
         } catch (const std::exception& e) {
             log().error("[{}] Unexpected error in receive loop: {}", name_, e.what());
+            PERF_INCREMENT("P2P.RecvErrors");
             break;
         }
     }
@@ -447,6 +464,7 @@ void P2PManagerActor::handle_p2p_ping(const asio::ip::udp::endpoint& from,
 
                 log().info("[{}] P2P connection established with peer {} at {}",
                            name_, peer_id, from.address().to_string());
+                PERF_INCREMENT("P2P.ConnectionsEstablished");
 
                 // 发送连接成功事件
                 P2PManagerEvent event;

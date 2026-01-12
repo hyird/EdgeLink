@@ -4,6 +4,7 @@
 #include "client/relay_channel_actor.hpp"
 // #include "client/p2p_manager_actor.hpp"  // TODO: 待实现
 #include "common/logger.hpp"
+#include "common/performance_monitor.hpp"
 
 namespace edgelink::client {
 
@@ -30,6 +31,10 @@ DataPlaneActor::DataPlaneActor(
 
 asio::awaitable<void> DataPlaneActor::on_start() {
     log().info("[{}] Actor started", name_);
+
+    // 注册性能监控（邮箱队列容量为 64）
+    perf::PerformanceMonitor::instance().register_queue("DataPlane.Mailbox", 64);
+
     co_return;
 }
 
@@ -114,6 +119,10 @@ asio::awaitable<void> DataPlaneActor::handle_stop_cmd() {
 }
 
 asio::awaitable<void> DataPlaneActor::handle_send_to_cmd(const DataPlaneCmd& cmd) {
+    PERF_MEASURE_LATENCY("DataPlane.SendPacket");
+    PERF_INCREMENT("DataPlane.PacketsSent");
+    PERF_ADD("DataPlane.BytesSent", cmd.data->size());
+
     if (state_ != DataPlaneState::RUNNING) {
         log().warn("[{}] Cannot send data: not running (state={})",
                    name_, data_plane_state_name(state_));
@@ -132,6 +141,7 @@ asio::awaitable<void> DataPlaneActor::handle_send_to_cmd(const DataPlaneCmd& cmd
     if (path == PeerDataPath::NONE) {
         log().warn("[{}] No data path available for {}",
                    name_, peers_.get_peer_ip_str(cmd.peer_id));
+        PERF_INCREMENT("DataPlane.NoPathErrors");
 
         // 发送错误事件
         DataPlaneEvent event;
@@ -144,6 +154,7 @@ asio::awaitable<void> DataPlaneActor::handle_send_to_cmd(const DataPlaneCmd& cmd
     // 根据路径转发数据
     try {
         if (path == PeerDataPath::P2P) {
+            PERF_INCREMENT("DataPlane.PacketsViaP2P");
             // TODO: 通过 P2P Manager 发送
             if (p2p_) {
                 // P2PManagerCmd send_cmd;
@@ -157,6 +168,7 @@ asio::awaitable<void> DataPlaneActor::handle_send_to_cmd(const DataPlaneCmd& cmd
             }
 
         } else if (path == PeerDataPath::RELAY) {
+            PERF_INCREMENT("DataPlane.PacketsViaRelay");
             // 通过 Relay Channel 发送
             if (relay_) {
                 using edgelink::messages::RelayChannelCmd;
@@ -175,6 +187,7 @@ asio::awaitable<void> DataPlaneActor::handle_send_to_cmd(const DataPlaneCmd& cmd
     } catch (const std::exception& e) {
         log().error("[{}] Failed to send data to {}: {}",
                     name_, peers_.get_peer_ip_str(cmd.peer_id), e.what());
+        PERF_INCREMENT("DataPlane.SendErrors");
 
         // 发送错误事件
         DataPlaneEvent event;
