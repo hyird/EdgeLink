@@ -625,10 +625,8 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Fram
     resp.init_seq = init->init_seq;
     resp.peer_node = init->target_node;
 
-    // 复制公钥 (machine_key)
-    if (peer_node->machine_key.size() >= X25519_KEY_SIZE) {
-        std::copy_n(peer_node->machine_key.begin(), X25519_KEY_SIZE, resp.peer_key.begin());
-    }
+    // 复制公钥 (node_key - X25519 密钥交换公钥)
+    resp.peer_key = peer_node->node_key;
 
     // 获取对端上报的端点列表
     resp.endpoints = this->manager_.get_node_endpoints(init->target_node);
@@ -645,10 +643,8 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Fram
     reverse_resp.init_seq = 0;  // 被动打洞，seq=0
     reverse_resp.peer_node = this->node_id_;
 
-    // 复制发起方的公钥
-    if (src_node->machine_key.size() >= X25519_KEY_SIZE) {
-        std::copy_n(src_node->machine_key.begin(), X25519_KEY_SIZE, reverse_resp.peer_key.begin());
-    }
+    // 复制发起方的公钥 (node_key - X25519 密钥交换公钥)
+    reverse_resp.peer_key = src_node->node_key;
 
     // 获取发起方的端点列表
     reverse_resp.endpoints = this->manager_.get_node_endpoints(this->node_id_);
