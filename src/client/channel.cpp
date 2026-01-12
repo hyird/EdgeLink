@@ -130,7 +130,22 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
         auto dns_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - dns_start).count();
-        log().debug("DNS resolved in {} ms", dns_elapsed);
+
+        // 记录所有解析的 endpoints
+        size_t endpoint_count = 0;
+        std::string endpoint_list;
+        for (const auto& ep : endpoints) {
+            if (endpoint_count > 0) endpoint_list += ", ";
+            endpoint_list += ep.endpoint().address().to_string() + ":" + std::to_string(ep.endpoint().port());
+            endpoint_count++;
+        }
+        log().info("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
+        log().debug("DNS resolution took {} ms", dns_elapsed);
+
+        // 生成此连接的唯一标识符（使用时间戳的低32位作为简单实现）
+        ConnectionId connection_id = static_cast<ConnectionId>(
+            std::chrono::steady_clock::now().time_since_epoch().count() & 0xFFFFFFFF);
+        log().debug("Assigned connection_id: 0x{:08x}", connection_id);
 
         if (use_tls_) {
             // Create TLS stream
@@ -212,6 +227,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         req.version = "1.0.0";
         req.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
+        req.connection_id = connection_id;  // 设置连接标识符
         req.auth_data = std::vector<uint8_t>(authkey_.begin(), authkey_.end());
 
         // Sign the request
@@ -291,7 +307,22 @@ asio::awaitable<bool> ControlChannel::reconnect() {
         auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
         auto dns_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - dns_start).count();
-        log().debug("DNS resolved in {} ms", dns_elapsed);
+
+        // 记录所有解析的 endpoints
+        size_t endpoint_count = 0;
+        std::string endpoint_list;
+        for (const auto& ep : endpoints) {
+            if (endpoint_count > 0) endpoint_list += ", ";
+            endpoint_list += ep.endpoint().address().to_string() + ":" + std::to_string(ep.endpoint().port());
+            endpoint_count++;
+        }
+        log().info("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
+        log().debug("DNS resolution took {} ms", dns_elapsed);
+
+        // 生成此连接的唯一标识符
+        ConnectionId connection_id = static_cast<ConnectionId>(
+            std::chrono::steady_clock::now().time_since_epoch().count() & 0xFFFFFFFF);
+        log().debug("Assigned connection_id: 0x{:08x}", connection_id);
 
         if (use_tls_) {
             // Create TLS stream
@@ -362,6 +393,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
         req.version = "1.0.0";
         req.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
+        req.connection_id = connection_id;  // 设置连接标识符
         // auth_data is empty for MACHINE auth type
 
         // Sign the request
@@ -929,6 +961,21 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
         tcp::resolver resolver(ioc_);
         auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
 
+        // 记录所有解析的 endpoints
+        size_t endpoint_count = 0;
+        std::string endpoint_list;
+        for (const auto& ep : endpoints) {
+            if (endpoint_count > 0) endpoint_list += ", ";
+            endpoint_list += ep.endpoint().address().to_string() + ":" + std::to_string(ep.endpoint().port());
+            endpoint_count++;
+        }
+        log().info("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
+
+        // 生成此连接的唯一标识符
+        ConnectionId connection_id = static_cast<ConnectionId>(
+            std::chrono::steady_clock::now().time_since_epoch().count() & 0xFFFFFFFF);
+        log().debug("Assigned connection_id: 0x{:08x}", connection_id);
+
         if (use_tls_) {
             // Create TLS stream
             tls_ws_ = std::make_unique<TlsWsStream>(ioc_, ssl_ctx_);
@@ -978,6 +1025,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
         auth.relay_token = relay_token;
         auth.node_id = crypto_.node_id();
         auth.node_key = crypto_.node_key().public_key;
+        auth.connection_id = connection_id;  // 设置连接标识符
 
         // Send RELAY_AUTH
         co_await send_frame(FrameType::RELAY_AUTH, auth.serialize());

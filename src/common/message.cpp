@@ -389,6 +389,7 @@ std::vector<uint8_t> RelayAuth::serialize() const {
     writer.write_bytes(relay_token);
     writer.write_u32_be(node_id);
     writer.write_array(node_key);
+    writer.write_u32_be(connection_id);  // 连接标识符
     return writer.take();
 }
 
@@ -402,14 +403,16 @@ std::expected<RelayAuth, ParseError> RelayAuth::parse(std::span<const uint8_t> d
     auto token = reader.read_bytes(*token_len);
     auto node_id = reader.read_u32_be();
     auto node_key = reader.read_array<X25519_KEY_SIZE>();
+    auto connection_id = reader.read_u32_be();  // 连接标识符
 
-    if (!token || !node_id || !node_key) {
+    if (!token || !node_id || !node_key || !connection_id) {
         return std::unexpected(ParseError::INSUFFICIENT_DATA);
     }
 
     auth.relay_token = *token;
     auth.node_id = *node_id;
     auth.node_key = *node_key;
+    auth.connection_id = *connection_id;
 
     return auth;
 }

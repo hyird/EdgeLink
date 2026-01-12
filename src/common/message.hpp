@@ -64,6 +64,7 @@ struct RelayAuth {
     std::vector<uint8_t> relay_token;
     NodeId node_id = 0;
     std::array<uint8_t, X25519_KEY_SIZE> node_key{};
+    ConnectionId connection_id = 0;  // 连接标识符（用于多路连接场景）
 
     std::vector<uint8_t> serialize() const;
     static std::expected<RelayAuth, ParseError> parse(std::span<const uint8_t> data);
