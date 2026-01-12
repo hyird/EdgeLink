@@ -773,16 +773,16 @@ asio::awaitable<bool> Client::start() {
             continue;  // 尝试下一个 controller
         }
 
-        // Wait a bit for auth response
+        // Wait for auth response (30s timeout for high-latency networks)
         asio::steady_timer timer(ioc_);
-        timer.expires_after(std::chrono::seconds(5));
+        timer.expires_after(std::chrono::seconds(30));
 
         bool auth_ok = false;
         while (!control_->is_connected()) {
             auto result = co_await (timer.async_wait(asio::use_awaitable) ||
                                     asio::post(ioc_, asio::use_awaitable));
             if (timer.expiry() <= std::chrono::steady_clock::now()) {
-                log().warn("Authentication timeout for {}:{}", host, port);
+                log().warn("Authentication timeout (30s) for {}:{}", host, port);
                 break;
             }
             co_await asio::post(ioc_, asio::use_awaitable);
@@ -808,13 +808,13 @@ asio::awaitable<bool> Client::start() {
             continue;  // 尝试下一个 controller
         }
 
-        // Wait for relay auth
-        timer.expires_after(std::chrono::seconds(5));
+        // Wait for relay auth (30s timeout for high-latency networks)
+        timer.expires_after(std::chrono::seconds(30));
         while (!relay_->is_connected()) {
             auto result = co_await (timer.async_wait(asio::use_awaitable) ||
                                     asio::post(ioc_, asio::use_awaitable));
             if (timer.expiry() <= std::chrono::steady_clock::now()) {
-                log().warn("Relay authentication timeout for {}:{}", host, port);
+                log().warn("Relay authentication timeout (30s) for {}:{}", host, port);
                 break;
             }
             co_await asio::post(ioc_, asio::use_awaitable);

@@ -125,8 +125,12 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
                      host, port, target, use_tls_ ? "yes" : "no");
 
         // Resolve host
+        auto dns_start = std::chrono::steady_clock::now();
         tcp::resolver resolver(ioc_);
         auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
+        auto dns_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - dns_start).count();
+        log().debug("DNS resolved in {} ms", dns_elapsed);
 
         if (use_tls_) {
             // Create TLS stream
@@ -139,12 +143,20 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
             }
 
             // Connect TCP
+            auto tcp_start = std::chrono::steady_clock::now();
             auto& tcp_stream = beast::get_lowest_layer(*tls_ws_);
             tcp_stream.expires_after(std::chrono::seconds(30));
             co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tcp_start).count();
+            log().debug("TCP connected in {} ms", tcp_elapsed);
 
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
+            auto tls_start = std::chrono::steady_clock::now();
             co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
+            auto tls_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tls_start).count();
+            log().debug("TLS handshake completed in {} ms", tls_elapsed);
 
             // WebSocket handshake
             tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
@@ -153,7 +165,11 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
                     req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
                 }));
 
+            auto ws_start = std::chrono::steady_clock::now();
             co_await tls_ws_->async_handshake(host, target, asio::use_awaitable);
+            auto ws_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - ws_start).count();
+            log().debug("WebSocket handshake completed in {} ms", ws_elapsed);
 
             // Disable TCP timeout - WebSocket has its own timeout
             beast::get_lowest_layer(*tls_ws_).expires_never();
@@ -270,8 +286,12 @@ asio::awaitable<bool> ControlChannel::reconnect() {
                      host, port, target, use_tls_ ? "yes" : "no");
 
         // Resolve host
+        auto dns_start = std::chrono::steady_clock::now();
         tcp::resolver resolver(ioc_);
         auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
+        auto dns_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - dns_start).count();
+        log().debug("DNS resolved in {} ms", dns_elapsed);
 
         if (use_tls_) {
             // Create TLS stream
