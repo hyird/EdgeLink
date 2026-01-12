@@ -1062,8 +1062,16 @@ int cmd_up(int argc, char* argv[]) {
         }
 
         // Setup signal handler with timeout protection
+        // 使用独立线程实现强制超时，不依赖 io_context
+        std::atomic<bool> shutdown_requested{false};
         asio::signal_set signals(ioc, SIGINT, SIGTERM);
         signals.async_wait([&](const boost::system::error_code&, int sig) {
+            if (shutdown_requested.exchange(true)) {
+                log.warn("Received signal {} again, force stopping immediately", sig);
+                ioc.stop();
+                std::exit(1);
+            }
+
             log.info("Received signal {}, shutting down gracefully...", sig);
 
             // Reset work guard to allow io_context to exit when done
@@ -1072,15 +1080,13 @@ int cmd_up(int argc, char* argv[]) {
             // Start graceful shutdown
             asio::co_spawn(ioc, client->stop(), asio::detached);
 
-            // Force shutdown after timeout (5 seconds)
-            auto shutdown_timer = std::make_shared<asio::steady_timer>(ioc);
-            shutdown_timer->expires_after(std::chrono::seconds(5));
-            shutdown_timer->async_wait([&ioc, &log, shutdown_timer](const boost::system::error_code& ec) {
-                if (!ec) {
-                    log.warn("Graceful shutdown timeout, forcing io_context stop");
-                    ioc.stop();  // 强制停止所有 io_context 操作
-                }
-            });
+            // 启动独立线程实现强制超时（5 秒）
+            // 不依赖 io_context，确保超时保护一定生效
+            std::thread([&ioc, &log]() {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                log.warn("Graceful shutdown timeout (5s), forcing io_context stop");
+                ioc.stop();  // 强制停止所有 io_context 操作
+            }).detach();
         });
 
         // Start client
