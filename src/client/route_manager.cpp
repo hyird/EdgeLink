@@ -11,7 +11,13 @@
 #include <iphlpapi.h>
 #include <netioapi.h>
 #pragma comment(lib, "iphlpapi.lib")
-#else
+#elif defined(__APPLE__)
+#include <cstring>
+#include <net/if.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <cstdlib>
+#elif defined(__linux__)
 #include <cstring>
 #include <net/if.h>
 #include <sys/socket.h>
@@ -316,7 +322,100 @@ bool RouteManager::del_system_route(const RouteInfo& route) {
     return true;
 }
 
-#else
+#elif defined(__APPLE__)
+// ============================================================================
+// macOS 实现 - 使用 route 命令
+// ============================================================================
+
+bool RouteManager::get_tun_interface_index() {
+    tun_ifindex_ = if_nametoindex(tun_name_.c_str());
+    if (tun_ifindex_ == 0) {
+        log().error("if_nametoindex failed for {}: {}", tun_name_, strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+// 将 prefix 转换为点分十进制字符串
+static std::string prefix_to_string(const RouteInfo& route) {
+    std::ostringstream oss;
+    oss << static_cast<int>(route.prefix[0]) << "."
+        << static_cast<int>(route.prefix[1]) << "."
+        << static_cast<int>(route.prefix[2]) << "."
+        << static_cast<int>(route.prefix[3]);
+    return oss.str();
+}
+
+// 将前缀长度转换为子网掩码字符串
+static std::string prefix_len_to_netmask(uint8_t prefix_len) {
+    uint32_t mask = prefix_len == 0 ? 0 : (~0U << (32 - prefix_len));
+    std::ostringstream oss;
+    oss << ((mask >> 24) & 0xFF) << "."
+        << ((mask >> 16) & 0xFF) << "."
+        << ((mask >> 8) & 0xFF) << "."
+        << (mask & 0xFF);
+    return oss.str();
+}
+
+bool RouteManager::add_system_route(const RouteInfo& route) {
+    // 只处理 IPv4 路由
+    if (route.ip_type != IpType::IPv4) {
+        return false;
+    }
+
+    // 不添加自己公告的路由
+    if (route.gateway_node == client_.node_id()) {
+        return false;
+    }
+
+    // 查找 gateway 节点的虚拟 IP
+    std::string gateway_ip = get_gateway_ip_str(client_, route.gateway_node);
+    if (gateway_ip.empty()) {
+        log().warn("Gateway node {} not found, skipping route", route.gateway_node);
+        return false;
+    }
+
+    // 构建 route 命令
+    // route -n add -net <destination>/<prefix_len> <gateway>
+    std::string dest = prefix_to_string(route);
+    std::string cmd = "/sbin/route -n add -net " + dest + "/" +
+                      std::to_string(route.prefix_len) + " " + gateway_ip;
+
+    int result = std::system(cmd.c_str());
+    if (result != 0) {
+        // 如果路由已存在，不报错
+        log().debug("route add returned {}, route may already exist", result);
+    }
+
+    log().info("Added route: {} via {}", route_key(route), gateway_ip);
+    return true;
+}
+
+bool RouteManager::del_system_route(const RouteInfo& route) {
+    if (route.ip_type != IpType::IPv4) {
+        return false;
+    }
+
+    std::string gateway_ip = get_gateway_ip_str(client_, route.gateway_node);
+    if (gateway_ip.empty()) {
+        return false;
+    }
+
+    // 构建 route 命令
+    std::string dest = prefix_to_string(route);
+    std::string cmd = "/sbin/route -n delete -net " + dest + "/" +
+                      std::to_string(route.prefix_len) + " " + gateway_ip;
+
+    int result = std::system(cmd.c_str());
+    if (result != 0) {
+        log().debug("route delete returned {}, route may not exist", result);
+    }
+
+    log().info("Deleted route: {}", route_key(route));
+    return true;
+}
+
+#elif defined(__linux__)
 // ============================================================================
 // Linux 实现 - 使用 Netlink
 // ============================================================================

@@ -11,6 +11,12 @@
 #else
 #include <unistd.h>
 #include <limits.h>
+#ifdef __APPLE__
+#include <sys/param.h>
+#ifndef HOST_NAME_MAX
+#define HOST_NAME_MAX _POSIX_HOST_NAME_MAX
+#endif
+#endif
 #endif
 
 namespace edgelink::client {

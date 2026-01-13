@@ -31,7 +31,7 @@ std::string tun_error_message(TunError error) {
     }
 }
 
-// macOS utun implementation (stub for now)
+// macOS utun implementation
 class MacOSTunDevice : public TunDevice {
 public:
     explicit MacOSTunDevice(asio::io_context& ioc)
@@ -155,18 +155,19 @@ public:
         return name_;
     }
 
-    void start_read(PacketCallback callback) override {
+    void set_packet_channel(channels::TunPacketChannel* channel) override {
+        packet_channel_ = channel;
+    }
+
+    void start_read() override {
         if (!is_open() || reading_) return;
 
         reading_ = true;
-        callback_ = std::move(callback);
-
         do_read();
     }
 
     void stop_read() override {
         reading_ = false;
-        callback_ = nullptr;
     }
 
     std::expected<void, TunError> write(std::span<const uint8_t> packet) override {
@@ -226,14 +227,12 @@ private:
         if (!reading_ || !is_open()) return;
 
         // 使用 shared_from_this 保证 MacOSTunDevice 在回调时仍存活
-        auto self = shared_from_this();
+        auto self = std::dynamic_pointer_cast<MacOSTunDevice>(shared_from_this());
         stream_.async_read_some(
             asio::buffer(read_buffer_),
             [self](const boost::system::error_code& ec, size_t bytes) {
-                auto* macos_tun = static_cast<MacOSTunDevice*>(self.get());
-
                 // 防御性检查：如果 reading_ 为 false，说明正在关闭，直接返回
-                if (!macos_tun->reading_) return;
+                if (!self->reading_) return;
 
                 if (ec) {
                     if (ec != asio::error::operation_aborted) {
@@ -242,14 +241,17 @@ private:
                     return;
                 }
 
-                // Skip the 4-byte protocol header
-                if (bytes > 4 && macos_tun->callback_ && macos_tun->reading_) {
-                    macos_tun->callback_(std::span<const uint8_t>(macos_tun->read_buffer_.data() + 4, bytes - 4));
+                // Skip the 4-byte protocol header and send to channel
+                if (bytes > 4 && self->packet_channel_ && self->reading_) {
+                    std::vector<uint8_t> packet(
+                        self->read_buffer_.data() + 4,
+                        self->read_buffer_.data() + bytes);
+                    self->packet_channel_->try_send(boost::system::error_code{}, std::move(packet));
                 }
 
                 // Continue reading (双重检查避免析构时继续读取)
-                if (macos_tun->reading_ && macos_tun->is_open()) {
-                    macos_tun->do_read();
+                if (self->reading_ && self->is_open()) {
+                    self->do_read();
                 }
             });
     }
@@ -263,7 +265,7 @@ private:
     uint32_t mtu_ = 1420;
 
     bool reading_ = false;
-    PacketCallback callback_;
+    channels::TunPacketChannel* packet_channel_ = nullptr;
     std::array<uint8_t, 65536> read_buffer_;
 };
 
@@ -304,7 +306,8 @@ public:
     void close() override {}
     bool is_open() const override { return false; }
     std::string name() const override { return ""; }
-    void start_read(PacketCallback) override {}
+    void set_packet_channel(channels::TunPacketChannel*) override {}
+    void start_read() override {}
     void stop_read() override {}
 
     std::expected<void, TunError> write(std::span<const uint8_t>) override {
