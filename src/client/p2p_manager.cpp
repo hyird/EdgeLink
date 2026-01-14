@@ -82,8 +82,13 @@ asio::awaitable<bool> P2PManager::start() {
     running_ = true;
     starting_ = false;
 
+    // Create loop completion tracking channel
+    loops_done_ch_ = std::make_unique<LoopCompletionChannel>(ioc_, 10);
+    active_loops_ = 0;
+
     // 【重要】先启动 recv_loop，再查询 STUN
     // 因为 STUN 响应现在通过 recv_loop -> handle_stun_response -> channel 传递
+    active_loops_++;
     asio::co_spawn(ioc_, recv_loop(), asio::detached);
 
     // 查询 STUN 端点
@@ -95,7 +100,8 @@ asio::awaitable<bool> P2PManager::start() {
             stun_result.mapped_endpoint.port);
     }
 
-    // 启动其他后台任务
+    // 启动其他后台任务 (5 loops total)
+    active_loops_ += 4;
     asio::co_spawn(ioc_, keepalive_loop(), asio::detached);
     asio::co_spawn(ioc_, punch_timeout_loop(), asio::detached);
     asio::co_spawn(ioc_, retry_loop(), asio::detached);
@@ -117,23 +123,64 @@ asio::awaitable<void> P2PManager::stop() {
         co_return;
     }
 
+    // CRITICAL: Set stopped state FIRST to signal all loops to exit
     running_ = false;
     starting_ = false;
+    log().debug("P2P Manager: running_ set to false, loops will exit");
 
-    // 取消定时器
+    // 取消定时器 (wake up waiting loops)
     keepalive_timer_.cancel();
     punch_timer_.cancel();
     retry_timer_.cancel();
     endpoint_refresh_timer_.cancel();
 
-    // 关闭 socket
+    // 关闭 socket (wake up recv_loop)
     endpoints_.close_socket();
+
+    // Wait for all loops to exit (with timeout)
+    int expected_loops = active_loops_.load();
+    log().debug("Waiting for {} P2P loop(s) to exit...", expected_loops);
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    int completed = 0;
+
+    while (completed < expected_loops && std::chrono::steady_clock::now() < deadline) {
+        try {
+            asio::steady_timer wait_timer(ioc_);
+            wait_timer.expires_after(std::chrono::milliseconds(50));
+
+            // Try to receive one completion notification (non-blocking)
+            bool received = false;
+            if (loops_done_ch_) {
+                loops_done_ch_->try_receive([&](boost::system::error_code) {
+                    received = true;
+                    completed++;
+                });
+            }
+
+            if (!received) {
+                // No loop completed yet, wait briefly and retry
+                co_await wait_timer.async_wait(asio::use_awaitable);
+            }
+        } catch (...) {
+            break;
+        }
+    }
+
+    int remaining = active_loops_.load();
+    if (remaining > 0) {
+        log().warn("{} of {} P2P loop(s) did not exit cleanly", remaining, expected_loops);
+    } else {
+        log().debug("All {} P2P loops exited successfully", completed);
+    }
 
     // 清除上下文
     {
         std::unique_lock lock(contexts_mutex_);
         peer_contexts_.clear();
     }
+
+    loops_done_ch_.reset();
 
     log().info("P2P 管理器已停止");
 }
@@ -398,6 +445,12 @@ asio::awaitable<void> P2PManager::recv_loop() {
     }
 
     log().debug("recv_loop 已结束");
+
+    log().debug("recv_loop exited");
+    if (loops_done_ch_) {
+        loops_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_loops_--;
 }
 
 asio::awaitable<void> P2PManager::keepalive_loop() {
@@ -465,6 +518,12 @@ asio::awaitable<void> P2PManager::keepalive_loop() {
             }
         }
     }
+
+    log().debug("keepalive_loop exited");
+    if (loops_done_ch_) {
+        loops_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_loops_--;
 }
 
 asio::awaitable<void> P2PManager::punch_timeout_loop() {
@@ -542,6 +601,12 @@ asio::awaitable<void> P2PManager::punch_timeout_loop() {
             report_p2p_status(peer_id, false);
         }
     }
+
+    log().debug("punch_timeout_loop exited");
+    if (loops_done_ch_) {
+        loops_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_loops_--;
 }
 
 asio::awaitable<void> P2PManager::do_punch_batches(NodeId peer_id) {
@@ -676,6 +741,12 @@ asio::awaitable<void> P2PManager::retry_loop() {
             asio::co_spawn(ioc_, connect_peer(peer_id), asio::detached);
         }
     }
+
+    log().debug("retry_loop exited");
+    if (loops_done_ch_) {
+        loops_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_loops_--;
 }
 
 asio::awaitable<void> P2PManager::endpoint_refresh_loop() {
@@ -699,6 +770,12 @@ asio::awaitable<void> P2PManager::endpoint_refresh_loop() {
             break;
         }
     }
+
+    log().debug("endpoint_refresh_loop exited");
+    if (loops_done_ch_) {
+        loops_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_loops_--;
 }
 
 asio::awaitable<void> P2PManager::refresh_endpoints() {

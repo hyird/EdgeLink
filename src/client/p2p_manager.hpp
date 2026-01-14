@@ -243,6 +243,11 @@ private:
 
     // P2P_INIT 序列号
     std::atomic<uint32_t> init_seq_{0};
+
+    // Loop completion tracking - 5 detached loops: recv, keepalive, punch_timeout, retry, endpoint_refresh
+    using LoopCompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    std::unique_ptr<LoopCompletionChannel> loops_done_ch_;
+    std::atomic<int> active_loops_{0};
 };
 
 } // namespace edgelink::client
