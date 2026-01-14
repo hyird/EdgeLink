@@ -161,12 +161,55 @@ void MultiRelayManager::handle_peer_routing_update(const PeerRoutingUpdate& upda
     log().info("Received PEER_ROUTING_UPDATE v{} with {} routes",
                update.version, update.routes.size());
 
-    routing_table_.update(update);
+    // Validate routes before applying
+    size_t valid_count = 0;
+    size_t invalid_count = 0;
 
-    // 记录每个路由更新
+    PeerRoutingUpdate validated_update;
+    validated_update.version = update.version;
+
     for (const auto& entry : update.routes) {
-        log().debug("Route: peer {} -> relay {}, conn 0x{:08x}",
-                    entry.peer_node_id, entry.relay_id, entry.connection_id);
+        // Check if relay exists in our pools
+        bool relay_exists = false;
+        {
+            std::shared_lock lock(mutex_);
+            relay_exists = (relay_pools_.find(entry.relay_id) != relay_pools_.end());
+        }
+
+        if (relay_exists) {
+            // Optionally verify connection_id exists for the relay
+            auto pool = get_relay_pool(entry.relay_id);
+            if (pool) {
+                auto channel = pool->get_connection(entry.connection_id);
+                if (channel && channel->is_connected()) {
+                    validated_update.routes.push_back(entry);
+                    valid_count++;
+                    log().debug("Route accepted: peer {} -> relay {}, conn 0x{:08x}",
+                                entry.peer_node_id, entry.relay_id, entry.connection_id);
+                } else {
+                    invalid_count++;
+                    log().warn("Route rejected: peer {} -> relay {}, conn 0x{:08x} (connection not found or not connected)",
+                               entry.peer_node_id, entry.relay_id, entry.connection_id);
+                }
+            } else {
+                invalid_count++;
+                log().warn("Route rejected: peer {} -> relay {} (pool not found)",
+                           entry.peer_node_id, entry.relay_id);
+            }
+        } else {
+            invalid_count++;
+            log().warn("Route rejected: peer {} -> relay {} (relay not in our pools)",
+                       entry.peer_node_id, entry.relay_id);
+        }
+    }
+
+    // Only update routing table with validated routes
+    if (!validated_update.routes.empty()) {
+        routing_table_.update(validated_update);
+        log().info("Applied {} valid route(s), rejected {} invalid route(s)",
+                   valid_count, invalid_count);
+    } else {
+        log().warn("No valid routes in update, routing table unchanged");
     }
 }
 

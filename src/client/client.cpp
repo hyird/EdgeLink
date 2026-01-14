@@ -459,7 +459,10 @@ asio::awaitable<void> Client::ctrl_error_handler() {
 
         log().error("Control error {}: {}", code, msg);
         if (events_.error) {
-            events_.error->try_send(boost::system::error_code{}, code, msg);
+            bool sent = events_.error->try_send(boost::system::error_code{}, code, msg);
+            if (!sent) {
+                log().warn("Failed to send error event (channel full or closed)");
+            }
         }
     }
 }
@@ -543,7 +546,10 @@ asio::awaitable<void> Client::relay_data_handler() {
 
         // Call user callback via channel
         if (events_.data_received) {
-            events_.data_received->try_send(boost::system::error_code{}, src, std::move(data));
+            bool sent = events_.data_received->try_send(boost::system::error_code{}, src, std::move(data));
+            if (!sent) {
+                log().warn("Failed to send data_received event for peer {} (channel full or closed)", src);
+            }
         }
     }
 }
@@ -690,16 +696,18 @@ bool Client::setup_tun() {
 }
 
 void Client::teardown_tun() {
+    // Close channel first to wake up any waiting coroutines
+    if (tun_packet_ch_) {
+        tun_packet_ch_->close();
+        tun_packet_ch_.reset();
+    }
+
+    // Then close TUN device
     if (tun_) {
         tun_->stop_read();
         tun_->close();
         tun_.reset();
         log().info("TUN device closed");
-    }
-    // 关闭 channel
-    if (tun_packet_ch_) {
-        tun_packet_ch_->close();
-        tun_packet_ch_.reset();
     }
 }
 
@@ -978,6 +986,15 @@ asio::awaitable<void> Client::stop() {
 
     // Reset reconnect counter
     reconnect_attempts_ = 0;
+
+    // Clear pending pings to prevent resource leaks
+    {
+        std::lock_guard lock(ping_mutex_);
+        if (!pending_pings_.empty()) {
+            log().debug("Clearing {} pending ping(s)", pending_pings_.size());
+            pending_pings_.clear();
+        }
+    }
 
     // Stop config watcher (has background watch loop)
     if (config_watcher_) {
@@ -1261,7 +1278,10 @@ asio::awaitable<void> Client::p2p_data_handler() {
 
             // Call user callback via channel
             if (events_.data_received) {
-                events_.data_received->try_send(boost::system::error_code{}, peer_id, std::move(data));
+                bool sent = events_.data_received->try_send(boost::system::error_code{}, peer_id, std::move(data));
+                if (!sent) {
+                    log().warn("Failed to send P2P data_received event for peer {} (channel full or closed)", peer_id);
+                }
             }
 
         } catch (const std::exception& e) {
@@ -1782,7 +1802,10 @@ void Client::handle_ping_data(NodeId src, std::span<const uint8_t> data) {
         auto it = pending_pings_.find(key);
         if (it != pending_pings_.end()) {
             if (it->second.response_ch) {
-                it->second.response_ch->try_send(boost::system::error_code{}, latency);
+                bool sent = it->second.response_ch->try_send(boost::system::error_code{}, latency);
+                if (!sent) {
+                    log().warn("Failed to send ping response for peer {} seq {} (channel closed)", src, seq);
+                }
             }
             // 不在这里 erase，让 ping_peer 在收到响应后清理
         }
