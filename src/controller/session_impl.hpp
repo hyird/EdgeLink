@@ -195,6 +195,10 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& 
             co_await handle_latency_report(frame);
             break;
 
+        case FrameType::PEER_PATH_REPORT:
+            co_await handle_peer_path_report(frame);
+            break;
+
         case FrameType::ROUTE_ANNOUNCE:
             co_await handle_route_announce(frame);
             break;
@@ -502,6 +506,36 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_latency_report(cons
             }
         }
     }
+}
+
+template<typename StreamType>
+asio::awaitable<void> ControlSessionImpl<StreamType>::handle_peer_path_report(const Frame& frame) {
+    if (!this->authenticated_) {
+        co_await this->send_error(1001, "Not authenticated", FrameType::PEER_PATH_REPORT);
+        co_return;
+    }
+
+    auto report = PeerPathReport::parse(frame.payload);
+    if (!report) {
+        log().warn("Invalid PEER_PATH_REPORT from node {}", this->node_id_);
+        co_return;
+    }
+
+    log().debug("Received PEER_PATH_REPORT from node {} with {} entries",
+                this->node_id_, report->entries.size());
+
+    // 记录延迟数据
+    for (const auto& entry : report->entries) {
+        log().trace("  Node {} -> Node {} via relay {}: {}ms (conn=0x{:08x}, loss={}%)",
+                    this->node_id_, entry.peer_node_id, entry.relay_id,
+                    entry.latency_ms, entry.connection_id, entry.packet_loss);
+    }
+
+    // TODO: 将数据传递给 PathDecisionEngine
+    // 并在需要时发送 PEER_ROUTING_UPDATE 给该节点
+    // this->manager_.path_decision().handle_peer_path_report(this->node_id_, *report);
+    // auto routing = this->manager_.path_decision().compute_routing_for_node(this->node_id_);
+    // co_await this->send_frame(FrameType::PEER_ROUTING_UPDATE, routing.serialize());
 }
 
 template<typename StreamType>

@@ -68,6 +68,48 @@ std::string get_arch() {
 #endif
 }
 
+// Happy Eyeballs连接策略：快速尝试多个endpoints
+// 使用短超时顺序尝试，实现快速故障转移
+// 参数：
+//   stream - TCP stream（lowest layer）
+//   endpoints - DNS解析的endpoint列表
+//   per_endpoint_timeout - 每个endpoint的超时时间
+// 返回：成功连接的endpoint，或nullopt（全部失败）
+template<typename Stream>
+asio::awaitable<std::optional<tcp::endpoint>> async_connect_happy_eyeballs(
+    Stream& stream,
+    const tcp::resolver::results_type& endpoints,
+    std::chrono::milliseconds per_endpoint_timeout) {
+
+    for (const auto& ep : endpoints) {
+        auto endpoint = ep.endpoint();
+
+        try {
+            log().debug("尝试连接 {} (超时{}ms)",
+                       endpoint.address().to_string(),
+                       per_endpoint_timeout.count());
+
+            stream.expires_after(per_endpoint_timeout);
+            co_await stream.async_connect(endpoint, asio::use_awaitable);
+
+            log().info("成功连接到 {}", endpoint.address().to_string());
+            co_return endpoint;
+
+        } catch (const boost::system::system_error& e) {
+            log().debug("连接 {} 失败: {}",
+                       endpoint.address().to_string(),
+                       e.what());
+            // 继续尝试下一个endpoint
+        } catch (...) {
+            log().debug("连接 {} 失败: 未知错误",
+                       endpoint.address().to_string());
+        }
+    }
+
+    log().error("所有endpoint连接失败");
+    co_return std::nullopt;
+}
+
 } // anonymous namespace
 
 const char* channel_state_name(ChannelState state) {
@@ -163,14 +205,23 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
                 co_return false;
             }
 
-            // Connect TCP
+            // Connect TCP - 使用Happy Eyeballs策略快速尝试多个endpoint
             auto tcp_start = std::chrono::steady_clock::now();
             auto& tcp_stream = beast::get_lowest_layer(*tls_ws_);
-            tcp_stream.expires_after(std::chrono::seconds(30));
-            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            // 每个endpoint的超时时间：5秒（比原来的30秒短得多）
+            auto connected_ep = co_await async_connect_happy_eyeballs(
+                tcp_stream, endpoints, std::chrono::seconds(5));
+
+            if (!connected_ep) {
+                log().error("所有 endpoint 连接失败");
+                co_return false;
+            }
+
             auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - tcp_start).count();
-            log().debug("TCP connected in {} ms", tcp_elapsed);
+            log().debug("TCP connected to {} in {} ms",
+                       connected_ep->address().to_string(), tcp_elapsed);
 
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
             auto tls_start = std::chrono::steady_clock::now();
@@ -200,10 +251,22 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
             // Create plain stream
             plain_ws_ = std::make_unique<PlainWsStream>(ioc_);
 
-            // Connect TCP
+            // Connect TCP - 使用Happy Eyeballs策略
+            auto tcp_start = std::chrono::steady_clock::now();
             auto& tcp_stream = beast::get_lowest_layer(*plain_ws_);
-            tcp_stream.expires_after(std::chrono::seconds(30));
-            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            auto connected_ep = co_await async_connect_happy_eyeballs(
+                tcp_stream, endpoints, std::chrono::seconds(5));
+
+            if (!connected_ep) {
+                log().error("所有 endpoint 连接失败");
+                co_return false;
+            }
+
+            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tcp_start).count();
+            log().debug("TCP connected to {} in {} ms",
+                       connected_ep->address().to_string(), tcp_elapsed);
 
             // WebSocket handshake
             plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
@@ -341,13 +404,30 @@ asio::awaitable<bool> ControlChannel::reconnect() {
                 co_return false;
             }
 
-            // Connect TCP
+            // Connect TCP - 使用Happy Eyeballs策略
+            auto tcp_start = std::chrono::steady_clock::now();
             auto& tcp_stream = beast::get_lowest_layer(*tls_ws_);
-            tcp_stream.expires_after(std::chrono::seconds(30));
-            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            auto connected_ep = co_await async_connect_happy_eyeballs(
+                tcp_stream, endpoints, std::chrono::seconds(5));
+
+            if (!connected_ep) {
+                log().error("所有 endpoint 重连失败");
+                state_ = ChannelState::DISCONNECTED;
+                co_return false;
+            }
+
+            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tcp_start).count();
+            log().debug("TCP reconnected to {} in {} ms",
+                       connected_ep->address().to_string(), tcp_elapsed);
 
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
+            auto tls_start = std::chrono::steady_clock::now();
             co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
+            auto tls_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tls_start).count();
+            log().debug("TLS handshake completed in {} ms", tls_elapsed);
 
             // WebSocket handshake
             tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
@@ -366,10 +446,23 @@ asio::awaitable<bool> ControlChannel::reconnect() {
             // Create plain stream
             plain_ws_ = std::make_unique<PlainWsStream>(ioc_);
 
-            // Connect TCP
+            // Connect TCP - 使用Happy Eyeballs策略
+            auto tcp_start = std::chrono::steady_clock::now();
             auto& tcp_stream = beast::get_lowest_layer(*plain_ws_);
-            tcp_stream.expires_after(std::chrono::seconds(30));
-            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            auto connected_ep = co_await async_connect_happy_eyeballs(
+                tcp_stream, endpoints, std::chrono::seconds(5));
+
+            if (!connected_ep) {
+                log().error("所有 endpoint 重连失败");
+                state_ = ChannelState::DISCONNECTED;
+                co_return false;
+            }
+
+            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tcp_start).count();
+            log().debug("TCP reconnected to {} in {} ms",
+                       connected_ep->address().to_string(), tcp_elapsed);
 
             // WebSocket handshake
             plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
@@ -989,10 +1082,22 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             // Set SNI
             SSL_set_tlsext_host_name(tls_ws_->next_layer().native_handle(), host.c_str());
 
-            // Connect TCP
+            // Connect TCP - 使用Happy Eyeballs策略
+            auto tcp_start = std::chrono::steady_clock::now();
             auto& tcp_stream = beast::get_lowest_layer(*tls_ws_);
-            tcp_stream.expires_after(std::chrono::seconds(30));
-            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            auto connected_ep = co_await async_connect_happy_eyeballs(
+                tcp_stream, endpoints, std::chrono::seconds(5));
+
+            if (!connected_ep) {
+                log().error("所有 relay endpoint 连接失败");
+                co_return false;
+            }
+
+            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tcp_start).count();
+            log().debug("TCP connected to relay {} in {} ms",
+                       connected_ep->address().to_string(), tcp_elapsed);
 
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
             co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
@@ -1009,10 +1114,22 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             // Create plain stream
             plain_ws_ = std::make_unique<PlainWsStream>(ioc_);
 
-            // Connect TCP
+            // Connect TCP - 使用Happy Eyeballs策略
+            auto tcp_start = std::chrono::steady_clock::now();
             auto& tcp_stream = beast::get_lowest_layer(*plain_ws_);
-            tcp_stream.expires_after(std::chrono::seconds(30));
-            co_await tcp_stream.async_connect(endpoints, asio::use_awaitable);
+
+            auto connected_ep = co_await async_connect_happy_eyeballs(
+                tcp_stream, endpoints, std::chrono::seconds(5));
+
+            if (!connected_ep) {
+                log().error("所有 relay endpoint 连接失败");
+                co_return false;
+            }
+
+            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tcp_start).count();
+            log().debug("TCP connected to relay {} in {} ms",
+                       connected_ep->address().to_string(), tcp_elapsed);
 
             // WebSocket handshake
             plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));

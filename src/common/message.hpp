@@ -220,6 +220,39 @@ struct PathSelection {
     static std::expected<PathSelection, ParseError> parse(std::span<const uint8_t> data);
 };
 
+// PEER_PATH_REPORT (0x35) - Client 上报到每个 Peer 经过每个 Relay 的延迟
+struct PeerPathReportEntry {
+    NodeId peer_node_id = 0;           // 目标节点 ID
+    ServerId relay_id = 0;             // 经过的 Relay ID (0 = P2P 直连)
+    ConnectionId connection_id = 0;    // 使用的连接 ID
+    uint16_t latency_ms = 0;           // 往返延迟（毫秒）
+    uint8_t packet_loss = 0;           // 丢包率（百分比，0-100）
+};
+
+struct PeerPathReport {
+    uint64_t timestamp = 0;                          // 测量时间戳
+    std::vector<PeerPathReportEntry> entries;        // 延迟条目列表
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<PeerPathReport, ParseError> parse(std::span<const uint8_t> data);
+};
+
+// PEER_ROUTING_UPDATE (0x36) - Controller 下发每个 Peer 的最优路径
+struct PeerRoutingEntry {
+    NodeId peer_node_id = 0;           // 目标节点 ID
+    ServerId relay_id = 0;             // 推荐使用的 Relay ID (0 = P2P 直连)
+    ConnectionId connection_id = 0;    // 推荐使用的连接 ID
+    uint8_t priority = 0;              // 优先级 (0 = 最高)
+};
+
+struct PeerRoutingUpdate {
+    uint64_t version = 0;                           // 版本号（增量更新）
+    std::vector<PeerRoutingEntry> routes;           // 路由条目列表
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<PeerRoutingUpdate, ParseError> parse(std::span<const uint8_t> data);
+};
+
 // ============================================================================
 // Error Messages
 // ============================================================================

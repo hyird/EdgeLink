@@ -151,6 +151,7 @@ if(BUILD_CONTROLLER)
         src/controller/session_manager_actor.cpp
         src/controller/server.cpp
         src/controller/stun_server.cpp
+        src/controller/path_decision.cpp
     )
 
     target_link_libraries(edgelink-controller PRIVATE
@@ -196,6 +197,10 @@ if(BUILD_CLIENT)
         src/client/config_applier.cpp
         src/client/endpoint_manager.cpp
         src/client/p2p_manager.cpp
+        src/client/relay_pool.cpp
+        src/client/peer_routing_table.cpp
+        src/client/multi_relay_manager.cpp
+        src/client/peer_latency_measurer.cpp
     )
 
     # Platform-specific TUN source

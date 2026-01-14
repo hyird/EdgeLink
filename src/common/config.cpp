@@ -234,6 +234,9 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             if (auto v = (*conn)["latency_measure_interval"].value<int64_t>()) {
                 config.latency_measure_interval = std::chrono::seconds(*v);
             }
+            if (auto v = (*conn)["endpoint_connect_timeout"].value<int64_t>()) {
+                config.endpoint_connect_timeout = std::chrono::seconds(*v);
+            }
         }
 
         // [storage] section

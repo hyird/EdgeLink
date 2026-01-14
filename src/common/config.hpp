@@ -99,6 +99,9 @@ struct ClientConfig {
     std::chrono::seconds dns_refresh_interval{60};
     std::chrono::seconds latency_measure_interval{30};
 
+    // 并发连接设置（Happy Eyeballs优化）
+    std::chrono::seconds endpoint_connect_timeout{5};  // 单个endpoint的连接超时（默认5秒，比原来的30秒快得多）
+
     // P2P 配置
     struct P2PConfig {
         bool enabled = true;                    // 启用 P2P 直连

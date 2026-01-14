@@ -53,6 +53,10 @@ const char* frame_type_name(FrameType type) {
         case FrameType::PING: return "PING";
         case FrameType::PONG: return "PONG";
         case FrameType::LATENCY_REPORT: return "LATENCY_REPORT";
+        case FrameType::CONNECTION_METRICS: return "CONNECTION_METRICS";
+        case FrameType::PATH_SELECTION: return "PATH_SELECTION";
+        case FrameType::PEER_PATH_REPORT: return "PEER_PATH_REPORT";
+        case FrameType::PEER_ROUTING_UPDATE: return "PEER_ROUTING_UPDATE";
         case FrameType::P2P_INIT: return "P2P_INIT";
         case FrameType::P2P_ENDPOINT: return "P2P_ENDPOINT";
         case FrameType::P2P_PING: return "P2P_PING";

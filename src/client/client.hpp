@@ -10,6 +10,8 @@
 #include "client/config_applier.hpp"
 #include "client/endpoint_manager.hpp"
 #include "client/p2p_manager.hpp"
+#include "client/multi_relay_manager.hpp"
+#include "client/peer_latency_measurer.hpp"
 #include "common/node_state.hpp"
 
 #include <boost/asio.hpp>
@@ -349,6 +351,10 @@ private:
     std::unique_ptr<channels::RelayDataChannel> relay_data_ch_;
     std::unique_ptr<channels::RelayConnectedChannel> relay_connected_ch_;
     std::unique_ptr<channels::RelayDisconnectedChannel> relay_disconnected_ch_;
+
+    // Multi-path Relay support (optional)
+    std::shared_ptr<MultiRelayManager> multi_relay_mgr_;
+    std::shared_ptr<PeerLatencyMeasurer> latency_measurer_;
 
     ClientEvents events_;
 };
