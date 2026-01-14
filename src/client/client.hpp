@@ -16,6 +16,7 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -175,8 +176,11 @@ public:
     ConnectionPhase connection_phase() const { return state_machine_.connection_phase(); }
     bool is_online() const { return state_machine_.is_connected(); }
 
-    // Network routes (received from controller)
-    const std::vector<RouteInfo>& routes() const { return routes_; }
+    // Network routes (received from controller) - returns copy for thread safety
+    std::vector<RouteInfo> routes() const {
+        std::lock_guard lock(routes_mutex_);
+        return routes_;
+    }
 
     // TUN device (if enabled)
     TunDevice* tun_device() { return tun_.get(); }
@@ -276,7 +280,7 @@ private:
     ssl::context ssl_ctx_;
     ClientConfig config_;
     mutable std::shared_mutex config_mutex_;  // Protects config_ access
-    ClientState state_ = ClientState::STOPPED;
+    std::atomic<ClientState> state_{ClientState::STOPPED};
 
     CryptoEngine crypto_;
     PeerManager peers_;
@@ -297,6 +301,7 @@ private:
     static constexpr std::chrono::seconds max_reconnect_interval_{300};  // 最大 5 分钟
 
     // Cached DNS resolution results for change detection (using set to ignore order)
+    std::mutex dns_cache_mutex_;
     std::set<std::string> cached_controller_endpoints_set_;
 
     // TUN device (optional) - 使用 shared_ptr 以支持异步操作中的安全访问
@@ -317,7 +322,7 @@ private:
 
     // Network routes (received from controller)
     std::vector<RouteInfo> routes_;
-    std::mutex routes_mutex_;
+    mutable std::mutex routes_mutex_;
 
     // Pending ping state - 使用 channel 替代回调
     using PingResponseChannel = asio::experimental::channel<void(boost::system::error_code, uint16_t)>;
