@@ -33,6 +33,8 @@ asio::awaitable<void> PeerLatencyMeasurer::start() {
     running_ = true;
     measure_timer_ = std::make_unique<asio::steady_timer>(ioc_);
     report_timer_ = std::make_unique<asio::steady_timer>(ioc_);
+    measure_done_ch_ = std::make_unique<CompletionChannel>(ioc_, 1);
+    report_done_ch_ = std::make_unique<CompletionChannel>(ioc_, 1);
 
     log().info("Starting peer latency measurer (measure interval: {}s, report interval: {}s)",
                config_.measure_interval.count(), config_.report_interval.count());
@@ -42,18 +44,32 @@ asio::awaitable<void> PeerLatencyMeasurer::start() {
     asio::co_spawn(ioc_, report_loop(), asio::detached);
 }
 
-void PeerLatencyMeasurer::stop() {
+asio::awaitable<void> PeerLatencyMeasurer::stop() {
     if (!running_) {
-        return;
+        co_return;
     }
 
     running_ = false;
 
+    // 取消定时器并等待循环退出
     if (measure_timer_) {
         measure_timer_->cancel();
+        if (measure_done_ch_) {
+            try {
+                co_await measure_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable));
+                log().debug("Measure loop confirmed stopped");
+            } catch (...) {}
+        }
     }
+
     if (report_timer_) {
         report_timer_->cancel();
+        if (report_done_ch_) {
+            try {
+                co_await report_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable));
+                log().debug("Report loop confirmed stopped");
+            } catch (...) {}
+        }
     }
 
     log().info("Peer latency measurer stopped");
@@ -131,6 +147,11 @@ asio::awaitable<void> PeerLatencyMeasurer::measure_loop() {
     }
 
     log().debug("Measure loop stopped");
+
+    // 通知 stop() 循环已完成
+    if (measure_done_ch_) {
+        measure_done_ch_->try_send(boost::system::error_code{});
+    }
 }
 
 asio::awaitable<void> PeerLatencyMeasurer::report_loop() {
@@ -161,6 +182,11 @@ asio::awaitable<void> PeerLatencyMeasurer::report_loop() {
     }
 
     log().debug("Report loop stopped");
+
+    // 通知 stop() 循环已完成
+    if (report_done_ch_) {
+        report_done_ch_->try_send(boost::system::error_code{});
+    }
 }
 
 asio::awaitable<void> PeerLatencyMeasurer::measure_all_paths() {

@@ -72,6 +72,7 @@ asio::awaitable<bool> MultiRelayManager::initialize(
     // 启动 RTT 测量循环
     running_ = true;
     rtt_timer_ = std::make_unique<asio::steady_timer>(ioc_);
+    rtt_loop_done_ch_ = std::make_unique<CompletionChannel>(ioc_, 1);
     asio::co_spawn(ioc_, rtt_measure_loop(), asio::detached);
 
     log().info("Multi-relay manager initialized: {}/{} relays connected",
@@ -83,8 +84,22 @@ asio::awaitable<bool> MultiRelayManager::initialize(
 asio::awaitable<void> MultiRelayManager::stop() {
     running_ = false;
 
+    // 取消 RTT 定时器并等待循环退出
     if (rtt_timer_) {
         rtt_timer_->cancel();
+
+        // 等待 RTT 循环实际退出（避免 use-after-free）
+        if (rtt_loop_done_ch_) {
+            try {
+                auto [ec] = co_await rtt_loop_done_ch_->async_receive(
+                    asio::as_tuple(asio::use_awaitable));
+                if (!ec) {
+                    log().debug("RTT measure loop confirmed stopped");
+                }
+            } catch (...) {
+                log().debug("Failed to wait for RTT loop completion");
+            }
+        }
     }
 
     std::vector<std::shared_ptr<RelayConnectionPool>> pools;
@@ -297,6 +312,11 @@ asio::awaitable<void> MultiRelayManager::rtt_measure_loop() {
     }
 
     log().debug("RTT measure loop stopped");
+
+    // 通知 stop() 循环已完成
+    if (rtt_loop_done_ch_) {
+        rtt_loop_done_ch_->try_send(boost::system::error_code{});
+    }
 }
 
 } // namespace edgelink::client

@@ -1037,7 +1037,7 @@ asio::awaitable<void> Client::stop() {
     // Stop latency measurer first (depends on multi_relay_mgr_)
     if (latency_measurer_) {
         log().debug("Stopping latency measurer...");
-        latency_measurer_->stop();
+        co_await latency_measurer_->stop();
         latency_measurer_.reset();
         log().debug("Latency measurer stopped");
     }

@@ -8,6 +8,7 @@
 #include <map>
 #include <shared_mutex>
 #include <chrono>
+#include <boost/asio/experimental/channel.hpp>
 
 namespace edgelink::client {
 
@@ -46,8 +47,8 @@ public:
     // 启动测量循环
     asio::awaitable<void> start();
 
-    // 停止测量
-    void stop();
+    // 停止测量 (异步等待循环退出)
+    asio::awaitable<void> stop();
 
     // 设置上报回调（用于发送 PEER_PATH_REPORT）
     void set_report_callback(ReportCallback callback);
@@ -100,6 +101,11 @@ private:
     bool running_ = false;
     std::unique_ptr<asio::steady_timer> measure_timer_;
     std::unique_ptr<asio::steady_timer> report_timer_;
+
+    // 循环完成通知 (用于同步 stop)
+    using CompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    std::unique_ptr<CompletionChannel> measure_done_ch_;
+    std::unique_ptr<CompletionChannel> report_done_ch_;
 
     // PING 追踪（用于计算 RTT）
     struct PendingPing {

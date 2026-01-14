@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <shared_mutex>
 #include <chrono>
+#include <boost/asio/experimental/channel.hpp>
 
 namespace edgelink::client {
 
@@ -94,6 +95,10 @@ private:
     // 运行状态
     bool running_ = false;
     std::unique_ptr<asio::steady_timer> rtt_timer_;
+
+    // RTT 循环完成通知 (用于同步 stop)
+    using CompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    std::unique_ptr<CompletionChannel> rtt_loop_done_ch_;
 };
 
 } // namespace edgelink::client
