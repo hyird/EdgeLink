@@ -730,7 +730,10 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
     if (!resp->success) {
         log().error("Authentication failed: {} (code {})", resp->error_msg, resp->error_code);
         if (channels_.error) {
-            channels_.error->try_send(boost::system::error_code{}, resp->error_code, resp->error_msg);
+            bool sent = channels_.error->try_send(boost::system::error_code{}, resp->error_code, resp->error_msg);
+            if (!sent) {
+                log().warn("Failed to send auth error event (channel full or closed)");
+            }
         }
         co_return;
     }
@@ -750,7 +753,10 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
     // This ensures peers are populated before on_connected is called
 
     if (channels_.auth_response) {
-        channels_.auth_response->try_send(boost::system::error_code{}, *resp);
+        bool sent = channels_.auth_response->try_send(boost::system::error_code{}, *resp);
+        if (!sent) {
+            log().warn("Failed to send auth response event (channel full or closed)");
+        }
     }
 }
 
@@ -772,14 +778,20 @@ asio::awaitable<void> ControlChannel::handle_config(const Frame& frame) {
     }
 
     if (channels_.config) {
-        channels_.config->try_send(boost::system::error_code{}, *config);
+        bool sent = channels_.config->try_send(boost::system::error_code{}, *config);
+        if (!sent) {
+            log().warn("Failed to send config event (channel full or closed)");
+        }
     }
 
     // Mark as connected after receiving initial CONFIG (peers are now populated)
     if (state_ != ChannelState::CONNECTED) {
         state_ = ChannelState::CONNECTED;
         if (channels_.connected) {
-            channels_.connected->try_send(boost::system::error_code{});
+            bool sent = channels_.connected->try_send(boost::system::error_code{});
+            if (!sent) {
+                log().warn("Failed to send connected event (channel full or closed)");
+            }
         }
     }
 
@@ -803,7 +815,10 @@ asio::awaitable<void> ControlChannel::handle_config_update(const Frame& frame) {
     }
 
     if (channels_.config_update) {
-        channels_.config_update->try_send(boost::system::error_code{}, *update);
+        bool sent = channels_.config_update->try_send(boost::system::error_code{}, *update);
+        if (!sent) {
+            log().warn("Failed to send config update event (channel full or closed)");
+        }
     }
 }
 
@@ -818,7 +833,10 @@ asio::awaitable<void> ControlChannel::handle_route_update(const Frame& frame) {
                 update->version, update->add_routes.size(), update->del_routes.size());
 
     if (channels_.route_update) {
-        channels_.route_update->try_send(boost::system::error_code{}, *update);
+        bool sent = channels_.route_update->try_send(boost::system::error_code{}, *update);
+        if (!sent) {
+            log().warn("Failed to send route update event (channel full or closed)");
+        }
     }
 }
 
@@ -1473,7 +1491,10 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
     log().debug("Relay handle_data: decrypted {} bytes from {}", plaintext->size(), peer_ip);
 
     if (channels_.data) {
-        channels_.data->try_send(boost::system::error_code{}, data->src_node, std::move(*plaintext));
+        bool sent = channels_.data->try_send(boost::system::error_code{}, data->src_node, std::move(*plaintext));
+        if (!sent) {
+            log().warn("Failed to send data event for peer {} (channel full or closed)", peer_ip);
+        }
     }
 }
 

@@ -593,7 +593,10 @@ asio::awaitable<void> Client::relay_connected_handler() {
         state_ = ClientState::RUNNING;
 
         if (events_.connected) {
-            events_.connected->try_send(boost::system::error_code{});
+            bool sent = events_.connected->try_send(boost::system::error_code{});
+            if (!sent) {
+                log().warn("Failed to send connected event (channel full or closed)");
+            }
         }
 
         // Start keepalive
@@ -1086,7 +1089,10 @@ asio::awaitable<void> Client::stop() {
     log().info("Client stopped successfully");
 
     if (events_.disconnected) {
-        events_.disconnected->try_send(boost::system::error_code{});
+        bool sent = events_.disconnected->try_send(boost::system::error_code{});
+        if (!sent) {
+            log().debug("Failed to send disconnected event (channel closed)");
+        }
     }
 }
 
@@ -1364,7 +1370,10 @@ asio::awaitable<void> Client::reconnect() {
                     max_reconnect_attempts_);
         state_ = ClientState::STOPPED;
         if (events_.disconnected) {
-            events_.disconnected->try_send(boost::system::error_code{});
+            bool sent = events_.disconnected->try_send(boost::system::error_code{});
+            if (!sent) {
+                log().debug("Failed to send disconnected event (channel closed)");
+            }
         }
         co_return;
     }
