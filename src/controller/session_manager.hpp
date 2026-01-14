@@ -5,6 +5,7 @@
 #include "common/node_state.hpp"
 #include "controller/database.hpp"
 #include "controller/jwt_util.hpp"
+#include "controller/path_decision.hpp"
 #include <boost/asio.hpp>
 #include <functional>
 #include <memory>
@@ -71,6 +72,7 @@ public:
     Database& database() { return db_; }
     JwtUtil& jwt() { return jwt_; }
     asio::io_context& io_context() { return ioc_; }
+    PathDecisionEngine& path_decision() { return path_decision_; }
 
     // Get node IP string for logging (returns node_id as string if not found)
     std::string get_node_ip_str(NodeId node_id);
@@ -183,6 +185,9 @@ private:
 
     // 客户端状态机（统一管理所有客户端）
     ControllerStateMachine state_machine_;
+
+    // 路径决策引擎
+    PathDecisionEngine path_decision_;
 
     // 事件通道
     std::unique_ptr<channels::ClientOnlineChannel> client_online_channel_;

@@ -347,7 +347,11 @@ asio::awaitable<bool> ControlChannel::reconnect() {
             } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
                 co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            log().debug("Failed to close WebSocket before reconnect: {}", e.what());
+        } catch (...) {
+            log().debug("Failed to close WebSocket before reconnect: unknown error");
+        }
 
         // Reset stream pointers
         tls_ws_.reset();
@@ -566,7 +570,11 @@ asio::awaitable<void> ControlChannel::close() {
                 plain_ws_->next_layer().socket().close(ec);
             }
         }
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        log().debug("Error during control channel close: {}", e.what());
+    } catch (...) {
+        log().debug("Unknown error during control channel close");
+    }
 
     if (channels_.disconnected) {
         channels_.disconnected->try_send(boost::system::error_code{});
@@ -688,6 +696,9 @@ asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
             break;
         case FrameType::ROUTE_ACK:
             co_await handle_route_ack(frame);
+            break;
+        case FrameType::PEER_ROUTING_UPDATE:
+            co_await handle_peer_routing_update(frame);
             break;
         case FrameType::P2P_ENDPOINT:
             co_await handle_p2p_endpoint(frame);
@@ -822,6 +833,21 @@ asio::awaitable<void> ControlChannel::handle_route_ack(const Frame& frame) {
     } else {
         log().error("Route operation {} failed: {} (code {})",
                     ack->request_id, ack->error_msg, ack->error_code);
+    }
+}
+
+asio::awaitable<void> ControlChannel::handle_peer_routing_update(const Frame& frame) {
+    auto update = PeerRoutingUpdate::parse(frame.payload);
+    if (!update) {
+        log().error("Failed to parse PEER_ROUTING_UPDATE");
+        co_return;
+    }
+
+    log().debug("Received PEER_ROUTING_UPDATE v{} with {} routes",
+                update->version, update->routes.size());
+
+    if (channels_.peer_routing_update) {
+        channels_.peer_routing_update->try_send(boost::system::error_code{}, *update);
     }
 }
 
@@ -1208,7 +1234,11 @@ asio::awaitable<void> RelayChannel::close() {
                 plain_ws_->next_layer().socket().close(ec);
             }
         }
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        log().debug("Error during relay channel close: {}", e.what());
+    } catch (...) {
+        log().debug("Unknown error during relay channel close");
+    }
 
     if (channels_.disconnected) {
         channels_.disconnected->try_send(boost::system::error_code{});
@@ -1253,6 +1283,17 @@ asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const ui
     log().debug("Queued {} bytes for {} (encrypted {} bytes)",
                   plaintext.size(), peers_.get_peer_ip_str(peer_id), data.encrypted_payload.size());
     co_return true;
+}
+
+asio::awaitable<void> RelayChannel::send_ping() {
+    Ping ping;
+    ping.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    ping.seq_num = ++ping_seq_;
+    last_ping_time_ = ping.timestamp;
+
+    co_await send_frame(FrameType::PING, ping.serialize());
+    log().debug("Sent PING seq={} to relay", ping.seq_num);
 }
 
 asio::awaitable<void> RelayChannel::read_loop() {
@@ -1441,7 +1482,26 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
 }
 
 asio::awaitable<void> RelayChannel::handle_pong(const Frame& frame) {
-    // Handle PONG if needed
+    auto pong = Pong::parse(frame.payload);
+    if (!pong) {
+        log().warn("Failed to parse PONG");
+        co_return;
+    }
+
+    // Calculate RTT
+    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    if (last_ping_time_ > 0) {
+        uint16_t rtt_ms = static_cast<uint16_t>(now - last_ping_time_);
+        log().debug("Received PONG seq={}, RTT={}ms", pong->seq_num, rtt_ms);
+
+        // Notify via callback
+        if (channels_.on_pong) {
+            channels_.on_pong(rtt_ms);
+        }
+    }
+
     co_return;
 }
 

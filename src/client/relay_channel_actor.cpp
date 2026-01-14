@@ -325,7 +325,11 @@ asio::awaitable<void> RelayChannelActor::close_websocket() {
                 plain_ws_->next_layer().socket().close(ec);
             }
         }
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        log().debug("[{}] Error during WebSocket close: {}", name_, e.what());
+    } catch (...) {
+        log().debug("[{}] Unknown error during WebSocket close", name_);
+    }
 
     // 发送断开事件
     RelayChannelEvent event;

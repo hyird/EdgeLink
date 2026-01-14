@@ -1,5 +1,6 @@
 #include "client/peer_latency_measurer.hpp"
-#include "common/log.hpp"
+#include "common/logger.hpp"
+#include "common/math_utils.hpp"
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -7,9 +8,9 @@
 namespace edgelink::client {
 
 namespace {
-spdlog::logger& log() {
-    static auto logger = edgelink::create_logger("latency_measurer");
-    return *logger;
+auto& log() {
+    static auto& logger = Logger::get("latency_measurer");
+    return logger;
 }
 } // anonymous namespace
 
@@ -164,7 +165,7 @@ asio::awaitable<void> PeerLatencyMeasurer::report_loop() {
 
 asio::awaitable<void> PeerLatencyMeasurer::measure_all_paths() {
     // 获取所有 Peer
-    auto all_peers = peers_.all_peers();
+    auto all_peers = peers_.get_all_peers();
     if (all_peers.empty()) {
         log().trace("No peers to measure");
         co_return;
@@ -184,14 +185,14 @@ asio::awaitable<void> PeerLatencyMeasurer::measure_all_paths() {
     for (const auto& peer : all_peers) {
         for (const auto& pool : relay_pools) {
             try {
-                auto latency = co_await measure_single_path(peer.node_id, pool);
+                auto latency = co_await measure_single_path(peer.info.node_id, pool);
                 if (latency > 0) {
-                    update_latency(peer.node_id, pool->relay_id(),
+                    update_latency(peer.info.node_id, pool->relay_id(),
                                   pool->active_connection_id(), latency);
                 }
             } catch (const std::exception& e) {
                 log().trace("Failed to measure peer {} via relay {}: {}",
-                            peer.node_id, pool->relay_id(), e.what());
+                            peer.info.node_id, pool->relay_id(), e.what());
             }
         }
     }
@@ -238,12 +239,9 @@ void PeerLatencyMeasurer::update_latency(
     measurement.last_update = now;
     measurement.sample_count++;
 
-    // 使用指数移动平均
-    if (measurement.latency_ms == 0) {
-        measurement.latency_ms = latency_ms;
-    } else {
-        measurement.latency_ms = (measurement.latency_ms * 7 + latency_ms) / 8;
-    }
+
+    // 使用指数移动平均更新延迟
+    measurement.latency_ms = exponential_moving_average(measurement.latency_ms, latency_ms);
 
     log().trace("Updated latency: peer={}, relay={}, latency={}ms",
                 peer_id, relay_id, measurement.latency_ms);

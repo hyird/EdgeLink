@@ -125,6 +125,7 @@ void Client::setup_channels() {
     ctrl_config_ch_ = std::make_unique<channels::ConfigChannel>(ioc_, 4);
     ctrl_config_update_ch_ = std::make_unique<channels::ConfigUpdateChannel>(ioc_, 16);
     ctrl_route_update_ch_ = std::make_unique<channels::RouteUpdateChannel>(ioc_, 16);
+    ctrl_peer_routing_update_ch_ = std::make_unique<channels::PeerRoutingUpdateChannel>(ioc_, 16);
     ctrl_p2p_endpoint_ch_ = std::make_unique<channels::P2PEndpointMsgChannel>(ioc_, 32);
     ctrl_error_ch_ = std::make_unique<channels::ControlErrorChannel>(ioc_, 8);
     ctrl_connected_ch_ = std::make_unique<channels::ControlConnectedChannel>(ioc_, 4);
@@ -136,6 +137,7 @@ void Client::setup_channels() {
     ctrl_events.config = ctrl_config_ch_.get();
     ctrl_events.config_update = ctrl_config_update_ch_.get();
     ctrl_events.route_update = ctrl_route_update_ch_.get();
+    ctrl_events.peer_routing_update = ctrl_peer_routing_update_ch_.get();
     ctrl_events.p2p_endpoint = ctrl_p2p_endpoint_ch_.get();
     ctrl_events.error = ctrl_error_ch_.get();
     ctrl_events.connected = ctrl_connected_ch_.get();
@@ -159,6 +161,7 @@ void Client::setup_channels() {
     asio::co_spawn(ioc_, ctrl_config_handler(), asio::detached);
     asio::co_spawn(ioc_, ctrl_config_update_handler(), asio::detached);
     asio::co_spawn(ioc_, ctrl_route_update_handler(), asio::detached);
+    asio::co_spawn(ioc_, ctrl_peer_routing_update_handler(), asio::detached);
     asio::co_spawn(ioc_, ctrl_p2p_endpoint_handler(), asio::detached);
     asio::co_spawn(ioc_, ctrl_error_handler(), asio::detached);
     asio::co_spawn(ioc_, ctrl_connected_handler(), asio::detached);
@@ -216,6 +219,43 @@ asio::awaitable<void> Client::ctrl_config_handler() {
 
         if (endpoint_mgr_ && !config.stuns.empty()) {
             endpoint_mgr_->set_stun_servers(config.stuns);
+        }
+
+        // Initialize multi-relay manager if not already initialized and relays are available
+        if (!multi_relay_mgr_ && !config.relays.empty()) {
+            MultiRelayConfig relay_config;
+            relay_config.enabled = true;
+            relay_config.max_connections_per_relay = 2;  // Conservative default
+            relay_config.rtt_measure_interval = std::chrono::seconds(10);
+
+            multi_relay_mgr_ = std::make_shared<MultiRelayManager>(
+                ioc_, ssl_ctx_, crypto_, peers_, relay_config);
+
+            log().info("MultiRelayManager initialized with {} relays", config.relays.size());
+
+            // Start multi-relay manager
+            auto self = shared_from_this();
+            asio::co_spawn(ioc_, [self, relays = config.relays, relay_token = config.relay_token, use_tls = config_.tls]() -> asio::awaitable<void> {
+                try {
+                    co_await self->multi_relay_mgr_->initialize(relays, relay_token, use_tls);
+                    log().info("MultiRelayManager initialized successfully");
+
+                    // Initialize latency measurer after relay manager is started
+                    if (!self->latency_measurer_) {
+                        LatencyMeasureConfig latency_config;
+                        latency_config.measure_interval = std::chrono::seconds(30);
+                        latency_config.report_interval = std::chrono::seconds(60);
+
+                        self->latency_measurer_ = std::make_shared<PeerLatencyMeasurer>(
+                            self->ioc_, *self->multi_relay_mgr_, self->peers_, latency_config);
+
+                        co_await self->latency_measurer_->start();
+                        log().info("PeerLatencyMeasurer started successfully");
+                    }
+                } catch (const std::exception& e) {
+                    log().error("Failed to start multi-relay system: {}", e.what());
+                }
+            }, asio::detached);
         }
 
         if (config_.accept_routes && is_tun_enabled()) {
@@ -357,6 +397,27 @@ asio::awaitable<void> Client::ctrl_route_update_handler() {
 
         if (route_mgr_) {
             route_mgr_->apply_route_update(update.add_routes, update.del_routes);
+        }
+    }
+}
+
+asio::awaitable<void> Client::ctrl_peer_routing_update_handler() {
+    while (state_ != ClientState::STOPPED) {
+        auto [ec, update] = co_await ctrl_peer_routing_update_ch_->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                log().debug("ctrl_peer_routing_update_handler channel error: {}", ec.message());
+            }
+            break;
+        }
+
+        log().info("Peer routing update v{} with {} routes",
+                   update.version, update.routes.size());
+
+        // 传递给 MultiRelayManager 处理
+        if (multi_relay_mgr_) {
+            multi_relay_mgr_->handle_peer_routing_update(update);
         }
     }
 }
@@ -797,7 +858,13 @@ asio::awaitable<bool> Client::start() {
         }
 
         if (!control_->is_connected()) {
-            try { co_await control_->close(); } catch (...) {}
+            try {
+                co_await control_->close();
+            } catch (const std::exception& e) {
+                log().debug("Failed to close control channel: {}", e.what());
+            } catch (...) {
+                log().debug("Failed to close control channel: unknown error");
+            }
             control_.reset();
             relay_.reset();
             continue;  // 尝试下一个 controller
@@ -810,7 +877,13 @@ asio::awaitable<bool> Client::start() {
         connected = co_await relay_->connect(control_->relay_token());
         if (!connected) {
             log().warn("Failed to connect to relay {}:{}", host, port);
-            try { co_await control_->close(); } catch (...) {}
+            try {
+                co_await control_->close();
+            } catch (const std::exception& e) {
+                log().debug("Failed to close control channel: {}", e.what());
+            } catch (...) {
+                log().debug("Failed to close control channel: unknown error");
+            }
             control_.reset();
             relay_.reset();
             continue;  // 尝试下一个 controller
@@ -829,7 +902,13 @@ asio::awaitable<bool> Client::start() {
         }
 
         if (!relay_->is_connected()) {
-            try { co_await control_->close(); } catch (...) {}
+            try {
+                co_await control_->close();
+            } catch (const std::exception& e) {
+                log().debug("Failed to close control channel: {}", e.what());
+            } catch (...) {
+                log().debug("Failed to close control channel: unknown error");
+            }
             control_.reset();
             relay_.reset();
             continue;  // 尝试下一个 controller
@@ -946,9 +1025,17 @@ asio::awaitable<bool> Client::send_to_peer(NodeId peer_id, std::span<const uint8
         }
     }
 
-    // 通过 Relay 发送
+    // 优先使用 MultiRelayManager（智能路由选择）
+    if (multi_relay_mgr_ && multi_relay_mgr_->has_available_connection()) {
+        auto channel = multi_relay_mgr_->get_channel_for_peer(peer_id);
+        if (channel && channel->is_connected()) {
+            co_return co_await channel->send_data(peer_id, data);
+        }
+    }
+
+    // 回退到单 Relay 发送
     if (!relay_ || !relay_->is_connected()) {
-        log().warn("Cannot send: relay not connected");
+        log().warn("Cannot send: no relay connected");
         co_return false;
     }
 
@@ -1187,16 +1274,34 @@ asio::awaitable<void> Client::reconnect() {
     // 【关键修复】停止 P2P manager，确保后台任务终止
     // 避免重连时老协程与新状态不一致导致崩溃
     if (p2p_mgr_) {
-        try { co_await p2p_mgr_->stop(); } catch (...) {}
+        try {
+            co_await p2p_mgr_->stop();
+        } catch (const std::exception& e) {
+            log().debug("Failed to stop P2P manager: {}", e.what());
+        } catch (...) {
+            log().debug("Failed to stop P2P manager: unknown error");
+        }
     }
 
     // Close existing channels
     if (relay_) {
-        try { co_await relay_->close(); } catch (...) {}
+        try {
+            co_await relay_->close();
+        } catch (const std::exception& e) {
+            log().debug("Failed to close relay channel: {}", e.what());
+        } catch (...) {
+            log().debug("Failed to close relay channel: unknown error");
+        }
         relay_.reset();
     }
     if (control_) {
-        try { co_await control_->close(); } catch (...) {}
+        try {
+            co_await control_->close();
+        } catch (const std::exception& e) {
+            log().debug("Failed to close control channel: {}", e.what());
+        } catch (...) {
+            log().debug("Failed to close control channel: unknown error");
+        }
         control_.reset();
     }
 

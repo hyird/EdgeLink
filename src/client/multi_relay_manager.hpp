@@ -5,7 +5,7 @@
 #include "common/types.hpp"
 #include "common/message.hpp"
 #include "common/crypto.hpp"
-#include "common/peer_manager.hpp"
+#include "client/peer_manager.hpp"
 #include <memory>
 #include <unordered_map>
 #include <shared_mutex>

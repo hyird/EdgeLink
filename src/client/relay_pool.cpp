@@ -1,16 +1,18 @@
 #include "client/relay_pool.hpp"
-#include "common/log.hpp"
+#include "common/logger.hpp"
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <atomic>
+#include "common/math_utils.hpp"
 
 namespace edgelink::client {
 
 namespace {
-spdlog::logger& log() {
-    static auto logger = edgelink::create_logger("relay_pool");
-    return *logger;
+auto& log() {
+    static auto& logger = Logger::get("relay_pool");
+    return logger;
 }
 } // anonymous namespace
 
@@ -39,10 +41,17 @@ asio::awaitable<bool> RelayConnectionPool::connect_all(
         // 使用 RelayInfo 中预配置的 endpoints
         for (const auto& ep : relay_info_.endpoints) {
             try {
-                auto addr = asio::ip::make_address(ep.address);
-                endpoints.emplace_back(addr, ep.port);
+                if (ep.ip_type == IpType::IPv4) {
+                    asio::ip::address_v4::bytes_type bytes;
+                    std::copy_n(ep.address.begin(), 4, bytes.begin());
+                    auto addr = asio::ip::make_address_v4(bytes);
+                    endpoints.emplace_back(addr, ep.port);
+                } else {
+                    auto addr = asio::ip::make_address_v6(ep.address);
+                    endpoints.emplace_back(addr, ep.port);
+                }
             } catch (const std::exception& e) {
-                log().warn("Invalid endpoint address {}: {}", ep.address, e.what());
+                log().warn("Invalid endpoint in relay config: {}", e.what());
             }
         }
     }
@@ -109,8 +118,15 @@ asio::awaitable<bool> RelayConnectionPool::connect_single(
     auto channel = std::make_shared<RelayChannel>(
         ioc_, ssl_ctx_, crypto_, peers_, url, use_tls_);
 
-    // 设置事件通道
-    channel->set_channels(channels_);
+    // 生成连接 ID（需要在设置回调前生成）
+    ConnectionId conn_id = generate_connection_id();
+
+    // 设置事件通道（包含 RTT 回调）
+    RelayChannelEvents ch = channels_;
+    ch.on_pong = [this, conn_id](uint16_t rtt_ms) {
+        this->update_rtt(conn_id, rtt_ms);
+    };
+    channel->set_channels(ch);
 
     // 连接
     auto start_time = std::chrono::steady_clock::now();
@@ -123,9 +139,6 @@ asio::awaitable<bool> RelayConnectionPool::connect_single(
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_time).count();
-
-    // 生成连接 ID
-    ConnectionId conn_id = generate_connection_id();
 
     // 存储连接信息
     {
@@ -166,8 +179,10 @@ asio::awaitable<void> RelayConnectionPool::close_all() {
     for (auto& channel : channels_to_close) {
         try {
             co_await channel->close();
+        } catch (const std::exception& e) {
+            log().debug("Failed to close relay channel: {}", e.what());
         } catch (...) {
-            // 忽略关闭错误
+            log().debug("Failed to close relay channel: unknown error");
         }
     }
 
@@ -210,8 +225,34 @@ size_t RelayConnectionPool::connection_count() const {
 }
 
 asio::awaitable<void> RelayConnectionPool::measure_rtt_all() {
-    // TODO: 实现 RTT 测量
-    // 需要 RelayChannel 支持 PING/PONG
+    std::vector<std::pair<ConnectionId, std::shared_ptr<RelayChannel>>> active_connections;
+
+    // Collect all active connections
+    {
+        std::shared_lock lock(mutex_);
+        for (const auto& [id, info] : connections_) {
+            if (info.channel && info.channel->is_connected()) {
+                active_connections.emplace_back(id, info.channel);
+            }
+        }
+    }
+
+    if (active_connections.empty()) {
+        co_return;
+    }
+
+    log().debug("Measuring RTT for {} relay connections", active_connections.size());
+
+    // Send PING to all connections
+    for (const auto& [conn_id, channel] : active_connections) {
+        try {
+            co_await channel->send_ping();
+        } catch (const std::exception& e) {
+            log().warn("Failed to send PING to connection 0x{:08x}: {}", conn_id, e.what());
+        }
+    }
+
+    // Note: RTT updates are handled via on_pong callback set in set_channels()
     co_return;
 }
 
@@ -287,11 +328,16 @@ ConnectionId RelayConnectionPool::active_connection_id() const {
 void RelayConnectionPool::set_channels(RelayChannelEvents channels) {
     channels_ = channels;
 
-    // 更新已有连接的通道
+    // 更新已有连接的通道，并设置 RTT 回调
     std::shared_lock lock(mutex_);
     for (auto& [id, info] : connections_) {
         if (info.channel) {
-            info.channel->set_channels(channels);
+            // Create a copy of channels with our RTT callback
+            RelayChannelEvents ch = channels;
+            ch.on_pong = [this, conn_id = id](uint16_t rtt_ms) {
+                this->update_rtt(conn_id, rtt_ms);
+            };
+            info.channel->set_channels(ch);
         }
     }
 }
@@ -338,9 +384,12 @@ asio::awaitable<std::vector<tcp::endpoint>> RelayConnectionPool::resolve_endpoin
 }
 
 ConnectionId RelayConnectionPool::generate_connection_id() {
-    // 使用时间戳 + 随机数生成唯一 ID
+    // 使用原子计数器 + 时间戳的高位确保唯一性
+    static std::atomic<uint32_t> counter{0};
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    return static_cast<ConnectionId>(now & 0xFFFFFFFF);
+    uint32_t time_part = static_cast<uint32_t>((now >> 16) & 0xFFFF0000);
+    uint32_t counter_part = counter.fetch_add(1, std::memory_order_relaxed) & 0x0000FFFF;
+    return time_part | counter_part;
 }
 
 void RelayConnectionPool::update_rtt(ConnectionId id, uint16_t rtt_ms) {
@@ -355,8 +404,8 @@ void RelayConnectionPool::update_rtt(ConnectionId id, uint16_t rtt_ms) {
         if (rtt_ms < stats.min_rtt_ms) stats.min_rtt_ms = rtt_ms;
         if (rtt_ms > stats.max_rtt_ms) stats.max_rtt_ms = rtt_ms;
 
-        // 简单的移动平均
-        stats.avg_rtt_ms = (stats.avg_rtt_ms * 7 + rtt_ms) / 8;
+        // 指数移动平均
+        stats.avg_rtt_ms = exponential_moving_average(stats.avg_rtt_ms, rtt_ms);
         stats.last_rtt_time = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
     }

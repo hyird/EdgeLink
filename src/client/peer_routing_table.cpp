@@ -1,13 +1,13 @@
 #include "client/peer_routing_table.hpp"
-#include "common/log.hpp"
+#include "common/logger.hpp"
 #include <chrono>
 
 namespace edgelink::client {
 
 namespace {
-spdlog::logger& log() {
-    static auto logger = edgelink::create_logger("peer_routing");
-    return *logger;
+auto& log() {
+    static auto& logger = Logger::get("peer_routing");
+    return logger;
 }
 } // anonymous namespace
 

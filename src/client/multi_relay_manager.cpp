@@ -1,5 +1,5 @@
 #include "client/multi_relay_manager.hpp"
-#include "common/log.hpp"
+#include "common/logger.hpp"
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -7,9 +7,9 @@
 namespace edgelink::client {
 
 namespace {
-spdlog::logger& log() {
-    static auto logger = edgelink::create_logger("multi_relay");
-    return *logger;
+auto& log() {
+    static auto& logger = Logger::get("multi_relay");
+    return logger;
 }
 } // anonymous namespace
 

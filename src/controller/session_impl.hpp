@@ -46,8 +46,10 @@ template<typename StreamType>
 asio::awaitable<void> SessionBase<StreamType>::close() {
     try {
         co_await ws_.async_close(websocket::close_code::normal, asio::use_awaitable);
+    } catch (const std::exception& e) {
+        LOG_DEBUG("controller.session", "Failed to close session WebSocket: {}", e.what());
     } catch (...) {
-        // Ignore close errors
+        LOG_DEBUG("controller.session", "Failed to close session WebSocket: unknown error");
     }
 }
 
@@ -531,11 +533,16 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_peer_path_report(co
                     entry.latency_ms, entry.connection_id, entry.packet_loss);
     }
 
-    // TODO: 将数据传递给 PathDecisionEngine
-    // 并在需要时发送 PEER_ROUTING_UPDATE 给该节点
-    // this->manager_.path_decision().handle_peer_path_report(this->node_id_, *report);
-    // auto routing = this->manager_.path_decision().compute_routing_for_node(this->node_id_);
-    // co_await this->send_frame(FrameType::PEER_ROUTING_UPDATE, routing.serialize());
+    // 将数据传递给 PathDecisionEngine 并计算最优路由
+    this->manager_.path_decision().handle_peer_path_report(this->node_id_, *report);
+    auto routing = this->manager_.path_decision().compute_routing_for_node(this->node_id_);
+
+    // 发送路由更新给该节点
+    if (!routing.routes.empty()) {
+        co_await this->send_frame(FrameType::PEER_ROUTING_UPDATE, routing.serialize());
+        log().debug("Sent PEER_ROUTING_UPDATE to node {} with {} entries",
+                   this->node_id_, routing.routes.size());
+    }
 }
 
 template<typename StreamType>

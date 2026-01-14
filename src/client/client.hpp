@@ -220,6 +220,7 @@ private:
     asio::awaitable<void> ctrl_config_handler();
     asio::awaitable<void> ctrl_config_update_handler();
     asio::awaitable<void> ctrl_route_update_handler();
+    asio::awaitable<void> ctrl_peer_routing_update_handler();
     asio::awaitable<void> ctrl_p2p_endpoint_handler();
     asio::awaitable<void> ctrl_error_handler();
     asio::awaitable<void> ctrl_connected_handler();
@@ -342,6 +343,7 @@ private:
     std::unique_ptr<channels::ConfigChannel> ctrl_config_ch_;
     std::unique_ptr<channels::ConfigUpdateChannel> ctrl_config_update_ch_;
     std::unique_ptr<channels::RouteUpdateChannel> ctrl_route_update_ch_;
+    std::unique_ptr<channels::PeerRoutingUpdateChannel> ctrl_peer_routing_update_ch_;
     std::unique_ptr<channels::P2PEndpointMsgChannel> ctrl_p2p_endpoint_ch_;
     std::unique_ptr<channels::ControlErrorChannel> ctrl_error_ch_;
     std::unique_ptr<channels::ControlConnectedChannel> ctrl_connected_ch_;

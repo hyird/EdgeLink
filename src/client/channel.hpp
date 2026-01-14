@@ -43,6 +43,8 @@ using ConfigUpdateChannel = asio::experimental::channel<
     void(boost::system::error_code, ConfigUpdate)>;
 using RouteUpdateChannel = asio::experimental::channel<
     void(boost::system::error_code, RouteUpdate)>;
+using PeerRoutingUpdateChannel = asio::experimental::channel<
+    void(boost::system::error_code, PeerRoutingUpdate)>;
 using P2PEndpointMsgChannel = asio::experimental::channel<
     void(boost::system::error_code, P2PEndpointMsg)>;
 using ControlErrorChannel = asio::experimental::channel<
@@ -68,6 +70,7 @@ struct ControlChannelEvents {
     channels::ConfigChannel* config = nullptr;
     channels::ConfigUpdateChannel* config_update = nullptr;
     channels::RouteUpdateChannel* route_update = nullptr;
+    channels::PeerRoutingUpdateChannel* peer_routing_update = nullptr;
     channels::P2PEndpointMsgChannel* p2p_endpoint = nullptr;
     channels::ControlErrorChannel* error = nullptr;
     channels::ControlConnectedChannel* connected = nullptr;
@@ -79,6 +82,7 @@ struct RelayChannelEvents {
     channels::RelayDataChannel* data = nullptr;
     channels::RelayConnectedChannel* connected = nullptr;
     channels::RelayDisconnectedChannel* disconnected = nullptr;
+    std::function<void(uint16_t rtt_ms)> on_pong = nullptr;
 };
 
 // Client 对外事件通道（替代 ClientCallbacks）
@@ -200,6 +204,7 @@ private:
     asio::awaitable<void> handle_config_update(const Frame& frame);
     asio::awaitable<void> handle_route_update(const Frame& frame);
     asio::awaitable<void> handle_route_ack(const Frame& frame);
+    asio::awaitable<void> handle_peer_routing_update(const Frame& frame);
     asio::awaitable<void> handle_p2p_endpoint(const Frame& frame);
     asio::awaitable<void> handle_endpoint_ack(const Frame& frame);
     asio::awaitable<void> handle_pong(const Frame& frame);
@@ -271,6 +276,9 @@ public:
     // Send encrypted DATA to peer
     asio::awaitable<bool> send_data(NodeId peer_id, std::span<const uint8_t> plaintext);
 
+    // Send PING to measure RTT
+    asio::awaitable<void> send_ping();
+
     // Set event channels
     void set_channels(RelayChannelEvents channels);
 
@@ -309,6 +317,10 @@ private:
     std::queue<std::vector<uint8_t>> write_queue_;
     bool writing_ = false;
     asio::steady_timer write_timer_;
+
+    // Ping tracking
+    uint32_t ping_seq_ = 0;
+    uint64_t last_ping_time_ = 0;
 
     RelayChannelEvents channels_;
 };

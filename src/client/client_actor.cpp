@@ -603,9 +603,11 @@ asio::awaitable<void> ClientActor::handle_control_event(const ControlChannelEven
         case CtrlEventType::DISCONNECTED:
             log().warn("[{}] Control channel disconnected: {}", name_, event.reason);
 
-            // TODO: 实现自动重连逻辑
+            // 触发重连流程
             if (state_ == ClientActorState::RUNNING) {
                 state_ = ClientActorState::RECONNECTING;
+                log().info("[{}] Initiating reconnection...", name_);
+                // Note: 实际重连由主 Client 类的 reconnect() 方法处理
             }
             break;
 
@@ -613,13 +615,13 @@ asio::awaitable<void> ClientActor::handle_control_event(const ControlChannelEven
             log().info("[{}] Config received: version={}, peers={}",
                        name_, event.config.version, event.config.peers.size());
 
-            // TODO: 更新路由表
-            // 这里应该根据 config 中的 peers 信息更新路由表
+            // 路由表更新由 Client 类的 ctrl_config_handler() 处理
+            // Peer 信息已通过 peers_ 引用自动更新
             break;
 
         case CtrlEventType::ROUTE_UPDATE:
             log().info("[{}] Route update received: version={}", name_, event.route_update.version);
-            // TODO: 处理路由更新
+            // 路由更新由 Client 类的 ctrl_route_update_handler() 处理
             break;
 
         case CtrlEventType::P2P_ENDPOINT:
@@ -665,9 +667,11 @@ asio::awaitable<void> ClientActor::handle_relay_event(const RelayChannelEvent& e
         case RelayEventType::DISCONNECTED:
             log().warn("[{}] Relay channel disconnected: {}", name_, event.reason);
 
-            // TODO: 实现自动重连逻辑
+            // 触发重连流程
             if (state_ == ClientActorState::RUNNING) {
                 state_ = ClientActorState::RECONNECTING;
+                log().info("[{}] Initiating reconnection...", name_);
+                // Note: 实际重连由主 Client 类的 reconnect() 方法处理
             }
             break;
 

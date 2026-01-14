@@ -1,15 +1,13 @@
 #include "controller/path_decision.hpp"
-#include "common/log.hpp"
+#include "common/logger.hpp"
+#include "common/math_utils.hpp"
 #include <algorithm>
 #include <set>
 
 namespace edgelink::controller {
 
 namespace {
-spdlog::logger& log() {
-    static auto logger = edgelink::create_logger("path_decision");
-    return *logger;
-}
+auto& log() { return Logger::get("controller.path_decision"); }
 } // anonymous namespace
 
 PathDecisionEngine::PathDecisionEngine() = default;
@@ -34,11 +32,8 @@ void PathDecisionEngine::handle_peer_path_report(
         matrix_entry.packet_loss = entry.packet_loss;
 
         // 使用指数移动平均
-        if (matrix_entry.latency_ms == 0) {
-            matrix_entry.latency_ms = entry.latency_ms;
-        } else {
-            matrix_entry.latency_ms = (matrix_entry.latency_ms * 7 + entry.latency_ms) / 8;
-        }
+        // 使用指数移动平均更新延迟
+        matrix_entry.latency_ms = exponential_moving_average(matrix_entry.latency_ms, entry.latency_ms);
 
         log().trace("Updated latency: {} -> {} via relay {}: {}ms",
                     from_node, entry.peer_node_id, entry.relay_id,

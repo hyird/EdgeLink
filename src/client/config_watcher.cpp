@@ -62,8 +62,10 @@ bool ConfigWatcher::reload() {
     try {
         last_write_time_ = std::filesystem::last_write_time(config_path_);
         last_hash_ = compute_file_hash();
+    } catch (const std::exception& e) {
+        LOG_DEBUG("client.config", "Failed to update file status: {}", e.what());
     } catch (...) {
-        // 忽略
+        LOG_DEBUG("client.config", "Failed to update file status: unknown error");
     }
 
     // 转换为 client::ClientConfig
