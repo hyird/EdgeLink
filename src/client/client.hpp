@@ -290,6 +290,11 @@ private:
     asio::steady_timer latency_timer_;
     asio::steady_timer route_announce_timer_;
 
+    // Reconnection backoff state
+    size_t reconnect_attempts_ = 0;
+    static constexpr size_t max_reconnect_attempts_ = 20;  // 最大重试次数
+    static constexpr std::chrono::seconds max_reconnect_interval_{300};  // 最大 5 分钟
+
     // Cached DNS resolution results for change detection (using set to ignore order)
     std::set<std::string> cached_controller_endpoints_set_;
 

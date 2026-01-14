@@ -976,6 +976,9 @@ asio::awaitable<void> Client::stop() {
     latency_timer_.cancel();
     route_announce_timer_.cancel();
 
+    // Reset reconnect counter
+    reconnect_attempts_ = 0;
+
     // Stop config watcher (has background watch loop)
     if (config_watcher_) {
         log().debug("Stopping config watcher...");
@@ -1294,7 +1297,31 @@ asio::awaitable<void> Client::reconnect() {
     }
 
     state_ = ClientState::RECONNECTING;
-    log().info("Attempting to reconnect...");
+
+    // Check if we've exceeded maximum retry attempts
+    if (reconnect_attempts_ >= max_reconnect_attempts_) {
+        log().error("Maximum reconnect attempts ({}) exceeded, giving up",
+                    max_reconnect_attempts_);
+        state_ = ClientState::STOPPED;
+        if (events_.disconnected) {
+            events_.disconnected->try_send(boost::system::error_code{});
+        }
+        co_return;
+    }
+
+    reconnect_attempts_++;
+
+    // Calculate exponential backoff: interval * 2^(attempts-1)
+    // But cap at max_reconnect_interval_
+    auto backoff_multiplier = (1 << (reconnect_attempts_ - 1));  // 2^(attempts-1)
+    auto backoff_interval = config_.reconnect_interval * backoff_multiplier;
+    if (backoff_interval > max_reconnect_interval_) {
+        backoff_interval = max_reconnect_interval_;
+    }
+
+    log().info("Attempting to reconnect (attempt {}/{}, backoff: {}s)...",
+               reconnect_attempts_, max_reconnect_attempts_,
+               backoff_interval.count());
 
     // Clear DNS cache so it will be re-initialized after reconnect
     cached_controller_endpoints_set_.clear();
@@ -1337,17 +1364,22 @@ asio::awaitable<void> Client::reconnect() {
     }
 
     try {
-        reconnect_timer_.expires_after(config_.reconnect_interval);
+        reconnect_timer_.expires_after(backoff_interval);
         co_await reconnect_timer_.async_wait(asio::use_awaitable);
 
         // Try to reconnect
         state_ = ClientState::STOPPED;
         bool success = co_await start();
 
-        if (!success && config_.auto_reconnect) {
+        if (success) {
+            // Reconnect succeeded, reset retry counter
+            reconnect_attempts_ = 0;
+            log().info("Reconnect successful");
+        } else if (config_.auto_reconnect) {
             // start() failed, schedule another attempt
-            log().warn("Reconnect failed, will retry in {}s",
-                         config_.reconnect_interval.count());
+            log().warn("Reconnect failed, will retry in {}s (attempt {}/{})",
+                       backoff_interval.count(), reconnect_attempts_,
+                       max_reconnect_attempts_);
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         }
 
@@ -1358,6 +1390,9 @@ asio::awaitable<void> Client::reconnect() {
             if (config_.auto_reconnect) {
                 asio::co_spawn(ioc_, reconnect(), asio::detached);
             }
+        } else {
+            // Operation was cancelled (likely due to stop())
+            reconnect_attempts_ = 0;  // Reset counter on cancellation
         }
     }
 }
