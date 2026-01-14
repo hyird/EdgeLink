@@ -60,8 +60,9 @@ public:
     std::optional<uint16_t> get_latency(NodeId peer_id, ServerId relay_id) const;
 
     // 记录收到的 PONG 响应（用于 RTT 计算）
-    void record_pong(NodeId peer_id, ServerId relay_id,
-                     ConnectionId conn_id, uint64_t send_time);
+    // seq: 从 PONG 消息中提取的序列号（包含 relay_id 编码）
+    // send_time: 从 PONG 消息中提取的发送时间戳
+    void record_pong(NodeId peer_id, uint32_t seq, uint64_t send_time);
 
     // 是否正在运行
     bool is_running() const { return running_; }

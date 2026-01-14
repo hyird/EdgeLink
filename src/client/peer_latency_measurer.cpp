@@ -112,18 +112,38 @@ std::optional<uint16_t> PeerLatencyMeasurer::get_latency(
 }
 
 void PeerLatencyMeasurer::record_pong(
-    NodeId peer_id, ServerId relay_id,
-    ConnectionId conn_id, uint64_t send_time) {
+    NodeId peer_id, uint32_t seq, uint64_t send_time) {
 
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    uint16_t rtt = static_cast<uint16_t>(now - send_time);
+    uint16_t rtt = static_cast<uint16_t>(std::min<uint64_t>(now - send_time, 65535));
 
-    update_latency(peer_id, relay_id, conn_id, rtt);
+    // 从 pending_pings_ 查找并验证这是我们的 PING
+    std::lock_guard lock(ping_mutex_);
+    auto it = pending_pings_.find(seq);
+    if (it == pending_pings_.end()) {
+        // 不是我们的 PING，可能是 Client::ping_peer() 发的
+        return;
+    }
+
+    auto& pending = it->second;
+
+    // 验证 peer_id 匹配
+    if (pending.peer_id != peer_id) {
+        log().warn("PONG peer_id mismatch: expected {}, got {}", pending.peer_id, peer_id);
+        pending_pings_.erase(it);
+        return;
+    }
+
+    // 更新延迟测量
+    update_latency(pending.peer_id, pending.relay_id, pending.connection_id, rtt);
 
     log().trace("Recorded PONG: peer={}, relay={}, rtt={}ms",
-                peer_id, relay_id, rtt);
+                pending.peer_id, pending.relay_id, rtt);
+
+    // 清理 pending ping
+    pending_pings_.erase(it);
 }
 
 asio::awaitable<void> PeerLatencyMeasurer::measure_loop() {
@@ -234,14 +254,81 @@ asio::awaitable<uint16_t> PeerLatencyMeasurer::measure_single_path(
         co_return 0;
     }
 
-    // TODO: 通过 Relay 发送 PING 给目标 Peer，等待 PONG
-    // 这需要 RelayChannel 支持 peer-to-peer PING
-    // 目前返回估算值（基于 Relay 连接的 RTT）
+    auto relay_id = relay_pool->relay_id();
+    auto conn_id = relay_pool->active_connection_id();
 
-    auto stats = relay_pool->get_stats(relay_pool->active_connection_id());
-    if (stats) {
-        // 估算：Relay RTT * 2（A→Relay + Relay→B）
-        co_return stats->avg_rtt_ms * 2;
+    // 生成唯一的 sequence number，编码 relay_id 以便在 PONG 响应时识别
+    // 格式: (relay_id << 24) | (local_seq & 0xFFFFFF)
+    // 这样可以支持 16777216 个并发 ping，足够使用
+    uint32_t local_seq = ++ping_seq_;
+    uint32_t seq = (static_cast<uint32_t>(relay_id & 0xFF) << 24) | (local_seq & 0xFFFFFF);
+
+    // 生成 PING 消息
+    uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    std::vector<uint8_t> ping_msg(13);
+    ping_msg[0] = 0xEE;  // ping request
+    ping_msg[1] = (seq >> 24) & 0xFF;
+    ping_msg[2] = (seq >> 16) & 0xFF;
+    ping_msg[3] = (seq >> 8) & 0xFF;
+    ping_msg[4] = seq & 0xFF;
+    ping_msg[5] = (now >> 56) & 0xFF;
+    ping_msg[6] = (now >> 48) & 0xFF;
+    ping_msg[7] = (now >> 40) & 0xFF;
+    ping_msg[8] = (now >> 32) & 0xFF;
+    ping_msg[9] = (now >> 24) & 0xFF;
+    ping_msg[10] = (now >> 16) & 0xFF;
+    ping_msg[11] = (now >> 8) & 0xFF;
+    ping_msg[12] = now & 0xFF;
+
+    // 记录 pending ping
+    {
+        std::lock_guard lock(ping_mutex_);
+        pending_pings_[seq] = PendingPing{peer_id, relay_id, conn_id, now};
+    }
+
+    // 通过指定 Relay 发送 PING
+    bool sent = co_await channel->send_data(peer_id, ping_msg);
+    if (!sent) {
+        std::lock_guard lock(ping_mutex_);
+        pending_pings_.erase(seq);
+        co_return 0;
+    }
+
+    log().trace("Ping sent to peer {} via relay {} (seq={})", peer_id, relay_id, seq);
+
+    // 等待 PONG 响应（超时时间）
+    asio::steady_timer timer(ioc_);
+    timer.expires_after(std::chrono::milliseconds(config_.ping_timeout_ms));
+
+    try {
+        co_await timer.async_wait(asio::use_awaitable);
+    } catch (...) {
+        // 超时，清理 pending ping
+        std::lock_guard lock(ping_mutex_);
+        pending_pings_.erase(seq);
+        log().trace("Ping timeout for peer {} via relay {}", peer_id, relay_id);
+        co_return 0;
+    }
+
+    // 超时后检查是否收到响应（record_pong 可能已经处理）
+    {
+        std::lock_guard lock(ping_mutex_);
+        auto it = pending_pings_.find(seq);
+        if (it != pending_pings_.end()) {
+            // 未收到响应
+            pending_pings_.erase(it);
+            co_return 0;
+        }
+    }
+
+    // 响应已收到，从 measurements_ 读取延迟
+    std::shared_lock lock(mutex_);
+    auto key = std::make_pair(peer_id, relay_id);
+    auto it = measurements_.find(key);
+    if (it != measurements_.end()) {
+        co_return it->second.latency_ms;
     }
 
     co_return 0;

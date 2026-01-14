@@ -1912,18 +1912,25 @@ void Client::handle_ping_data(NodeId src, std::span<const uint8_t> data) {
         // Update peer latency
         state_machine_.update_peer_latency(src, latency);
 
-        // Find and complete pending ping via channel
-        uint64_t key = (static_cast<uint64_t>(src) << 32) | seq;
-        std::lock_guard lock(ping_mutex_);
-        auto it = pending_pings_.find(key);
-        if (it != pending_pings_.end()) {
-            if (it->second.response_ch) {
-                bool sent = it->second.response_ch->try_send(boost::system::error_code{}, latency);
-                if (!sent) {
-                    log().warn("Failed to send ping response for peer {} seq {} (channel closed)", src, seq);
+        // Check if this PONG is for PeerLatencyMeasurer (seq has relay_id encoded in upper 8 bits)
+        // PeerLatencyMeasurer uses seq >= 0x01000000, Client::ping_peer() uses smaller values
+        if (latency_measurer_ && latency_measurer_->is_running() && (seq & 0xFF000000) != 0) {
+            // Forward to PeerLatencyMeasurer
+            latency_measurer_->record_pong(src, seq, timestamp);
+        } else {
+            // Handle for Client::ping_peer()
+            uint64_t key = (static_cast<uint64_t>(src) << 32) | seq;
+            std::lock_guard lock(ping_mutex_);
+            auto it = pending_pings_.find(key);
+            if (it != pending_pings_.end()) {
+                if (it->second.response_ch) {
+                    bool sent = it->second.response_ch->try_send(boost::system::error_code{}, latency);
+                    if (!sent) {
+                        log().warn("Failed to send ping response for peer {} seq {} (channel closed)", src, seq);
+                    }
                 }
+                // 不在这里 erase，让 ping_peer 在收到响应后清理
             }
-            // 不在这里 erase，让 ping_peer 在收到响应后清理
         }
     }
 }
