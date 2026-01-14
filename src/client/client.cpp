@@ -2,11 +2,46 @@
 #include "common/logger.hpp"
 #include <nlohmann/json.hpp>
 #include <future>
+#include <unordered_set>
 
 namespace edgelink::client {
 
 namespace {
     auto& log() { return Logger::get("client"); }
+
+    // Hash function for RouteInfo (used in route update optimization)
+    struct RouteInfoHash {
+        std::size_t operator()(const RouteInfo& route) const noexcept {
+            std::size_t h = 0;
+
+            // Hash ip_type
+            h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(route.ip_type));
+
+            // Hash prefix bytes (only up to prefix_len/8 bytes are significant)
+            size_t prefix_bytes = (route.prefix_len + 7) / 8;
+            for (size_t i = 0; i < prefix_bytes && i < route.prefix.size(); ++i) {
+                h ^= std::hash<uint8_t>{}(route.prefix[i]) << (i % 8);
+            }
+
+            // Hash prefix_len
+            h ^= std::hash<uint8_t>{}(route.prefix_len) << 16;
+
+            // Hash gateway_node
+            h ^= std::hash<NodeId>{}(route.gateway_node) << 24;
+
+            return h;
+        }
+    };
+
+    // Equality comparator for RouteInfo (used with RouteInfoHash)
+    struct RouteInfoEqual {
+        bool operator()(const RouteInfo& a, const RouteInfo& b) const noexcept {
+            return a.ip_type == b.ip_type &&
+                   a.prefix == b.prefix &&
+                   a.prefix_len == b.prefix_len &&
+                   a.gateway_node == b.gateway_node;
+        }
+    };
 }
 
 const char* client_state_name(ClientState state) {
@@ -411,39 +446,54 @@ asio::awaitable<void> Client::ctrl_route_update_handler() {
         log().info("Route update v{}: +{} routes, -{} routes",
                    update.version, update.add_routes.size(), update.del_routes.size());
 
+        // Optimization: Prepare route updates outside lock, then apply with single write
+        // This reduces lock duration from O(n*m) to O(1)
+        std::vector<RouteInfo> updated_routes;
         {
             std::lock_guard lock(routes_mutex_);
+            updated_routes = routes_;  // Copy current routes
+        }
 
-            for (const auto& route : update.add_routes) {
-                bool found = false;
-                for (auto& r : routes_) {
-                    if (r.ip_type == route.ip_type &&
-                        r.prefix == route.prefix &&
-                        r.prefix_len == route.prefix_len &&
-                        r.gateway_node == route.gateway_node) {
-                        r = route;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    routes_.push_back(route);
-                }
-                log().debug("  + route /{} via node {}", route.prefix_len, route.gateway_node);
-            }
+        // Apply deletions first (outside lock)
+        if (!update.del_routes.empty()) {
+            // Build lookup set for efficient deletion (O(m) instead of O(n*m))
+            std::unordered_set<RouteInfo, RouteInfoHash, RouteInfoEqual> delete_set(
+                update.del_routes.begin(), update.del_routes.end());
+
+            updated_routes.erase(
+                std::remove_if(updated_routes.begin(), updated_routes.end(),
+                    [&delete_set](const RouteInfo& r) {
+                        return delete_set.find(r) != delete_set.end();
+                    }),
+                updated_routes.end());
 
             for (const auto& route : update.del_routes) {
-                routes_.erase(
-                    std::remove_if(routes_.begin(), routes_.end(),
-                        [&route](const RouteInfo& r) {
-                            return r.ip_type == route.ip_type &&
-                                   r.prefix == route.prefix &&
-                                   r.prefix_len == route.prefix_len &&
-                                   r.gateway_node == route.gateway_node;
-                        }),
-                    routes_.end());
                 log().debug("  - route /{} via node {}", route.prefix_len, route.gateway_node);
             }
+        }
+
+        // Apply additions (outside lock)
+        for (const auto& route : update.add_routes) {
+            auto it = std::find_if(updated_routes.begin(), updated_routes.end(),
+                [&route](const RouteInfo& r) {
+                    return r.ip_type == route.ip_type &&
+                           r.prefix == route.prefix &&
+                           r.prefix_len == route.prefix_len &&
+                           r.gateway_node == route.gateway_node;
+                });
+
+            if (it != updated_routes.end()) {
+                *it = route;  // Update existing
+            } else {
+                updated_routes.push_back(route);  // Add new
+            }
+            log().debug("  + route /{} via node {}", route.prefix_len, route.gateway_node);
+        }
+
+        // Apply updated routes with single lock acquisition
+        {
+            std::lock_guard lock(routes_mutex_);
+            routes_ = std::move(updated_routes);
         }
 
         if (route_mgr_) {
@@ -921,8 +971,21 @@ asio::awaitable<bool> Client::start() {
     state_ = ClientState::STARTING;
     log().info("Starting client...");
 
-    // State directory (should be set by main, fallback to current directory)
-    std::string state_dir = config_.state_dir.empty() ? "." : config_.state_dir;
+    // Optimization: Copy all needed config values once under lock to avoid:
+    // 1. Data races with hot-reload config updates
+    // 2. Multiple lock acquisitions in loop
+    std::string state_dir;
+    std::string authkey;
+    std::vector<std::string> controller_hosts;
+    bool tls;
+    {
+        std::shared_lock lock(config_mutex_);
+        state_dir = config_.state_dir.empty() ? "." : config_.state_dir;
+        authkey = config_.authkey;
+        controller_hosts = config_.controller_hosts;
+        tls = config_.tls;
+    }
+
     log().info("State directory: {}", state_dir);
 
     // Key file is always stored in state_dir
@@ -946,35 +1009,35 @@ asio::awaitable<bool> Client::start() {
     }
 
     // 支持多 Controller URL 故障转移
-    if (config_.controller_hosts.empty()) {
-        config_.controller_hosts.push_back("edge.a-z.xin");
+    if (controller_hosts.empty()) {
+        controller_hosts.push_back("edge.a-z.xin");
     }
 
-    log().info("TLS: {}", config_.tls ? "enabled" : "disabled");
-    log().info("Controller hosts: {}", config_.controller_hosts.size());
+    log().info("TLS: {}", tls ? "enabled" : "disabled");
+    log().info("Controller hosts: {}", controller_hosts.size());
 
     // 尝试连接每个 Controller
     bool controller_connected = false;
 
-    for (size_t i = 0; i < config_.controller_hosts.size() && !controller_connected; ++i) {
-        const auto& host_port = config_.controller_hosts[i];
+    for (size_t i = 0; i < controller_hosts.size() && !controller_connected; ++i) {
+        const auto& host_port = controller_hosts[i];
 
         // 解析 host:port 格式
-        auto [host, port] = ClientConfig::parse_host_port(host_port, config_.tls);
+        auto [host, port] = ClientConfig::parse_host_port(host_port, tls);
 
         // 构建 URL
-        std::string scheme = config_.tls ? "wss://" : "ws://";
+        std::string scheme = tls ? "wss://" : "ws://";
         std::string base_url = scheme + host + ":" + std::to_string(port);
         std::string control_url = base_url + "/api/v1/control";
         std::string relay_url = base_url + "/api/v1/relay";
 
-        log().info("Trying controller {}/{}: {}:{}", i + 1, config_.controller_hosts.size(), host, port);
+        log().info("Trying controller {}/{}: {}:{}", i + 1, controller_hosts.size(), host, port);
         log().debug("Control URL: {}", control_url);
         log().debug("Relay URL: {}", relay_url);
 
         // Create channels
-        control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, config_.tls);
-        relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url, config_.tls);
+        control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, tls);
+        relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url, tls);
 
         // Setup event channels
         setup_channels();
@@ -984,7 +1047,7 @@ asio::awaitable<bool> Client::start() {
         state_machine_.set_control_plane_state(ControlPlaneState::CONNECTING);
         log().info("Connecting to controller...");
 
-        bool connected = co_await control_->connect(config_.authkey);
+        bool connected = co_await control_->connect(authkey);
         if (!connected) {
             log().warn("Failed to connect to controller {}:{}", host, port);
             control_.reset();
@@ -2329,56 +2392,107 @@ void Client::request_ssl_context_rebuild() {
 }
 
 std::string Client::get_config_value(const std::string& key) const {
-    // 根据 key 返回对应的配置值 (read with lock for thread safety)
+    // Optimization: Copy only the needed value under lock, then convert outside lock
+    // This reduces lock duration from O(string ops) to O(1) copy
+
+    // Special case: authkey doesn't need lock access
+    if (key == "controller.authkey") {
+        return "***";  // 不返回实际密钥
+    }
+
+    // Capture the needed value under lock (minimal critical section)
     std::shared_lock lock(config_mutex_);
 
     if (key == "controller.url") {
-        return config_.current_controller_host();
+        std::string url = config_.current_controller_host();
+        lock.unlock();
+        return url;
     } else if (key == "controller.tls") {
-        return config_.tls ? "true" : "false";
-    } else if (key == "controller.authkey") {
-        return "***";  // 不返回实际密钥
+        bool tls = config_.tls;
+        lock.unlock();
+        return tls ? "true" : "false";
     } else if (key == "connection.auto_reconnect") {
-        return config_.auto_reconnect ? "true" : "false";
+        bool val = config_.auto_reconnect;
+        lock.unlock();
+        return val ? "true" : "false";
     } else if (key == "connection.reconnect_interval") {
-        return std::to_string(config_.reconnect_interval.count());
+        auto val = config_.reconnect_interval.count();
+        lock.unlock();
+        return std::to_string(val);
     } else if (key == "connection.ping_interval") {
-        return std::to_string(config_.ping_interval.count());
+        auto val = config_.ping_interval.count();
+        lock.unlock();
+        return std::to_string(val);
     } else if (key == "connection.dns_refresh_interval") {
-        return std::to_string(config_.dns_refresh_interval.count());
+        auto val = config_.dns_refresh_interval.count();
+        lock.unlock();
+        return std::to_string(val);
     } else if (key == "connection.latency_measure_interval") {
-        return std::to_string(config_.latency_measure_interval.count());
+        auto val = config_.latency_measure_interval.count();
+        lock.unlock();
+        return std::to_string(val);
     } else if (key == "ssl.verify") {
-        return config_.ssl_verify ? "true" : "false";
+        bool val = config_.ssl_verify;
+        lock.unlock();
+        return val ? "true" : "false";
     } else if (key == "ssl.ca_file") {
-        return config_.ssl_ca_file;
+        std::string val = config_.ssl_ca_file;
+        lock.unlock();
+        return val;
     } else if (key == "ssl.allow_self_signed") {
-        return config_.ssl_allow_self_signed ? "true" : "false";
+        bool val = config_.ssl_allow_self_signed;
+        lock.unlock();
+        return val ? "true" : "false";
     } else if (key == "storage.state_dir") {
-        return config_.state_dir;
+        std::string val = config_.state_dir;
+        lock.unlock();
+        return val;
     } else if (key == "tun.enable") {
-        return config_.enable_tun ? "true" : "false";
+        bool val = config_.enable_tun;
+        lock.unlock();
+        return val ? "true" : "false";
     } else if (key == "tun.name") {
-        return config_.tun_name;
+        std::string val = config_.tun_name;
+        lock.unlock();
+        return val;
     } else if (key == "tun.mtu") {
-        return std::to_string(config_.tun_mtu);
+        uint32_t val = config_.tun_mtu;
+        lock.unlock();
+        return std::to_string(val);
     } else if (key == "ipc.enable") {
-        return config_.enable_ipc ? "true" : "false";
+        bool val = config_.enable_ipc;
+        lock.unlock();
+        return val ? "true" : "false";
     } else if (key == "ipc.socket_path") {
-        return config_.ipc_socket_path;
+        std::string val = config_.ipc_socket_path;
+        lock.unlock();
+        return val;
     } else if (key == "routing.accept_routes") {
-        return config_.accept_routes ? "true" : "false";
+        bool val = config_.accept_routes;
+        lock.unlock();
+        return val ? "true" : "false";
     } else if (key == "routing.advertise_routes") {
-        // 序列化为 JSON 数组
-        nlohmann::json arr = config_.advertise_routes;
+        // Copy vector under lock
+        std::vector<std::string> routes = config_.advertise_routes;
+        lock.unlock();
+        // Serialize outside lock
+        nlohmann::json arr = routes;
         return arr.dump();
     } else if (key == "routing.exit_node") {
-        return config_.exit_node ? "true" : "false";
+        bool val = config_.exit_node;
+        lock.unlock();
+        return val ? "true" : "false";
     } else if (key == "log.level") {
-        return config_.log_level;
+        std::string val = config_.log_level;
+        lock.unlock();
+        return val;
     } else if (key == "log.file") {
-        return config_.log_file;
+        std::string val = config_.log_file;
+        lock.unlock();
+        return val;
     }
+
+    lock.unlock();
     return "";
 }
 
