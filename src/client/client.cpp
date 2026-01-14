@@ -1019,6 +1019,12 @@ asio::awaitable<bool> Client::start() {
     // 尝试连接每个 Controller
     bool controller_connected = false;
 
+    // IMPORTANT: Setup event channels only once before loop to avoid:
+    // 1. Handler leaks (active_handlers_ accumulating)
+    // 2. Channel destruction causing "Channel cancelled" errors
+    // 3. Multiple handler coroutines competing for same events
+    bool channels_setup = false;
+
     for (size_t i = 0; i < controller_hosts.size() && !controller_connected; ++i) {
         const auto& host_port = controller_hosts[i];
 
@@ -1039,8 +1045,31 @@ asio::awaitable<bool> Client::start() {
         control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, tls);
         relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url, tls);
 
-        // Setup event channels
-        setup_channels();
+        // Setup event channels (only once on first iteration)
+        if (!channels_setup) {
+            setup_channels();
+            channels_setup = true;
+        } else {
+            // For subsequent iterations, only update the channel pointers
+            // (handlers are already running and will receive events from new channels)
+            ControlChannelEvents ctrl_events;
+            ctrl_events.auth_response = ctrl_auth_response_ch_.get();
+            ctrl_events.config = ctrl_config_ch_.get();
+            ctrl_events.config_update = ctrl_config_update_ch_.get();
+            ctrl_events.route_update = ctrl_route_update_ch_.get();
+            ctrl_events.peer_routing_update = ctrl_peer_routing_update_ch_.get();
+            ctrl_events.p2p_endpoint = ctrl_p2p_endpoint_ch_.get();
+            ctrl_events.error = ctrl_error_ch_.get();
+            ctrl_events.connected = ctrl_connected_ch_.get();
+            ctrl_events.disconnected = ctrl_disconnected_ch_.get();
+            control_->set_channels(ctrl_events);
+
+            RelayChannelEvents relay_events;
+            relay_events.data = relay_data_ch_.get();
+            relay_events.connected = relay_connected_ch_.get();
+            relay_events.disconnected = relay_disconnected_ch_.get();
+            relay_->set_channels(relay_events);
+        }
 
         // Connect to control channel
         state_ = ClientState::AUTHENTICATING;
