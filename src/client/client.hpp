@@ -275,6 +275,7 @@ private:
     asio::io_context& ioc_;
     ssl::context ssl_ctx_;
     ClientConfig config_;
+    mutable std::shared_mutex config_mutex_;  // Protects config_ access
     ClientState state_ = ClientState::STOPPED;
 
     CryptoEngine crypto_;

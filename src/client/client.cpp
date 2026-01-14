@@ -242,7 +242,11 @@ asio::awaitable<void> Client::ctrl_config_handler() {
 
             // Start multi-relay manager
             auto self = shared_from_this();
-            asio::co_spawn(ioc_, [self, relays = config.relays, relay_token = config.relay_token, use_tls = config_.tls]() -> asio::awaitable<void> {
+            bool use_tls = [&]() {
+                std::shared_lock lock(config_mutex_);
+                return config_.tls;
+            }();
+            asio::co_spawn(ioc_, [self, relays = config.relays, relay_token = config.relay_token, use_tls]() -> asio::awaitable<void> {
                 try {
                     co_await self->multi_relay_mgr_->initialize(relays, relay_token, use_tls);
                     log().info("MultiRelayManager initialized successfully");
@@ -265,7 +269,12 @@ asio::awaitable<void> Client::ctrl_config_handler() {
             }, asio::detached);
         }
 
-        if (config_.accept_routes && is_tun_enabled()) {
+        bool accept_routes = [&]() {
+            std::shared_lock lock(config_mutex_);
+            return config_.accept_routes;
+        }();
+
+        if (accept_routes && is_tun_enabled()) {
             if (!route_mgr_) {
                 route_mgr_ = std::make_unique<RouteManager>(*this);
                 route_mgr_->start();
@@ -330,7 +339,12 @@ asio::awaitable<void> Client::ctrl_config_update_handler() {
                 }
             }
 
-            if (!added_peer_ids.empty() && route_mgr_ && config_.accept_routes) {
+            bool accept_routes_config = [&]() {
+                std::shared_lock lock(config_mutex_);
+                return config_.accept_routes;
+            }();
+
+            if (!added_peer_ids.empty() && route_mgr_ && accept_routes_config) {
                 std::vector<RouteInfo> relevant_routes;
                 {
                     std::lock_guard lock(routes_mutex_);
@@ -498,7 +512,12 @@ asio::awaitable<void> Client::ctrl_disconnected_handler() {
         log().warn("Control channel disconnected");
         state_machine_.set_control_plane_state(ControlPlaneState::DISCONNECTED);
 
-        if (config_.auto_reconnect && state_ != ClientState::STOPPED &&
+        bool auto_reconnect = [&]() {
+            std::shared_lock lock(config_mutex_);
+            return config_.auto_reconnect;
+        }();
+
+        if (auto_reconnect && state_ != ClientState::STOPPED &&
             state_ != ClientState::RECONNECTING) {
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         }
@@ -596,17 +615,23 @@ asio::awaitable<void> Client::relay_connected_handler() {
         // Start DNS refresh loop
         asio::co_spawn(ioc_, dns_refresh_loop(), asio::detached);
 
-        // Start latency measurement loop
-        if (config_.latency_measure_interval.count() > 0) {
-            asio::co_spawn(ioc_, latency_measure_loop(), asio::detached);
+        // Start latency measurement loop (read config with lock)
+        {
+            std::shared_lock lock(config_mutex_);
+            if (config_.latency_measure_interval.count() > 0) {
+                asio::co_spawn(ioc_, latency_measure_loop(), asio::detached);
+            }
         }
 
-        // Announce configured routes
-        if (!config_.advertise_routes.empty() || config_.exit_node) {
-            asio::co_spawn(ioc_, announce_configured_routes(), asio::detached);
+        // Announce configured routes (read config with lock)
+        {
+            std::shared_lock lock(config_mutex_);
+            if (!config_.advertise_routes.empty() || config_.exit_node) {
+                asio::co_spawn(ioc_, announce_configured_routes(), asio::detached);
 
-            if (config_.route_announce_interval.count() > 0) {
-                asio::co_spawn(ioc_, route_announce_loop(), asio::detached);
+                if (config_.route_announce_interval.count() > 0) {
+                    asio::co_spawn(ioc_, route_announce_loop(), asio::detached);
+                }
             }
         }
     }
@@ -628,7 +653,12 @@ asio::awaitable<void> Client::relay_disconnected_handler() {
         std::string relay_id = relay_ ? relay_->url() : "default";
         state_machine_.set_relay_state(relay_id, RelayConnectionState::DISCONNECTED);
 
-        if (config_.auto_reconnect && state_ != ClientState::STOPPED &&
+        bool auto_reconnect = [&]() {
+            std::shared_lock lock(config_mutex_);
+            return config_.auto_reconnect;
+        }();
+
+        if (auto_reconnect && state_ != ClientState::STOPPED &&
             state_ != ClientState::RECONNECTING) {
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         }
@@ -1294,9 +1324,19 @@ asio::awaitable<void> Client::p2p_data_handler() {
 }
 
 asio::awaitable<void> Client::keepalive_loop() {
+    auto interval = [&]() {
+        std::shared_lock lock(config_mutex_);
+        return config_.ping_interval;
+    }();
+
     while (state_ == ClientState::RUNNING) {
         try {
-            keepalive_timer_.expires_after(config_.ping_interval);
+            keepalive_timer_.expires_after(interval);
+            // Update interval in case config changed
+            {
+                std::shared_lock lock(config_mutex_);
+                interval = config_.ping_interval;
+            }
             co_await keepalive_timer_.async_wait(asio::use_awaitable);
 
             if (control_ && control_->is_connected()) {
@@ -1332,9 +1372,13 @@ asio::awaitable<void> Client::reconnect() {
     reconnect_attempts_++;
 
     // Calculate exponential backoff: interval * 2^(attempts-1)
-    // But cap at max_reconnect_interval_
+    // But cap at max_reconnect_interval_ (read config with lock)
     auto backoff_multiplier = (1 << (reconnect_attempts_ - 1));  // 2^(attempts-1)
-    auto backoff_interval = config_.reconnect_interval * backoff_multiplier;
+    auto base_interval = [&]() {
+        std::shared_lock lock(config_mutex_);
+        return config_.reconnect_interval;
+    }();
+    auto backoff_interval = base_interval * backoff_multiplier;
     if (backoff_interval > max_reconnect_interval_) {
         backoff_interval = max_reconnect_interval_;
     }
@@ -1395,19 +1439,29 @@ asio::awaitable<void> Client::reconnect() {
             // Reconnect succeeded, reset retry counter
             reconnect_attempts_ = 0;
             log().info("Reconnect successful");
-        } else if (config_.auto_reconnect) {
-            // start() failed, schedule another attempt
-            log().warn("Reconnect failed, will retry in {}s (attempt {}/{})",
-                       backoff_interval.count(), reconnect_attempts_,
-                       max_reconnect_attempts_);
-            asio::co_spawn(ioc_, reconnect(), asio::detached);
+        } else {
+            bool auto_reconnect = [&]() {
+                std::shared_lock lock(config_mutex_);
+                return config_.auto_reconnect;
+            }();
+            if (auto_reconnect) {
+                // start() failed, schedule another attempt
+                log().warn("Reconnect failed, will retry in {}s (attempt {}/{})",
+                           backoff_interval.count(), reconnect_attempts_,
+                           max_reconnect_attempts_);
+                asio::co_spawn(ioc_, reconnect(), asio::detached);
+            }
         }
 
     } catch (const boost::system::system_error& e) {
         if (e.code() != asio::error::operation_aborted) {
             log().debug("Reconnect error: {}", e.what());
             // Schedule another reconnect attempt
-            if (config_.auto_reconnect) {
+            bool auto_reconnect = [&]() {
+                std::shared_lock lock(config_mutex_);
+                return config_.auto_reconnect;
+            }();
+            if (auto_reconnect) {
                 asio::co_spawn(ioc_, reconnect(), asio::detached);
             }
         } else {
@@ -1418,27 +1472,42 @@ asio::awaitable<void> Client::reconnect() {
 }
 
 asio::awaitable<void> Client::dns_refresh_loop() {
-    // Skip if DNS refresh is disabled
-    if (config_.dns_refresh_interval.count() == 0) {
+    // Skip if DNS refresh is disabled (read with lock)
+    auto interval = [&]() {
+        std::shared_lock lock(config_mutex_);
+        return config_.dns_refresh_interval;
+    }();
+
+    if (interval.count() == 0) {
         co_return;
     }
 
     while (state_ == ClientState::RUNNING) {
         try {
-            dns_refresh_timer_.expires_after(config_.dns_refresh_interval);
+            dns_refresh_timer_.expires_after(interval);
             co_await dns_refresh_timer_.async_wait(asio::use_awaitable);
 
             if (state_ != ClientState::RUNNING) {
                 break;
             }
 
-            // 使用当前的 controller host
-            if (config_.controller_hosts.empty()) {
-                continue;
+            // Read config values with lock
+            std::string controller_host;
+            bool use_tls;
+            bool auto_reconnect;
+            {
+                std::shared_lock lock(config_mutex_);
+                if (config_.controller_hosts.empty()) {
+                    continue;
+                }
+                controller_host = config_.controller_hosts[0];
+                use_tls = config_.tls;
+                auto_reconnect = config_.auto_reconnect;
+                interval = config_.dns_refresh_interval;  // Update interval in case config changed
             }
 
             // 解析第一个 controller host
-            auto [host, port_num] = ClientConfig::parse_host_port(config_.controller_hosts[0], config_.tls);
+            auto [host, port_num] = ClientConfig::parse_host_port(controller_host, use_tls);
             std::string port = std::to_string(port_num);
 
             // Resolve DNS
@@ -1475,7 +1544,7 @@ asio::awaitable<void> Client::dns_refresh_loop() {
                 log().info("DNS resolution changed: {} -> {}", old_str, new_str);
 
                 // Trigger reconnect to use new endpoints
-                if (config_.auto_reconnect) {
+                if (auto_reconnect) {
                     asio::co_spawn(ioc_, reconnect(), asio::detached);
                 }
                 co_return;
@@ -1497,11 +1566,21 @@ asio::awaitable<void> Client::dns_refresh_loop() {
 }
 
 asio::awaitable<void> Client::latency_measure_loop() {
-    log().info("Latency measurement started (interval: {}s)", config_.latency_measure_interval.count());
+    auto interval = [&]() {
+        std::shared_lock lock(config_mutex_);
+        return config_.latency_measure_interval;
+    }();
+
+    log().info("Latency measurement started (interval: {}s)", interval.count());
 
     while (state_ == ClientState::RUNNING) {
         try {
-            latency_timer_.expires_after(config_.latency_measure_interval);
+            latency_timer_.expires_after(interval);
+            // Update interval in case config changed
+            {
+                std::shared_lock lock(config_mutex_);
+                interval = config_.latency_measure_interval;
+            }
             co_await latency_timer_.async_wait(asio::use_awaitable);
 
             if (state_ != ClientState::RUNNING || !relay_ || !relay_->is_connected()) {
@@ -1573,8 +1652,13 @@ asio::awaitable<void> Client::latency_measure_loop() {
 }
 
 asio::awaitable<void> Client::route_announce_loop() {
+    auto interval = [&]() {
+        std::shared_lock lock(config_mutex_);
+        return config_.route_announce_interval;
+    }();
+
     // 等待第一个间隔（首次公告已经在 on_connected 中完成）
-    route_announce_timer_.expires_after(config_.route_announce_interval);
+    route_announce_timer_.expires_after(interval);
 
     try {
         co_await route_announce_timer_.async_wait(asio::use_awaitable);
@@ -1582,7 +1666,7 @@ asio::awaitable<void> Client::route_announce_loop() {
         co_return;
     }
 
-    log().info("Route announcement loop started (interval: {}s)", config_.route_announce_interval.count());
+    log().info("Route announcement loop started (interval: {}s)", interval.count());
 
     while (state_ == ClientState::RUNNING) {
         try {
@@ -1592,8 +1676,12 @@ asio::awaitable<void> Client::route_announce_loop() {
                 co_await announce_configured_routes();
             }
 
-            // 等待下一个间隔
-            route_announce_timer_.expires_after(config_.route_announce_interval);
+            // 等待下一个间隔 (update interval in case config changed)
+            {
+                std::shared_lock lock(config_mutex_);
+                interval = config_.route_announce_interval;
+            }
+            route_announce_timer_.expires_after(interval);
             co_await route_announce_timer_.async_wait(asio::use_awaitable);
 
         } catch (const boost::system::system_error& e) {
@@ -1859,8 +1947,17 @@ asio::awaitable<void> Client::withdraw_routes(const std::vector<RouteInfo>& rout
 asio::awaitable<void> Client::announce_configured_routes() {
     std::vector<RouteInfo> routes;
 
+    // Read config values with lock
+    std::vector<std::string> advertise_routes;
+    bool exit_node;
+    {
+        std::shared_lock lock(config_mutex_);
+        advertise_routes = config_.advertise_routes;
+        exit_node = config_.exit_node;
+    }
+
     // 解析配置中的路由 (CIDR 格式)
-    for (const auto& cidr : config_.advertise_routes) {
+    for (const auto& cidr : advertise_routes) {
         auto slash_pos = cidr.find('/');
         if (slash_pos == std::string::npos) {
             log().warn("Invalid route CIDR format: {}", cidr);
@@ -1891,7 +1988,7 @@ asio::awaitable<void> Client::announce_configured_routes() {
     }
 
     // 如果是出口节点，添加默认路由
-    if (config_.exit_node) {
+    if (exit_node) {
         RouteInfo default_route;
         default_route.ip_type = IpType::IPv4;
         default_route.prefix = {};  // 0.0.0.0
@@ -2024,7 +2121,9 @@ void Client::request_ssl_context_rebuild() {
 }
 
 std::string Client::get_config_value(const std::string& key) const {
-    // 根据 key 返回对应的配置值
+    // 根据 key 返回对应的配置值 (read with lock for thread safety)
+    std::shared_lock lock(config_mutex_);
+
     if (key == "controller.url") {
         return config_.current_controller_host();
     } else if (key == "controller.tls") {
@@ -2099,8 +2198,11 @@ asio::awaitable<void> Client::config_change_handler() {
                 }
             }
 
-            // 更新配置
-            config_ = new_config;
+            // 更新配置 (with synchronization)
+            {
+                std::unique_lock lock(config_mutex_);
+                config_ = new_config;
+            }
         }
     }
 }

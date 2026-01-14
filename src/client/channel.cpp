@@ -134,7 +134,8 @@ ControlChannel::ControlChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
     , crypto_(crypto)
     , url_(url)
     , use_tls_(use_tls)
-    , write_timer_(ioc) {
+    , write_timer_(ioc)
+    , endpoint_ack_timer_(std::make_unique<asio::steady_timer>(ioc)) {
     write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
 }
 
@@ -906,12 +907,7 @@ asio::awaitable<bool> ControlChannel::send_endpoint_update_and_wait_ack(
     // 发送端点更新
     uint32_t request_id = co_await send_endpoint_update(endpoints);
 
-    // 创建或重置等待定时器
-    if (!endpoint_ack_timer_) {
-        endpoint_ack_timer_ = std::make_unique<asio::steady_timer>(ioc_);
-    }
-
-    // 设置超时
+    // 设置超时 (timer initialized in constructor, no race)
     endpoint_ack_timer_->expires_after(std::chrono::milliseconds(timeout_ms));
 
     try {
