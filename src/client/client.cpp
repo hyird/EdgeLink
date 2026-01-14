@@ -111,6 +111,13 @@ Client::Client(asio::io_context& ioc, const ClientConfig& config)
 }
 
 Client::~Client() {
+    if (state_ != ClientState::STOPPED) {
+        // Warning: Client is being destroyed without proper shutdown
+        // This may cause resource leaks or undefined behavior
+        log().error("Client destroyed without calling stop() first! State: {}",
+                    client_state_name(state_));
+    }
+
     teardown_ipc();
     teardown_tun();
 }
@@ -968,6 +975,30 @@ asio::awaitable<void> Client::stop() {
     dns_refresh_timer_.cancel();
     latency_timer_.cancel();
     route_announce_timer_.cancel();
+
+    // Stop config watcher (has background watch loop)
+    if (config_watcher_) {
+        log().debug("Stopping config watcher...");
+        config_watcher_->stop();
+        config_watcher_.reset();
+        log().debug("Config watcher stopped");
+    }
+
+    // Stop latency measurer first (depends on multi_relay_mgr_)
+    if (latency_measurer_) {
+        log().debug("Stopping latency measurer...");
+        latency_measurer_->stop();
+        latency_measurer_.reset();
+        log().debug("Latency measurer stopped");
+    }
+
+    // Stop multi-relay manager (has background RTT measurement loop)
+    if (multi_relay_mgr_) {
+        log().debug("Stopping multi-relay manager...");
+        co_await multi_relay_mgr_->stop();
+        multi_relay_mgr_.reset();
+        log().debug("Multi-relay manager stopped");
+    }
 
     // Stop P2P manager
     if (p2p_mgr_) {
