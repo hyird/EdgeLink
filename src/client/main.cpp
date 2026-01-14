@@ -1072,7 +1072,7 @@ int cmd_up(int argc, char* argv[]) {
                 std::exit(1);
             }
 
-            log.info("Received signal {}, shutting down gracefully...", sig);
+            log.info("Received signal {}, shutting down...", sig);
 
             // Reset work guard to allow io_context to exit when done
             work_guard.reset();
@@ -1080,12 +1080,17 @@ int cmd_up(int argc, char* argv[]) {
             // Start graceful shutdown
             asio::co_spawn(ioc, client->stop(), asio::detached);
 
-            // 启动独立线程实现强制超时（5 秒）
-            // 不依赖 io_context，确保超时保护一定生效
+            // 启动独立线程实现强制超时（2 秒）
+            // 不依赖 io_context，确保快速退出
             std::thread([&ioc, &log]() {
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                log.warn("Graceful shutdown timeout (5s), forcing io_context stop");
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                log.warn("Shutdown timeout (2s), forcing exit");
                 ioc.stop();  // 强制停止所有 io_context 操作
+
+                // 如果 2.5 秒后还在运行，强制进程退出
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                log.error("Hard timeout reached, force exiting process");
+                std::_Exit(1);  // 强制退出，不调用析构函数
             }).detach();
         });
 
@@ -1140,8 +1145,13 @@ int cmd_up(int argc, char* argv[]) {
 
         log.info("Client stopped");
 
+        // Explicitly shutdown LogManager before static destructors run
+        // to avoid race conditions with any remaining async handlers
+        LogManager::instance().shutdown();
+
     } catch (const std::exception& e) {
         log.fatal("Fatal error: {}", e.what());
+        LogManager::instance().shutdown();
         return 1;
     }
 

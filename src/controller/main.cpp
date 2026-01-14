@@ -763,8 +763,14 @@ int cmd_serve(int argc, char* argv[]) {
 
         Logger::get("controller").info("Controller stopped");
 
+        // Explicitly shutdown LogManager to avoid shutdown race with static destructors.
+        // Without this, handlers may still be logging when LogManager::~LogManager()
+        // is called during exit(), causing SEGV in spdlog::shutdown().
+        LogManager::instance().shutdown();
+
     } catch (const std::exception& e) {
         Logger::get("controller").fatal("Fatal error: {}", e.what());
+        LogManager::instance().shutdown();
         return 1;
     }
 
