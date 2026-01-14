@@ -253,24 +253,28 @@ asio::awaitable<void> Client::ctrl_config_handler() {
             log().info("MultiRelayManager initialized with {} relays", config.relays.size());
 
             // Start multi-relay manager
+            // IMPORTANT: Capture shared_ptr copies to prevent use-after-free if stop() is called
             auto self = shared_from_this();
+            auto relay_mgr = multi_relay_mgr_;  // Copy shared_ptr for safe access in detached coroutine
             bool use_tls = [&]() {
                 std::shared_lock lock(config_mutex_);
                 return config_.tls;
             }();
-            asio::co_spawn(ioc_, [self, relays = config.relays, relay_token = config.relay_token, use_tls]() -> asio::awaitable<void> {
+            asio::co_spawn(ioc_, [self, relay_mgr, relays = config.relays, relay_token = config.relay_token, use_tls]() -> asio::awaitable<void> {
                 try {
-                    co_await self->multi_relay_mgr_->initialize(relays, relay_token, use_tls);
+                    // Use captured relay_mgr instead of self->multi_relay_mgr_ (which may be reset by stop())
+                    co_await relay_mgr->initialize(relays, relay_token, use_tls);
                     log().info("MultiRelayManager initialized successfully");
 
                     // Initialize latency measurer after relay manager is started
-                    if (!self->latency_measurer_) {
+                    // Check if client still alive and manager still valid
+                    if (self->multi_relay_mgr_ && !self->latency_measurer_) {
                         LatencyMeasureConfig latency_config;
                         latency_config.measure_interval = std::chrono::seconds(30);
                         latency_config.report_interval = std::chrono::seconds(60);
 
                         self->latency_measurer_ = std::make_shared<PeerLatencyMeasurer>(
-                            self->ioc_, *self->multi_relay_mgr_, self->peers_, latency_config);
+                            self->ioc_, *relay_mgr, self->peers_, latency_config);
 
                         co_await self->latency_measurer_->start();
                         log().info("PeerLatencyMeasurer started successfully");
