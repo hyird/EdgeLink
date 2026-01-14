@@ -127,6 +127,10 @@ void Client::set_events(ClientEvents events) {
 }
 
 void Client::setup_channels() {
+    // 创建 handler 完成跟踪 channel (容量大于 handler 数量以确保不阻塞)
+    handlers_done_ch_ = std::make_unique<HandlerCompletionChannel>(ioc_, 32);
+    active_handlers_ = 0;
+
     // 创建 Control Channel 事件 channels
     ctrl_auth_response_ch_ = std::make_unique<channels::AuthResponseChannel>(ioc_, 4);
     ctrl_config_ch_ = std::make_unique<channels::ConfigChannel>(ioc_, 4);
@@ -163,7 +167,8 @@ void Client::setup_channels() {
     relay_events.disconnected = relay_disconnected_ch_.get();
     relay_->set_channels(relay_events);
 
-    // 启动 Control Channel 事件处理协程
+    // 启动 Control Channel 事件处理协程 (12 handlers total)
+    active_handlers_ += 12;
     asio::co_spawn(ioc_, ctrl_auth_response_handler(), asio::detached);
     asio::co_spawn(ioc_, ctrl_config_handler(), asio::detached);
     asio::co_spawn(ioc_, ctrl_config_update_handler(), asio::detached);
@@ -199,6 +204,13 @@ asio::awaitable<void> Client::ctrl_auth_response_handler() {
         state_machine_.set_node_id(crypto_.node_id());
         state_machine_.set_control_plane_state(ControlPlaneState::CONFIGURING);
     }
+
+    // Notify handler completion
+    log().debug("ctrl_auth_response_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 asio::awaitable<void> Client::ctrl_config_handler() {
@@ -309,6 +321,13 @@ asio::awaitable<void> Client::ctrl_config_handler() {
             }(), asio::detached);
         }
     }
+
+    // Notify handler completion
+    log().debug("ctrl_config_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 asio::awaitable<void> Client::ctrl_config_update_handler() {
@@ -365,6 +384,13 @@ asio::awaitable<void> Client::ctrl_config_update_handler() {
             }
         }
     }
+
+    // Notify handler completion
+    log().debug("ctrl_config_update_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 asio::awaitable<void> Client::ctrl_route_update_handler() {
@@ -420,6 +446,13 @@ asio::awaitable<void> Client::ctrl_route_update_handler() {
             route_mgr_->apply_route_update(update.add_routes, update.del_routes);
         }
     }
+
+    // Notify handler completion
+    log().debug("ctrl_route_update_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 asio::awaitable<void> Client::ctrl_peer_routing_update_handler() {
@@ -441,6 +474,13 @@ asio::awaitable<void> Client::ctrl_peer_routing_update_handler() {
             multi_relay_mgr_->handle_peer_routing_update(update);
         }
     }
+
+    // Notify handler completion
+    log().debug("ctrl_peer_routing_update_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 asio::awaitable<void> Client::ctrl_p2p_endpoint_handler() {
@@ -458,6 +498,13 @@ asio::awaitable<void> Client::ctrl_p2p_endpoint_handler() {
             p2p_mgr_->handle_p2p_endpoint(msg);
         }
     }
+
+    // Notify handler completion
+    log().debug("ctrl_p2p_endpoint_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 asio::awaitable<void> Client::ctrl_error_handler() {
@@ -479,6 +526,13 @@ asio::awaitable<void> Client::ctrl_error_handler() {
             }
         }
     }
+
+    // Notify handler completion
+    log().debug("ctrl_error_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 asio::awaitable<void> Client::ctrl_connected_handler() {
@@ -496,6 +550,13 @@ asio::awaitable<void> Client::ctrl_connected_handler() {
         // 注意：这里不需要额外处理，因为 CONNECTED 状态表示 CONFIG 已收到
         // 实际的配置处理在 ctrl_config_handler 中完成
     }
+
+    // Notify handler completion
+    log().debug("ctrl_connected_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 asio::awaitable<void> Client::ctrl_disconnected_handler() {
@@ -522,6 +583,13 @@ asio::awaitable<void> Client::ctrl_disconnected_handler() {
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         }
     }
+
+    // Notify handler completion
+    log().debug("ctrl_disconnected_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 // ============================================================================
@@ -571,6 +639,13 @@ asio::awaitable<void> Client::relay_data_handler() {
             }
         }
     }
+
+    // Notify handler completion
+    log().debug("relay_data_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 asio::awaitable<void> Client::relay_connected_handler() {
@@ -638,6 +713,13 @@ asio::awaitable<void> Client::relay_connected_handler() {
             }
         }
     }
+
+    // Notify handler completion
+    log().debug("relay_connected_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 asio::awaitable<void> Client::relay_disconnected_handler() {
@@ -666,6 +748,13 @@ asio::awaitable<void> Client::relay_disconnected_handler() {
             asio::co_spawn(ioc_, reconnect(), asio::detached);
         }
     }
+
+    // Notify handler completion
+    log().debug("relay_disconnected_handler stopped");
+    if (handlers_done_ch_) {
+        handlers_done_ch_->try_send(boost::system::error_code{});
+    }
+    active_handlers_--;
 }
 
 bool Client::setup_tun() {
@@ -1027,6 +1116,10 @@ asio::awaitable<bool> Client::start() {
 asio::awaitable<void> Client::stop() {
     log().info("Stopping client...");
 
+    // CRITICAL: Set stopped state FIRST to signal all handlers to exit their while loops
+    state_ = ClientState::STOPPED;
+    log().debug("State set to STOPPED, handlers will exit their loops");
+
     log().debug("Cancelling timers...");
     keepalive_timer_.cancel();
     reconnect_timer_.cancel();
@@ -1101,6 +1194,57 @@ asio::awaitable<void> Client::stop() {
     teardown_tun();
     log().debug("TUN device torn down");
 
+    // Close all event channels to wake up waiting handlers
+    log().debug("Closing event channels to wake up handlers...");
+    if (ctrl_auth_response_ch_) ctrl_auth_response_ch_->close();
+    if (ctrl_config_ch_) ctrl_config_ch_->close();
+    if (ctrl_config_update_ch_) ctrl_config_update_ch_->close();
+    if (ctrl_route_update_ch_) ctrl_route_update_ch_->close();
+    if (ctrl_peer_routing_update_ch_) ctrl_peer_routing_update_ch_->close();
+    if (ctrl_p2p_endpoint_ch_) ctrl_p2p_endpoint_ch_->close();
+    if (ctrl_error_ch_) ctrl_error_ch_->close();
+    if (ctrl_connected_ch_) ctrl_connected_ch_->close();
+    if (ctrl_disconnected_ch_) ctrl_disconnected_ch_->close();
+    if (relay_data_ch_) relay_data_ch_->close();
+    if (relay_connected_ch_) relay_connected_ch_->close();
+    if (relay_disconnected_ch_) relay_disconnected_ch_->close();
+
+    // Wait for all handlers to exit (with timeout to avoid hanging)
+    int expected_handlers = active_handlers_.load();
+    log().debug("Waiting for {} handler(s) to exit...", expected_handlers);
+
+    // Wait up to 5 seconds for handlers to complete
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    int completed = 0;
+
+    while (completed < expected_handlers && std::chrono::steady_clock::now() < deadline) {
+        try {
+            asio::steady_timer wait_timer(ioc_);
+            wait_timer.expires_after(std::chrono::milliseconds(50));
+
+            // Try to receive one completion notification (non-blocking)
+            bool received = false;
+            handlers_done_ch_->try_receive([&](boost::system::error_code) {
+                received = true;
+                completed++;
+            });
+
+            if (!received) {
+                // No handler completed yet, wait briefly and retry
+                co_await wait_timer.async_wait(asio::use_awaitable);
+            }
+        } catch (...) {
+            break;
+        }
+    }
+
+    int remaining = active_handlers_.load();
+    if (remaining > 0) {
+        log().warn("{} of {} handler(s) did not exit cleanly", remaining, expected_handlers);
+    } else {
+        log().debug("All {} handlers exited successfully", completed);
+    }
+
     if (relay_) {
         log().debug("Closing relay channel...");
         co_await relay_->close();
@@ -1113,7 +1257,6 @@ asio::awaitable<void> Client::stop() {
         log().debug("Control channel closed");
     }
 
-    state_ = ClientState::STOPPED;
     log().info("Client stopped successfully");
 
     if (events_.disconnected) {

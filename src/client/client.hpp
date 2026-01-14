@@ -312,6 +312,11 @@ private:
     using TunHandlerCompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
     std::unique_ptr<TunHandlerCompletionChannel> tun_handler_done_ch_;
 
+    // Handler completion tracking - collects exit notifications from all handlers
+    using HandlerCompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    std::unique_ptr<HandlerCompletionChannel> handlers_done_ch_;
+    std::atomic<int> active_handlers_{0};  // Count of running handler coroutines
+
     // IPC server (optional)
     std::shared_ptr<IpcServer> ipc_;
 
