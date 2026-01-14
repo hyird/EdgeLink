@@ -966,11 +966,19 @@ asio::awaitable<bool> Client::start() {
         controller_connected = true;
         log().info("Connected to controller: {}:{}", host, port);
 
-        // Setup TUN device if enabled (在 control 认证成功后立即创建)
-        // TUN 只需要 control channel 的 virtual_ip，不依赖 relay
+        // Setup TUN device if enabled
+        // TUN requires control channel with valid virtual_ip (from authentication)
         if (config_.enable_tun) {
+            // Verify dependencies are met (should always be true at this point)
+            if (!control_ || control_->virtual_ip().to_u32() == 0) {
+                log().error("Cannot setup TUN: control channel or virtual IP not available (initialization order violation)");
+                state_ = ClientState::STOPPED;
+                co_return false;  // Hard error - this indicates a programming bug
+            }
+
             if (!setup_tun()) {
-                log().warn("TUN mode requested but failed to setup TUN device");
+                log().warn("TUN mode requested but failed to setup TUN device (likely OS/permission issue)");
+                // Soft failure - continue without TUN, as this is an operational error
             }
         }
     }
@@ -2069,6 +2077,12 @@ void Client::request_tun_rebuild() {
 
         // 如果配置启用了 TUN，重新创建
         if (config_.enable_tun) {
+            // Verify client is connected before rebuilding TUN
+            if (!control_ || control_->virtual_ip().to_u32() == 0 || !is_running()) {
+                log().error("Cannot rebuild TUN: client not properly connected");
+                return;
+            }
+
             if (setup_tun()) {
                 log().info("TUN device rebuilt successfully");
             } else {
