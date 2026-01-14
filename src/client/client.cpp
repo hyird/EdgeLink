@@ -717,6 +717,7 @@ bool Client::setup_tun() {
 
     // Create TUN packet channel and start reading
     tun_packet_ch_ = std::make_unique<channels::TunPacketChannel>(ioc_, 64);
+    tun_handler_done_ch_ = std::make_unique<TunHandlerCompletionChannel>(ioc_, 1);
     tun_->set_packet_channel(tun_packet_ch_.get());
     tun_->start_read();
 
@@ -733,6 +734,7 @@ void Client::teardown_tun() {
     if (tun_packet_ch_) {
         tun_packet_ch_->close();
         tun_packet_ch_.reset();
+        tun_handler_done_ch_.reset();
     }
 
     // Then close TUN device
@@ -756,6 +758,13 @@ asio::awaitable<void> Client::tun_packet_handler() {
         }
         // 处理接收到的 TUN 数据包
         on_tun_packet(std::span<const uint8_t>(packet));
+    }
+
+    log().debug("TUN packet handler stopped");
+
+    // Notify teardown_tun() that handler has exited
+    if (tun_handler_done_ch_) {
+        tun_handler_done_ch_->try_send(boost::system::error_code{});
     }
 }
 
@@ -1078,6 +1087,17 @@ asio::awaitable<void> Client::stop() {
 
     // Teardown TUN
     log().debug("Tearing down TUN device...");
+    // Wait for TUN packet handler to exit before tearing down
+    if (tun_packet_ch_ && tun_handler_done_ch_) {
+        tun_packet_ch_->close();
+        try {
+            co_await tun_handler_done_ch_->async_receive(asio::use_awaitable);
+            log().debug("TUN packet handler confirmed stopped");
+        } catch (...) {
+            log().warn("Failed to wait for TUN packet handler to stop");
+        }
+    }
+
     teardown_tun();
     log().debug("TUN device torn down");
 

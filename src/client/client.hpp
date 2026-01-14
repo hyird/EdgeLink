@@ -308,6 +308,10 @@ private:
     std::shared_ptr<TunDevice> tun_;
     std::unique_ptr<channels::TunPacketChannel> tun_packet_ch_;
 
+    // TUN packet handler completion channel
+    using TunHandlerCompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    std::unique_ptr<TunHandlerCompletionChannel> tun_handler_done_ch_;
+
     // IPC server (optional)
     std::shared_ptr<IpcServer> ipc_;
 
