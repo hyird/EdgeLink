@@ -75,10 +75,9 @@ struct ClientConfig {
     // P2P 配置（使用统一的 edgelink::P2PConfig）
     edgelink::P2PConfig p2p;
 
-    // 获取当前使用的controller host
-    std::string current_controller_host() const {
-        if (controller_hosts.empty()) return "localhost:8080";
-        return controller_hosts[0];
+    // 获取当前使用的controller url
+    std::string current_controller_url() const {
+        return controller_url.empty() ? "localhost:8080" : controller_url;
     }
 
     // 解析 host:port 为规范化格式
