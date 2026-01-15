@@ -622,11 +622,22 @@ asio::awaitable<void> ControlChannel::close() {
 
         if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
             // 尝试优雅关闭，但有超时保护
-            auto result = co_await (
-                tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable) ||
-                timeout_timer.async_wait(asio::use_awaitable)
-            );
-            closed = (result.index() == 0);
+            // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
+            bool close_completed = false;
+            asio::co_spawn(ioc_, [this, &close_completed]() -> asio::awaitable<void> {
+                try {
+                    co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+                    close_completed = true;
+                } catch (...) {}
+            }, asio::detached);
+
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (!close_completed && std::chrono::steady_clock::now() < deadline) {
+                timeout_timer.expires_after(std::chrono::milliseconds(50));
+                co_await timeout_timer.async_wait(asio::use_awaitable);
+            }
+
+            closed = close_completed;
             if (!closed) {
                 // 超时，直接关闭底层连接
                 log().debug("WebSocket close timeout, forcing shutdown");
@@ -634,11 +645,22 @@ asio::awaitable<void> ControlChannel::close() {
                 tls_ws_->next_layer().next_layer().socket().close(ec);
             }
         } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
-            auto result = co_await (
-                plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable) ||
-                timeout_timer.async_wait(asio::use_awaitable)
-            );
-            closed = (result.index() == 0);
+            // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
+            bool close_completed = false;
+            asio::co_spawn(ioc_, [this, &close_completed]() -> asio::awaitable<void> {
+                try {
+                    co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+                    close_completed = true;
+                } catch (...) {}
+            }, asio::detached);
+
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (!close_completed && std::chrono::steady_clock::now() < deadline) {
+                timeout_timer.expires_after(std::chrono::milliseconds(50));
+                co_await timeout_timer.async_wait(asio::use_awaitable);
+            }
+
+            closed = close_completed;
             if (!closed) {
                 log().debug("WebSocket close timeout, forcing shutdown");
                 boost::system::error_code ec;
@@ -1300,22 +1322,44 @@ asio::awaitable<void> RelayChannel::close() {
         bool closed = false;
 
         if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
-            auto result = co_await (
-                tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable) ||
-                timeout_timer.async_wait(asio::use_awaitable)
-            );
-            closed = (result.index() == 0);
+            // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
+            bool close_completed = false;
+            asio::co_spawn(ioc_, [this, &close_completed]() -> asio::awaitable<void> {
+                try {
+                    co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+                    close_completed = true;
+                } catch (...) {}
+            }, asio::detached);
+
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (!close_completed && std::chrono::steady_clock::now() < deadline) {
+                timeout_timer.expires_after(std::chrono::milliseconds(50));
+                co_await timeout_timer.async_wait(asio::use_awaitable);
+            }
+
+            closed = close_completed;
             if (!closed) {
                 log().debug("Relay WebSocket close timeout, forcing shutdown");
                 boost::system::error_code ec;
                 tls_ws_->next_layer().next_layer().socket().close(ec);
             }
         } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
-            auto result = co_await (
-                plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable) ||
-                timeout_timer.async_wait(asio::use_awaitable)
-            );
-            closed = (result.index() == 0);
+            // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
+            bool close_completed = false;
+            asio::co_spawn(ioc_, [this, &close_completed]() -> asio::awaitable<void> {
+                try {
+                    co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+                    close_completed = true;
+                } catch (...) {}
+            }, asio::detached);
+
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (!close_completed && std::chrono::steady_clock::now() < deadline) {
+                timeout_timer.expires_after(std::chrono::milliseconds(50));
+                co_await timeout_timer.async_wait(asio::use_awaitable);
+            }
+
+            closed = close_completed;
             if (!closed) {
                 log().debug("Relay WebSocket close timeout, forcing shutdown");
                 boost::system::error_code ec;

@@ -362,26 +362,32 @@ asio::awaitable<StunQueryResult> EndpointManager::send_stun_request(
                 asio::buffer(request), stun_server, asio::use_awaitable);
 
             // 使用 channel 异步等待响应（带超时）
+            // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
             asio::steady_timer timer(ioc_);
-            timer.expires_after(std::chrono::milliseconds(config_.stun_timeout_ms));
+            auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(config_.stun_timeout_ms);
 
             bool got_response = false;
             std::vector<uint8_t> response_data;
 
-            // 等待 channel 响应或超时
-            using namespace asio::experimental::awaitable_operators;
-            auto wait_result = co_await (
-                stun_response_channel_->async_receive(asio::use_awaitable) ||
-                timer.async_wait(asio::use_awaitable)
-            );
+            while (std::chrono::steady_clock::now() < deadline && !got_response) {
+                // 非阻塞检查 channel
+                stun_response_channel_->try_receive([&](boost::system::error_code,
+                                                         std::array<uint8_t, 12> recv_txn_id,
+                                                         std::vector<uint8_t> data) {
+                    if (recv_txn_id == txn_id) {
+                        got_response = true;
+                        response_data = std::move(data);
+                    }
+                });
 
-            if (wait_result.index() == 0) {
-                // 收到 channel 响应（error_code 通过异常传递，不在返回值中）
-                auto [recv_txn_id, data] = std::get<0>(wait_result);
-                if (recv_txn_id == txn_id) {
-                    got_response = true;
-                    response_data = std::move(data);
+                if (got_response) {
+                    break;
                 }
+
+                // 短暂等待后重试
+                timer.expires_after(std::chrono::milliseconds(10));
+                co_await timer.async_wait(asio::use_awaitable);
             }
 
             // 移除待处理 txn_id

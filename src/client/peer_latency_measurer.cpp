@@ -56,15 +56,25 @@ asio::awaitable<void> PeerLatencyMeasurer::stop() {
         measure_timer_->cancel();
         if (measure_done_ch_) {
             try {
-                asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
-                timeout_timer.expires_after(std::chrono::seconds(2));
+                // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
+                asio::steady_timer timeout_timer(ioc_);
+                auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                bool loop_stopped = false;
 
-                auto result = co_await (
-                    measure_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable)) ||
-                    timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
-                );
+                while (!loop_stopped && std::chrono::steady_clock::now() < deadline) {
+                    measure_done_ch_->try_receive([&](boost::system::error_code) {
+                        loop_stopped = true;
+                    });
 
-                if (result.index() == 0) {
+                    if (loop_stopped) {
+                        break;
+                    }
+
+                    timeout_timer.expires_after(std::chrono::milliseconds(50));
+                    co_await timeout_timer.async_wait(asio::use_awaitable);
+                }
+
+                if (loop_stopped) {
                     log().debug("Measure loop confirmed stopped");
                 } else {
                     log().warn("Measure loop stop timeout (2s), forcing shutdown");
@@ -79,15 +89,25 @@ asio::awaitable<void> PeerLatencyMeasurer::stop() {
         report_timer_->cancel();
         if (report_done_ch_) {
             try {
-                asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
-                timeout_timer.expires_after(std::chrono::seconds(2));
+                // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
+                asio::steady_timer timeout_timer(ioc_);
+                auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                bool loop_stopped = false;
 
-                auto result = co_await (
-                    report_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable)) ||
-                    timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
-                );
+                while (!loop_stopped && std::chrono::steady_clock::now() < deadline) {
+                    report_done_ch_->try_receive([&](boost::system::error_code) {
+                        loop_stopped = true;
+                    });
 
-                if (result.index() == 0) {
+                    if (loop_stopped) {
+                        break;
+                    }
+
+                    timeout_timer.expires_after(std::chrono::milliseconds(50));
+                    co_await timeout_timer.async_wait(asio::use_awaitable);
+                }
+
+                if (loop_stopped) {
                     log().debug("Report loop confirmed stopped");
                 } else {
                     log().warn("Report loop stop timeout (2s), forcing shutdown");

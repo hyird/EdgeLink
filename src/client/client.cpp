@@ -1064,17 +1064,17 @@ asio::awaitable<bool> Client::start() {
     }
 
     // Wait for auth response (30s timeout for high-latency networks)
+    // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
     asio::steady_timer timer(ioc_);
-    timer.expires_after(std::chrono::seconds(30));
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
 
     while (!control_->is_connected()) {
-        auto result = co_await (timer.async_wait(asio::use_awaitable) ||
-                                asio::post(ioc_, asio::use_awaitable));
-        if (timer.expiry() <= std::chrono::steady_clock::now()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
             log().warn("Authentication timeout (30s) for {}:{}", host, port);
             break;
         }
-        co_await asio::post(ioc_, asio::use_awaitable);
+        timer.expires_after(std::chrono::milliseconds(100));
+        co_await timer.async_wait(asio::use_awaitable);
     }
 
     if (!control_->is_connected()) {
@@ -1106,17 +1106,17 @@ asio::awaitable<bool> Client::start() {
             bool connected = co_await self->relay_->connect(relay_token);
             if (connected) {
                 // Wait for authentication with timeout
+                // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
                 asio::steady_timer timer(self->ioc_);
-                timer.expires_after(std::chrono::seconds(30));
+                auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
 
                 while (!self->relay_->is_connected()) {
-                    auto result = co_await (timer.async_wait(asio::use_awaitable) ||
-                                            asio::post(self->ioc_, asio::use_awaitable));
-                    if (timer.expiry() <= std::chrono::steady_clock::now()) {
+                    if (std::chrono::steady_clock::now() >= deadline) {
                         log().warn("Relay authentication timeout (30s)");
                         break;
                     }
-                    co_await asio::post(self->ioc_, asio::use_awaitable);
+                    timer.expires_after(std::chrono::milliseconds(100));
+                    co_await timer.async_wait(asio::use_awaitable);
                 }
 
                 if (self->relay_->is_connected()) {
@@ -1223,15 +1223,22 @@ asio::awaitable<void> Client::stop() {
     if (p2p_mgr_) {
         log().debug("Stopping P2P manager...");
         try {
-            asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
-            timeout_timer.expires_after(std::chrono::seconds(3));
+            // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
+            bool stop_completed = false;
+            asio::co_spawn(ioc_, [this, &stop_completed]() -> asio::awaitable<void> {
+                co_await p2p_mgr_->stop();
+                stop_completed = true;
+            }, asio::detached);
 
-            auto result = co_await (
-                p2p_mgr_->stop() ||
-                timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
-            );
+            asio::steady_timer timeout_timer(ioc_);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
 
-            if (result.index() == 0) {
+            while (!stop_completed && std::chrono::steady_clock::now() < deadline) {
+                timeout_timer.expires_after(std::chrono::milliseconds(50));
+                co_await timeout_timer.async_wait(asio::use_awaitable);
+            }
+
+            if (stop_completed) {
                 log().debug("P2P manager stopped successfully");
             } else {
                 log().warn("P2P manager stop timeout (3s), forcing shutdown");
@@ -1257,15 +1264,25 @@ asio::awaitable<void> Client::stop() {
     if (tun_packet_ch_ && tun_handler_done_ch_) {
         tun_packet_ch_->close();
         try {
-            asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
-            timeout_timer.expires_after(std::chrono::seconds(2));
+            // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
+            asio::steady_timer timeout_timer(ioc_);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            bool handler_stopped = false;
 
-            auto result = co_await (
-                tun_handler_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable)) ||
-                timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
-            );
+            while (!handler_stopped && std::chrono::steady_clock::now() < deadline) {
+                tun_handler_done_ch_->try_receive([&](boost::system::error_code) {
+                    handler_stopped = true;
+                });
 
-            if (result.index() == 0) {
+                if (handler_stopped) {
+                    break;
+                }
+
+                timeout_timer.expires_after(std::chrono::milliseconds(50));
+                co_await timeout_timer.async_wait(asio::use_awaitable);
+            }
+
+            if (handler_stopped) {
                 log().debug("TUN packet handler confirmed stopped");
             } else {
                 log().warn("TUN packet handler stop timeout (2s), forcing teardown");
@@ -1335,15 +1352,22 @@ asio::awaitable<void> Client::stop() {
     if (relay_) {
         log().debug("Closing relay channel...");
         try {
-            asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
-            timeout_timer.expires_after(std::chrono::seconds(2));
+            // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
+            bool close_completed = false;
+            asio::co_spawn(ioc_, [this, &close_completed]() -> asio::awaitable<void> {
+                co_await relay_->close();
+                close_completed = true;
+            }, asio::detached);
 
-            auto result = co_await (
-                relay_->close() ||
-                timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
-            );
+            asio::steady_timer timeout_timer(ioc_);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 
-            if (result.index() == 0) {
+            while (!close_completed && std::chrono::steady_clock::now() < deadline) {
+                timeout_timer.expires_after(std::chrono::milliseconds(50));
+                co_await timeout_timer.async_wait(asio::use_awaitable);
+            }
+
+            if (close_completed) {
                 log().debug("Relay channel closed successfully");
             } else {
                 log().warn("Relay channel close timeout (2s)");
@@ -1359,15 +1383,22 @@ asio::awaitable<void> Client::stop() {
     if (control_) {
         log().debug("Closing control channel...");
         try {
-            asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
-            timeout_timer.expires_after(std::chrono::seconds(2));
+            // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
+            bool close_completed = false;
+            asio::co_spawn(ioc_, [this, &close_completed]() -> asio::awaitable<void> {
+                co_await control_->close();
+                close_completed = true;
+            }, asio::detached);
 
-            auto result = co_await (
-                control_->close() ||
-                timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
-            );
+            asio::steady_timer timeout_timer(ioc_);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 
-            if (result.index() == 0) {
+            while (!close_completed && std::chrono::steady_clock::now() < deadline) {
+                timeout_timer.expires_after(std::chrono::milliseconds(50));
+                co_await timeout_timer.async_wait(asio::use_awaitable);
+            }
+
+            if (close_completed) {
                 log().debug("Control channel closed successfully");
             } else {
                 log().warn("Control channel close timeout (2s)");
