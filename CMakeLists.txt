@@ -175,6 +175,62 @@ if(BUILD_SERVER)
 endif()
 
 # =============================================================================
+# Git Version Information
+# =============================================================================
+# Get Git commit hash and branch
+find_package(Git QUIET)
+if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short=8 HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_COMMIT_HASH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --abbrev-ref HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_BRANCH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} diff-index --quiet HEAD --
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        RESULT_VARIABLE GIT_DIRTY
+    )
+else()
+    set(GIT_COMMIT_HASH "unknown")
+    set(GIT_BRANCH "unknown")
+    set(GIT_DIRTY 0)
+endif()
+
+# Generate build timestamp
+string(TIMESTAMP BUILD_TIMESTAMP "%Y-%m-%d %H:%M:%S UTC" UTC)
+
+# Generate build ID (first 8 chars of commit hash, or timestamp-based if no git)
+if(GIT_COMMIT_HASH STREQUAL "unknown")
+    string(TIMESTAMP BUILD_ID "%Y%m%d%H%M%S")
+else()
+    set(BUILD_ID "${GIT_COMMIT_HASH}")
+    if(NOT GIT_DIRTY EQUAL 0)
+        set(BUILD_ID "${BUILD_ID}-dirty")
+    endif()
+endif()
+
+message(STATUS "Build ID: ${BUILD_ID}")
+if(NOT GIT_COMMIT_HASH STREQUAL "unknown")
+    message(STATUS "Git commit: ${GIT_COMMIT_HASH} (${GIT_BRANCH})")
+endif()
+
+# Configure version header
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/client/version.hpp.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/client/version.hpp
+    @ONLY
+)
+
+# =============================================================================
 # Client (Cross-platform)
 # =============================================================================
 if(BUILD_CLIENT)
@@ -233,6 +289,10 @@ if(BUILD_CLIENT)
     endif()
 
     add_executable(edgelink-client ${CLIENT_SOURCE})
+
+    target_include_directories(edgelink-client PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/generated
+    )
 
     target_link_libraries(edgelink-client PRIVATE
         edgelink-common

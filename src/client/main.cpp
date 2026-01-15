@@ -1,5 +1,6 @@
 #include "client/client.hpp"
 #include "client/ipc_server.hpp"
+#include "client/version.hpp"
 #include "common/crypto.hpp"
 #include "common/config.hpp"
 #include "common/logger.hpp"
@@ -19,10 +20,6 @@ namespace asio = boost::asio;
 
 using namespace edgelink;
 using namespace edgelink::client;
-
-// Version information
-constexpr const char* VERSION = "1.0.0";
-constexpr const char* BUILD_DATE = __DATE__;
 
 void setup_logging(const std::string& level, const std::string& log_file,
                    const std::unordered_map<std::string, std::string>& module_levels = {}) {
@@ -164,8 +161,10 @@ void print_config_help() {
 // ============================================================================
 
 int cmd_version() {
-    std::cout << "EdgeLink Client " << VERSION << "\n"
-              << "  Build:      " << BUILD_DATE << "\n"
+    std::cout << "EdgeLink Client " << version::VERSION << "\n"
+              << "  Build ID:   " << version::BUILD_ID << "\n"
+              << "  Commit:     " << version::GIT_COMMIT << " (" << version::GIT_BRANCH << ")\n"
+              << "  Built:      " << version::BUILD_TIMESTAMP << "\n"
               << "  Language:   C++23\n"
 #ifdef _WIN32
               << "  Platform:   windows/"
@@ -875,7 +874,7 @@ int cmd_up(int argc, char* argv[]) {
     setup_logging(cfg.log_level, cfg.log_file, cfg.module_log_levels);
 
     auto& log = Logger::get("client");
-    log.info("EdgeLink Client {} starting...", VERSION);
+    log.info("EdgeLink Client {} starting... [build: {}]", version::VERSION, version::BUILD_ID);
 
     // Initialize crypto
     if (!crypto::init()) {

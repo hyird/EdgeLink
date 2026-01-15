@@ -89,6 +89,13 @@ asio::awaitable<std::optional<tcp::endpoint>> async_connect_happy_eyeballs(
                        endpoint.address().to_string(),
                        per_endpoint_timeout.count());
 
+            // Ensure socket is closed before attempting connection
+            // This is critical when switching between IPv4 and IPv6
+            boost::system::error_code close_ec;
+            if (stream.socket().is_open()) {
+                stream.socket().close(close_ec);
+            }
+
             stream.expires_after(per_endpoint_timeout);
             co_await stream.async_connect(endpoint, asio::use_awaitable);
 
@@ -99,10 +106,22 @@ asio::awaitable<std::optional<tcp::endpoint>> async_connect_happy_eyeballs(
             log().debug("连接 {} 失败: {}",
                        endpoint.address().to_string(),
                        e.what());
+
+            // Ensure socket is closed after failure
+            boost::system::error_code close_ec;
+            if (stream.socket().is_open()) {
+                stream.socket().close(close_ec);
+            }
             // 继续尝试下一个endpoint
         } catch (...) {
             log().debug("连接 {} 失败: 未知错误",
                        endpoint.address().to_string());
+
+            // Ensure socket is closed after failure
+            boost::system::error_code close_ec;
+            if (stream.socket().is_open()) {
+                stream.socket().close(close_ec);
+            }
         }
     }
 
