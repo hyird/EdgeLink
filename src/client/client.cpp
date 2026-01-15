@@ -1773,32 +1773,13 @@ asio::awaitable<void> Client::reconnect() {
         cached_controller_endpoints_set_.clear();
     }
 
-    // Teardown TUN on reconnect
-    teardown_tun();
+    // 【重要】Controller 重连时保持数据通路不变：
+    // - 不关闭 TUN（保持路由工作）
+    // - 不停止 P2P manager（保持 P2P 连接）
+    // - 不关闭 multi_relay_mgr_（保持 Relay 连接）
+    // - 只重连 Control Channel
 
-    // 【关键修复】停止 P2P manager，确保后台任务终止
-    // 避免重连时老协程与新状态不一致导致崩溃
-    if (p2p_mgr_) {
-        try {
-            co_await p2p_mgr_->stop();
-        } catch (const std::exception& e) {
-            log().debug("Failed to stop P2P manager: {}", e.what());
-        } catch (...) {
-            log().debug("Failed to stop P2P manager: unknown error");
-        }
-    }
-
-    // Close existing channels
-    if (relay_) {
-        try {
-            co_await relay_->close();
-        } catch (const std::exception& e) {
-            log().debug("Failed to close relay channel: {}", e.what());
-        } catch (...) {
-            log().debug("Failed to close relay channel: unknown error");
-        }
-        relay_.reset();
-    }
+    // 只关闭 Control Channel
     if (control_) {
         try {
             co_await control_->close();
@@ -1807,29 +1788,32 @@ asio::awaitable<void> Client::reconnect() {
         } catch (...) {
             log().debug("Failed to close control channel: unknown error");
         }
-        control_.reset();
+        // 不 reset，保留 channel 对象以便重连
     }
 
     try {
         reconnect_timer_.expires_after(backoff_interval);
         co_await reconnect_timer_.async_wait(asio::use_awaitable);
 
-        // Try to reconnect
-        state_ = ClientState::STOPPED;
-        bool success = co_await start();
+        // 只重连 Control Channel，保持数据通路不变
+        bool success = false;
+        if (control_) {
+            success = co_await control_->reconnect();
+        }
 
         if (success) {
             // Reconnect succeeded, reset retry counter
             reconnect_attempts_ = 0;
-            log().info("Reconnect successful");
+            state_ = ClientState::RUNNING;
+            log().info("Control channel reconnect successful");
         } else {
             bool auto_reconnect = [&]() {
                 std::shared_lock lock(config_mutex_);
                 return config_.auto_reconnect;
             }();
             if (auto_reconnect) {
-                // start() failed, schedule another attempt
-                log().warn("Reconnect failed, will retry in {}s (attempt {}/{})",
+                // reconnect() failed, schedule another attempt
+                log().warn("Control reconnect failed, will retry in {}s (attempt {}/{})",
                            backoff_interval.count(), reconnect_attempts_,
                            max_reconnect_attempts_);
                 asio::co_spawn(ioc_, reconnect(), asio::detached);
