@@ -257,6 +257,7 @@ if(BUILD_CLIENT)
         src/client/peer_routing_table.cpp
         src/client/multi_relay_manager.cpp
         src/client/peer_latency_measurer.cpp
+        src/client/relay_latency_reporter.cpp
     )
 
     # Platform-specific TUN source
