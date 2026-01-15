@@ -1410,6 +1410,10 @@ asio::awaitable<void> Client::stop() {
         }
     }
 
+    // Reset state machine to clear peer_connections before destruction
+    // This prevents potential crashes if any dangling references exist
+    state_machine_.reset();
+
     log().info("Client stopped successfully");
 
     if (events_.disconnected) {
