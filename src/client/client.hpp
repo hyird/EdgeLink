@@ -55,7 +55,7 @@ struct ClientConfig {
     std::string state_dir;  // Empty = platform default
 
     // TUN mode settings
-    bool enable_tun = false;       // Enable TUN device for IP-level routing
+    bool enable_tun = true;        // Enable TUN device for IP-level routing (default: enabled)
     std::string tun_name = "";     // TUN device name (empty = auto)
     uint32_t tun_mtu = 1420;       // MTU for TUN device
 
