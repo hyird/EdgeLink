@@ -34,9 +34,11 @@ public:
                       const MultiRelayConfig& config);
 
     // 初始化所有 Relay 连接（relays 来自 CONFIG 消息）
+    // controller_hostname: 控制器地址，当 relay hostname 为 "builtin" 或空时使用
     asio::awaitable<bool> initialize(const std::vector<RelayInfo>& relays,
                                       const std::vector<uint8_t>& relay_token,
-                                      bool use_tls);
+                                      bool use_tls,
+                                      const std::string& controller_hostname);
 
     // 停止所有连接
     asio::awaitable<void> stop();

@@ -27,7 +27,8 @@ MultiRelayManager::MultiRelayManager(
 asio::awaitable<bool> MultiRelayManager::initialize(
     const std::vector<RelayInfo>& relays,
     const std::vector<uint8_t>& relay_token,
-    bool use_tls) {
+    bool use_tls,
+    const std::string& controller_hostname) {
 
     if (relays.empty()) {
         log().warn("No relays configured");
@@ -40,11 +41,19 @@ asio::awaitable<bool> MultiRelayManager::initialize(
 
     // 为每个 Relay 创建连接池并连接
     for (const auto& relay : relays) {
+        // 如果 relay hostname 是 "builtin" 或为空，使用控制器的 hostname
+        RelayInfo actual_relay = relay;
+        if (actual_relay.hostname.empty() || actual_relay.hostname == "builtin") {
+            log().info("Relay {} uses builtin relay, using controller hostname: {}",
+                       relay.server_id, controller_hostname);
+            actual_relay.hostname = controller_hostname;
+        }
+
         log().info("Setting up relay pool for {} (id={}, region={})",
-                   relay.hostname, relay.server_id, relay.region);
+                   actual_relay.hostname, actual_relay.server_id, actual_relay.region);
 
         auto pool = std::make_shared<RelayConnectionPool>(
-            ioc_, ssl_ctx_, crypto_, peers_, relay, use_tls);
+            ioc_, ssl_ctx_, crypto_, peers_, actual_relay, use_tls);
 
         // 设置事件通道
         pool->set_channels(channels_);

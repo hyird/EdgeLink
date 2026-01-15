@@ -295,10 +295,28 @@ asio::awaitable<void> Client::ctrl_config_handler() {
                 std::shared_lock lock(config_mutex_);
                 return config_.tls;
             }();
-            asio::co_spawn(ioc_, [self, relay_mgr, relays = config.relays, relay_token = config.relay_token, use_tls]() -> asio::awaitable<void> {
+
+            // 从控制器 URL 中提取 hostname:port（用于内置 relay）
+            std::string controller_hostname;
+            if (control_) {
+                std::string url = control_->url();  // e.g. "wss://edge.a-z.xin:443/api/v1/control"
+                // 移除协议部分
+                size_t start = url.find("://");
+                if (start != std::string::npos) {
+                    start += 3;  // 跳过 "://"
+                    size_t end = url.find('/', start);  // 找到路径的开始
+                    if (end != std::string::npos) {
+                        controller_hostname = url.substr(start, end - start);
+                    } else {
+                        controller_hostname = url.substr(start);
+                    }
+                }
+            }
+
+            asio::co_spawn(ioc_, [self, relay_mgr, relays = config.relays, relay_token = config.relay_token, use_tls, controller_hostname]() -> asio::awaitable<void> {
                 try {
                     // Use captured relay_mgr instead of self->multi_relay_mgr_ (which may be reset by stop())
-                    co_await relay_mgr->initialize(relays, relay_token, use_tls);
+                    co_await relay_mgr->initialize(relays, relay_token, use_tls, controller_hostname);
                     log().info("MultiRelayManager initialized successfully");
 
                     // Initialize latency measurer after relay manager is started
