@@ -1189,8 +1189,12 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
         // 用于 SNI 和 HTTP Host 头的 hostname（CDN 需要正确的 Host 头）
         std::string ws_host = host_override_.empty() ? connect_host : host_override_;
 
-        log().debug("Connecting to relay: {}:{}{} (TLS: {}, Host: {})",
-                    connect_host, port, target, use_tls_ ? "yes" : "no", ws_host);
+        std::string scheme = use_tls_ ? "wss" : "ws";
+        if (host_override_.empty()) {
+            log().debug("Connecting to relay: {}://{}:{}", scheme, connect_host, port);
+        } else {
+            log().debug("Connecting to relay: {}://{} [ip:{}]", scheme, ws_host, connect_host);
+        }
 
         // Resolve host (use connect_host for DNS, not ws_host)
         tcp::resolver resolver(ioc_);
