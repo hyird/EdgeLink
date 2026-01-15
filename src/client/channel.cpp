@@ -265,11 +265,6 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         log().info("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
         log().debug("DNS resolution took {} ms", dns_elapsed);
 
-        // 生成此连接的唯一标识符（使用时间戳的低32位作为简单实现）
-        ConnectionId connection_id = static_cast<ConnectionId>(
-            std::chrono::steady_clock::now().time_since_epoch().count() & 0xFFFFFFFF);
-        log().debug("Assigned connection_id: 0x{:08x}", connection_id);
-
         if (use_tls_) {
             // Create TLS stream
             tls_ws_ = std::make_unique<TlsWsStream>(ioc_, ssl_ctx_);
@@ -371,7 +366,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         req.version = "1.0.0";
         req.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        req.connection_id = connection_id;  // 设置连接标识符
+        req.connection_id = 0;  // Controller 连接不使用 connection_id（单连接控制通道）
         req.auth_data = std::vector<uint8_t>(authkey_.begin(), authkey_.end());
 
         // Sign the request
