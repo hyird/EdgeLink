@@ -695,6 +695,11 @@ asio::awaitable<void> ControlChannel::send_latency_report(const LatencyReport& r
     log().debug("Sent latency report with {} entries", report.entries.size());
 }
 
+asio::awaitable<void> ControlChannel::send_relay_latency_report(const RelayLatencyReport& report) {
+    co_await send_frame(FrameType::RELAY_LATENCY_REPORT, report.serialize());
+    log().debug("Sent relay latency report with {} entries", report.entries.size());
+}
+
 asio::awaitable<void> ControlChannel::read_loop() {
     try {
         beast::flat_buffer buffer;

@@ -253,6 +253,22 @@ struct PeerRoutingUpdate {
     static std::expected<PeerRoutingUpdate, ParseError> parse(std::span<const uint8_t> data);
 };
 
+// RELAY_LATENCY_REPORT (0x37) - Client 上报到每个 Relay 的延迟
+struct RelayLatencyReportEntry {
+    ServerId relay_id = 0;             // Relay 服务器 ID
+    ConnectionId connection_id = 0;    // 连接 ID
+    uint16_t latency_ms = 0;           // 往返延迟（毫秒）
+    uint8_t packet_loss = 0;           // 丢包率（百分比，0-100）
+};
+
+struct RelayLatencyReport {
+    uint64_t timestamp = 0;                              // 测量时间戳
+    std::vector<RelayLatencyReportEntry> entries;        // 延迟条目列表
+
+    std::vector<uint8_t> serialize() const;
+    static std::expected<RelayLatencyReport, ParseError> parse(std::span<const uint8_t> data);
+};
+
 // ============================================================================
 // Error Messages
 // ============================================================================

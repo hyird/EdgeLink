@@ -37,8 +37,11 @@ public:
 
     PathDecisionEngine();
 
-    // 收到 Client 上报的延迟数据
+    // 收到 Client 上报的延迟数据（Client→Peer via Relay）
     void handle_peer_path_report(NodeId from_node, const PeerPathReport& report);
+
+    // 收到 Client 上报的 Relay 延迟数据（Client→Relay）
+    void handle_relay_latency_report(NodeId from_node, const RelayLatencyReport& report);
 
     // 为指定 Client 计算到所有 Peer 的最优路由
     PeerRoutingUpdate compute_routing_for_node(NodeId node_id);
@@ -70,8 +73,11 @@ private:
 
     mutable std::shared_mutex mutex_;
 
-    // 延迟矩阵: (from_node, to_peer, relay_id) -> latency
+    // 延迟矩阵: (from_node, to_peer, relay_id) -> latency（端到端）
     std::map<std::tuple<NodeId, NodeId, ServerId>, LatencyMatrixEntry> latency_matrix_;
+
+    // Client→Relay 延迟: (node_id, relay_id) -> latency
+    std::map<std::pair<NodeId, ServerId>, LatencyMatrixEntry> node_relay_latencies_;
 
     // 当前每个节点的路由表
     std::map<NodeId, PeerRoutingUpdate> node_routing_;

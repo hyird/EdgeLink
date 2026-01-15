@@ -153,6 +153,9 @@ public:
     // Send LATENCY_REPORT
     asio::awaitable<void> send_latency_report(const LatencyReport& report);
 
+    // Send RELAY_LATENCY_REPORT (report latency to each relay)
+    asio::awaitable<void> send_relay_latency_report(const RelayLatencyReport& report);
+
     // Send ROUTE_ANNOUNCE (announce subnets this node can route)
     asio::awaitable<void> send_route_announce(const std::vector<RouteInfo>& routes);
 

@@ -332,6 +332,31 @@ asio::awaitable<void> Client::ctrl_config_handler() {
                         co_await self->latency_measurer_->start();
                         log().info("PeerLatencyMeasurer started successfully");
                     }
+
+                    // Initialize relay latency reporter
+                    if (self->multi_relay_mgr_ && !self->relay_latency_reporter_) {
+                        RelayLatencyReporterConfig reporter_config;
+                        reporter_config.report_interval = std::chrono::seconds(30);
+                        reporter_config.initial_delay = std::chrono::seconds(5);
+
+                        self->relay_latency_reporter_ = std::make_shared<RelayLatencyReporter>(
+                            self->ioc_, *relay_mgr, reporter_config);
+
+                        // Set callback to send report via control channel
+                        self->relay_latency_reporter_->set_report_callback(
+                            [weak_self = std::weak_ptr<Client>(self->shared_from_this())](const RelayLatencyReport& report) {
+                                if (auto client = weak_self.lock()) {
+                                    if (client->control_ && client->control_->is_connected()) {
+                                        asio::co_spawn(client->ioc_,
+                                            client->control_->send_relay_latency_report(report),
+                                            asio::detached);
+                                    }
+                                }
+                            });
+
+                        co_await self->relay_latency_reporter_->start();
+                        log().info("RelayLatencyReporter started successfully");
+                    }
                 } catch (const std::exception& e) {
                     log().error("Failed to start multi-relay system: {}", e.what());
                 }
@@ -1209,6 +1234,14 @@ asio::awaitable<void> Client::stop() {
         co_await latency_measurer_->stop();
         latency_measurer_.reset();
         log().debug("Latency measurer stopped");
+    }
+
+    // Stop relay latency reporter (depends on multi_relay_mgr_)
+    if (relay_latency_reporter_) {
+        log().debug("Stopping relay latency reporter...");
+        co_await relay_latency_reporter_->stop();
+        relay_latency_reporter_.reset();
+        log().debug("Relay latency reporter stopped");
     }
 
     // Stop multi-relay manager (has background RTT measurement loop)

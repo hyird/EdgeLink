@@ -73,6 +73,7 @@ enum class FrameType : uint8_t {
     PATH_SELECTION = 0x34,      // Controller 指示连接路径选择
     PEER_PATH_REPORT = 0x35,    // Client 上报到每个 Peer 经过每个 Relay 的延迟
     PEER_ROUTING_UPDATE = 0x36, // Controller 下发每个 Peer 的最优路径
+    RELAY_LATENCY_REPORT = 0x37, // Client 上报到每个 Relay 的延迟
 
     // P2P (0x40-0x4F)
     P2P_INIT = 0x40,

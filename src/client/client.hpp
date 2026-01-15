@@ -12,6 +12,7 @@
 #include "client/p2p_manager.hpp"
 #include "client/multi_relay_manager.hpp"
 #include "client/peer_latency_measurer.hpp"
+#include "client/relay_latency_reporter.hpp"
 #include "common/node_state.hpp"
 
 #include <boost/asio.hpp>
@@ -375,6 +376,7 @@ private:
     // Multi-path Relay support (optional)
     std::shared_ptr<MultiRelayManager> multi_relay_mgr_;
     std::shared_ptr<PeerLatencyMeasurer> latency_measurer_;
+    std::shared_ptr<RelayLatencyReporter> relay_latency_reporter_;
 
     ClientEvents events_;
 };

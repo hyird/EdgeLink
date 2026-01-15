@@ -223,6 +223,10 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& 
             co_await handle_peer_path_report(frame);
             break;
 
+        case FrameType::RELAY_LATENCY_REPORT:
+            co_await handle_relay_latency_report(frame);
+            break;
+
         case FrameType::ROUTE_ANNOUNCE:
             co_await handle_route_announce(frame);
             break;
@@ -565,6 +569,33 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_peer_path_report(co
         log().debug("Sent PEER_ROUTING_UPDATE to node {} with {} entries",
                    this->node_id_, routing.routes.size());
     }
+}
+
+template<typename StreamType>
+asio::awaitable<void> ControlSessionImpl<StreamType>::handle_relay_latency_report(const Frame& frame) {
+    if (!this->authenticated_) {
+        co_await this->send_error(1001, "Not authenticated", FrameType::RELAY_LATENCY_REPORT);
+        co_return;
+    }
+
+    auto report = RelayLatencyReport::parse(frame.payload);
+    if (!report) {
+        log().warn("Invalid RELAY_LATENCY_REPORT from node {}", this->node_id_);
+        co_return;
+    }
+
+    log().debug("Received RELAY_LATENCY_REPORT from node {} with {} entries",
+                this->node_id_, report->entries.size());
+
+    // 记录延迟数据
+    for (const auto& entry : report->entries) {
+        log().debug("  Node {} -> Relay {}: {}ms (conn=0x{:08x}, loss={}%)",
+                    this->node_id_, entry.relay_id,
+                    entry.latency_ms, entry.connection_id, entry.packet_loss);
+    }
+
+    // 将数据传递给 PathDecisionEngine
+    this->manager_.path_decision().handle_relay_latency_report(this->node_id_, *report);
 }
 
 template<typename StreamType>

@@ -173,6 +173,16 @@ asio::awaitable<bool> RelayConnectionPool::connect_single(
                     conn_id, elapsed);
     }
 
+    // 连接成功后立即发送 PING 测量真正的 RTT
+    try {
+        co_await channel->send_ping();
+        log().info("Relay {} ({}): sent initial PING for RTT measurement",
+                   relay_info_.server_id, endpoint.address().to_string());
+    } catch (const std::exception& e) {
+        log().warn("Failed to send initial PING to relay {}: {}",
+                   relay_info_.server_id, e.what());
+    }
+
     co_return true;
 }
 
@@ -419,9 +429,13 @@ void RelayConnectionPool::update_rtt(ConnectionId id, uint16_t rtt_ms) {
         if (rtt_ms > stats.max_rtt_ms) stats.max_rtt_ms = rtt_ms;
 
         // 指数移动平均
+        uint16_t old_avg = stats.avg_rtt_ms;
         stats.avg_rtt_ms = exponential_moving_average(stats.avg_rtt_ms, rtt_ms);
         stats.last_rtt_time = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
+
+        log().info("Relay {} RTT: {}ms (avg: {}ms -> {}ms, conn=0x{:08x})",
+                   relay_info_.server_id, rtt_ms, old_avg, stats.avg_rtt_ms, id);
     }
 }
 

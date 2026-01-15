@@ -892,6 +892,60 @@ std::expected<PeerRoutingUpdate, ParseError> PeerRoutingUpdate::parse(std::span<
 }
 
 // ============================================================================
+// RelayLatencyReport (0x37)
+// ============================================================================
+
+std::vector<uint8_t> RelayLatencyReport::serialize() const {
+    BinaryWriter writer;
+    writer.write_u64_be(timestamp);
+    writer.write_u16_be(static_cast<uint16_t>(entries.size()));
+
+    for (const auto& entry : entries) {
+        writer.write_u32_be(entry.relay_id);
+        writer.write_u32_be(entry.connection_id);
+        writer.write_u16_be(entry.latency_ms);
+        writer.write_u8(entry.packet_loss);
+    }
+
+    return writer.take();
+}
+
+std::expected<RelayLatencyReport, ParseError> RelayLatencyReport::parse(std::span<const uint8_t> data) {
+    BinaryReader reader(data);
+    RelayLatencyReport report;
+
+    auto timestamp = reader.read_u64_be();
+    auto count = reader.read_u16_be();
+
+    if (!timestamp || !count) {
+        return std::unexpected(ParseError::INSUFFICIENT_DATA);
+    }
+
+    report.timestamp = *timestamp;
+    report.entries.reserve(*count);
+
+    for (uint16_t i = 0; i < *count; ++i) {
+        auto relay_id = reader.read_u32_be();
+        auto conn_id = reader.read_u32_be();
+        auto latency = reader.read_u16_be();
+        auto loss = reader.read_u8();
+
+        if (!relay_id || !conn_id || !latency || !loss) {
+            return std::unexpected(ParseError::INSUFFICIENT_DATA);
+        }
+
+        RelayLatencyReportEntry entry;
+        entry.relay_id = *relay_id;
+        entry.connection_id = *conn_id;
+        entry.latency_ms = *latency;
+        entry.packet_loss = *loss;
+        report.entries.push_back(entry);
+    }
+
+    return report;
+}
+
+// ============================================================================
 // ErrorPayload
 // ============================================================================
 
