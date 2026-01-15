@@ -89,12 +89,21 @@ asio::awaitable<void> MultiRelayManager::stop() {
         rtt_timer_->cancel();
 
         // 等待 RTT 循环实际退出（避免 use-after-free）
+        // 添加超时保护避免卡住
         if (rtt_loop_done_ch_) {
             try {
-                auto [ec] = co_await rtt_loop_done_ch_->async_receive(
-                    asio::as_tuple(asio::use_awaitable));
-                if (!ec) {
+                asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
+                timeout_timer.expires_after(std::chrono::seconds(2));
+
+                auto result = co_await (
+                    rtt_loop_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable)) ||
+                    timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
+                );
+
+                if (result.index() == 0) {
                     log().debug("RTT measure loop confirmed stopped");
+                } else {
+                    log().warn("RTT measure loop stop timeout (2s), forcing shutdown");
                 }
             } catch (...) {
                 log().debug("Failed to wait for RTT loop completion");

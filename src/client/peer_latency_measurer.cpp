@@ -51,14 +51,27 @@ asio::awaitable<void> PeerLatencyMeasurer::stop() {
 
     running_ = false;
 
-    // 取消定时器并等待循环退出
+    // 取消定时器并等待循环退出（添加超时保护避免卡住）
     if (measure_timer_) {
         measure_timer_->cancel();
         if (measure_done_ch_) {
             try {
-                co_await measure_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable));
-                log().debug("Measure loop confirmed stopped");
-            } catch (...) {}
+                asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
+                timeout_timer.expires_after(std::chrono::seconds(2));
+
+                auto result = co_await (
+                    measure_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable)) ||
+                    timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
+                );
+
+                if (result.index() == 0) {
+                    log().debug("Measure loop confirmed stopped");
+                } else {
+                    log().warn("Measure loop stop timeout (2s), forcing shutdown");
+                }
+            } catch (...) {
+                log().debug("Failed to wait for measure loop completion");
+            }
         }
     }
 
@@ -66,9 +79,22 @@ asio::awaitable<void> PeerLatencyMeasurer::stop() {
         report_timer_->cancel();
         if (report_done_ch_) {
             try {
-                co_await report_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable));
-                log().debug("Report loop confirmed stopped");
-            } catch (...) {}
+                asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
+                timeout_timer.expires_after(std::chrono::seconds(2));
+
+                auto result = co_await (
+                    report_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable)) ||
+                    timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
+                );
+
+                if (result.index() == 0) {
+                    log().debug("Report loop confirmed stopped");
+                } else {
+                    log().warn("Report loop stop timeout (2s), forcing shutdown");
+                }
+            } catch (...) {
+                log().debug("Failed to wait for report loop completion");
+            }
         }
     }
 
