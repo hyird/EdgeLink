@@ -259,11 +259,13 @@ asio::awaitable<void> Client::ctrl_config_handler() {
             break;
         }
 
-        // Controller 重连后重置所有 P2P 状态
-        // 因为 Controller 重启会丢失端点信息，需要重新打洞
+        // Controller 重连后：
+        // 1. 重置 FAILED 状态的 peer，让它们可以重新尝试打洞
+        // 2. 保持 CONNECTED 状态的 P2P 连接继续工作
+        // 3. 端点信息会在下面重新上报给 Controller
         state_machine_.reset_all_peer_p2p_states();
         if (p2p_mgr_) {
-            p2p_mgr_->clear_all_contexts();
+            p2p_mgr_->clear_all_contexts();  // 只清理非 CONNECTED 的上下文
         }
 
         peers_.update_from_config(config.peers);

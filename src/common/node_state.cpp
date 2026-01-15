@@ -955,11 +955,11 @@ void ClientStateMachine::reset_all_peer_p2p_states() {
 
     size_t reset_count = 0;
     for (auto& [peer_id, conn] : state_.peer_connections) {
-        if (conn.p2p_state != P2PConnectionState::NONE) {
+        // 只重置 FAILED 状态的 peer，让它们可以重新尝试打洞
+        // 不影响 CONNECTED 状态的 peer（保持数据通路）
+        if (conn.p2p_state == P2PConnectionState::FAILED) {
             conn.p2p_state = P2PConnectionState::NONE;
-            conn.data_path = PeerDataPath::RELAY;
             conn.peer_endpoints.clear();
-            conn.active_endpoint = {};
             conn.punch_failures = 0;
             conn.next_retry_time = 0;
             reset_count++;
@@ -967,7 +967,7 @@ void ClientStateMachine::reset_all_peer_p2p_states() {
     }
 
     if (reset_count > 0) {
-        log().info("Client: Reset P2P state for {} peers (controller reconnected)", reset_count);
+        log().info("Client: Reset {} failed P2P peers for retry", reset_count);
     }
 }
 

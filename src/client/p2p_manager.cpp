@@ -239,10 +239,22 @@ void P2PManager::disconnect_peer(NodeId peer_id) {
 
 void P2PManager::clear_all_contexts() {
     std::unique_lock lock(contexts_mutex_);
-    size_t count = peer_contexts_.size();
-    peer_contexts_.clear();
-    if (count > 0) {
-        log().info("Cleared {} P2P contexts (controller reconnected)", count);
+
+    // 只清除非 CONNECTED 状态的上下文，保持已建立的 P2P 连接
+    size_t cleared = 0;
+    for (auto it = peer_contexts_.begin(); it != peer_contexts_.end();) {
+        NodeId peer_id = it->first;
+        auto p2p_state = state_machine_.get_peer_p2p_state(peer_id);
+        if (p2p_state != P2PConnectionState::CONNECTED) {
+            it = peer_contexts_.erase(it);
+            cleared++;
+        } else {
+            ++it;
+        }
+    }
+
+    if (cleared > 0) {
+        log().info("Cleared {} non-connected P2P contexts", cleared);
     }
 }
 
