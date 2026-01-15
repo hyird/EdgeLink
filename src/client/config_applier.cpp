@@ -528,7 +528,7 @@ std::string ConfigApplier::get_all_config_json() const {
     nlohmann::json config;
 
     // Controller 配置
-    config["controller"]["url"] = cfg.current_controller_host();
+    config["controller"]["url"] = cfg.current_controller_url();
     config["controller"]["tls"] = cfg.tls;
     config["controller"]["authkey"] = "***";  // 不暴露实际密钥
 
