@@ -612,6 +612,10 @@ public:
     // 移除对端
     void remove_peer(NodeId peer_id);
 
+    // 重置所有对端的 P2P 状态（Controller 重连后调用）
+    // 将所有 CONNECTED/FAILED 状态重置为 NONE，以便重新打洞
+    void reset_all_peer_p2p_states();
+
     // 设置对端 P2P 状态
     void set_peer_p2p_state(NodeId peer_id, P2PConnectionState state);
 

@@ -259,6 +259,13 @@ asio::awaitable<void> Client::ctrl_config_handler() {
             break;
         }
 
+        // Controller 重连后重置所有 P2P 状态
+        // 因为 Controller 重启会丢失端点信息，需要重新打洞
+        state_machine_.reset_all_peer_p2p_states();
+        if (p2p_mgr_) {
+            p2p_mgr_->clear_all_contexts();
+        }
+
         peers_.update_from_config(config.peers);
 
         {
@@ -384,23 +391,24 @@ asio::awaitable<void> Client::ctrl_config_handler() {
             try {
                 co_await p2p_mgr_->start();
                 log().info("P2P manager started (STUN configured)");
-
-                // 重新发送上次的端点（如果有）
-                std::vector<Endpoint> endpoints;
-                {
-                    std::lock_guard lock(endpoints_mutex_);
-                    if (!last_reported_endpoints_.empty()) {
-                        endpoints = last_reported_endpoints_;
-                    }
-                }
-
-                if (!endpoints.empty() && control_ && control_->is_connected()) {
-                    co_await control_->send_endpoint_update(endpoints);
-                    log().info("Resent {} endpoints after P2P manager started", endpoints.size());
-                }
             } catch (const std::exception& e) {
                 log().error("P2P manager failed to start: {}", e.what());
             }
+        }
+
+        // 重新发送端点（每次收到 CONFIG 都重发，确保 Controller 有最新信息）
+        // 这对于 Controller 重启后重建 P2P 连接至关重要
+        std::vector<Endpoint> endpoints;
+        {
+            std::lock_guard lock(endpoints_mutex_);
+            if (!last_reported_endpoints_.empty()) {
+                endpoints = last_reported_endpoints_;
+            }
+        }
+
+        if (!endpoints.empty() && control_ && control_->is_connected()) {
+            co_await control_->send_endpoint_update(endpoints);
+            log().info("Resent {} endpoints to controller", endpoints.size());
         }
     }
 

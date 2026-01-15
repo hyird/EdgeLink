@@ -237,6 +237,15 @@ void P2PManager::disconnect_peer(NodeId peer_id) {
     state_machine_.set_peer_data_path(peer_id, PeerDataPath::UNKNOWN);
 }
 
+void P2PManager::clear_all_contexts() {
+    std::unique_lock lock(contexts_mutex_);
+    size_t count = peer_contexts_.size();
+    peer_contexts_.clear();
+    if (count > 0) {
+        log().info("Cleared {} P2P contexts (controller reconnected)", count);
+    }
+}
+
 void P2PManager::handle_p2p_endpoint(const P2PEndpointMsg& msg) {
     if (!running_) {
         log().debug("P2P 管理器未运行，忽略 peer {} 的 P2P_ENDPOINT", msg.peer_node);

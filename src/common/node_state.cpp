@@ -950,6 +950,27 @@ void ClientStateMachine::remove_peer(NodeId peer_id) {
     }
 }
 
+void ClientStateMachine::reset_all_peer_p2p_states() {
+    std::unique_lock lock(peers_mutex_);
+
+    size_t reset_count = 0;
+    for (auto& [peer_id, conn] : state_.peer_connections) {
+        if (conn.p2p_state != P2PConnectionState::NONE) {
+            conn.p2p_state = P2PConnectionState::NONE;
+            conn.data_path = PeerDataPath::RELAY;
+            conn.peer_endpoints.clear();
+            conn.active_endpoint = {};
+            conn.punch_failures = 0;
+            conn.next_retry_time = 0;
+            reset_count++;
+        }
+    }
+
+    if (reset_count > 0) {
+        log().info("Client: Reset P2P state for {} peers (controller reconnected)", reset_count);
+    }
+}
+
 void ClientStateMachine::set_peer_p2p_state(NodeId peer_id, P2PConnectionState state) {
     bool should_notify = false;
     PeerDataPath data_path;

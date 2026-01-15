@@ -129,6 +129,9 @@ public:
     // 断开 P2P 连接
     void disconnect_peer(NodeId peer_id);
 
+    // 清除所有 P2P 上下文（Controller 重连后调用）
+    void clear_all_contexts();
+
     // 处理 Controller 返回的 P2P_ENDPOINT
     void handle_p2p_endpoint(const P2PEndpointMsg& msg);
 
