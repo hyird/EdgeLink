@@ -39,3 +39,4 @@ Thumbs.db
 edgelink.db-shm
 edgelink.db-wal
 build-debug/
+build-release/

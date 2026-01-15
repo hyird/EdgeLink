@@ -31,9 +31,6 @@ RelayConnectionPool::RelayConnectionPool(
 asio::awaitable<bool> RelayConnectionPool::connect_all(
     const std::vector<uint8_t>& relay_token) {
 
-    log().info("Connecting to relay {} ({}), resolving endpoints...",
-               relay_info_.server_id, relay_info_.hostname);
-
     // 获取所有 endpoints（从 RelayInfo 或 DNS 解析）
     std::vector<tcp::endpoint> endpoints;
 
@@ -66,8 +63,8 @@ asio::awaitable<bool> RelayConnectionPool::connect_all(
         co_return false;
     }
 
-    log().info("Relay {} has {} endpoint(s), connecting in parallel...",
-               relay_info_.server_id, endpoints.size());
+    log().info("Relay {} ({}): connecting to {} endpoint(s)...",
+               relay_info_.server_id, relay_info_.hostname, endpoints.size());
 
     // 并发连接所有 endpoints
     std::vector<asio::awaitable<bool>> tasks;
@@ -87,12 +84,27 @@ asio::awaitable<bool> RelayConnectionPool::connect_all(
         }
     }
 
-    log().info("Relay {} connection complete: {}/{} successful",
-               relay_info_.server_id, success_count, endpoints.size());
-
-    // 选择最优连接
+    // 选择最优连接并输出汇总日志
     if (success_count > 0) {
         select_best_connection();
+
+        // 汇总成功连接的端点信息
+        std::string endpoints_info;
+        {
+            std::shared_lock lock(mutex_);
+            for (const auto& [id, info] : connections_) {
+                if (!endpoints_info.empty()) endpoints_info += ", ";
+                endpoints_info += fmt::format("{}:{}ms{}",
+                    info.endpoint.address().to_string(),
+                    info.stats.avg_rtt_ms,
+                    info.is_active ? "*" : "");
+            }
+        }
+        log().info("Relay {} connected: {}/{} endpoints [{}]",
+                   relay_info_.server_id, success_count, endpoints.size(), endpoints_info);
+    } else {
+        log().info("Relay {} connection failed: 0/{} endpoints",
+                   relay_info_.server_id, endpoints.size());
     }
 
     co_return success_count > 0;
@@ -102,14 +114,16 @@ asio::awaitable<bool> RelayConnectionPool::connect_single(
     const tcp::endpoint& endpoint,
     const std::vector<uint8_t>& relay_token) {
 
-    // 构建 URL
+    // 构建 URL（IPv6 地址需要用方括号包围）
     std::string url;
+    std::string addr_str = endpoint.address().to_string();
+    if (endpoint.address().is_v6()) {
+        addr_str = fmt::format("[{}]", addr_str);
+    }
     if (use_tls_) {
-        url = fmt::format("wss://{}:{}/api/v1/relay",
-                         endpoint.address().to_string(), endpoint.port());
+        url = fmt::format("wss://{}:{}/api/v1/relay", addr_str, endpoint.port());
     } else {
-        url = fmt::format("ws://{}:{}/api/v1/relay",
-                         endpoint.address().to_string(), endpoint.port());
+        url = fmt::format("ws://{}:{}/api/v1/relay", addr_str, endpoint.port());
     }
 
     log().debug("Connecting to relay endpoint: {}", url);
@@ -154,9 +168,9 @@ asio::awaitable<bool> RelayConnectionPool::connect_single(
 
         connections_[conn_id] = std::move(info);
 
-        log().info("Connected to relay {} endpoint {} (conn_id=0x{:08x}, initial_rtt={}ms)",
-                   relay_info_.server_id, endpoint.address().to_string(),
-                   conn_id, elapsed);
+        log().debug("Connected to relay {} endpoint {} (conn_id=0x{:08x}, initial_rtt={}ms)",
+                    relay_info_.server_id, endpoint.address().to_string(),
+                    conn_id, elapsed);
     }
 
     co_return true;
@@ -186,7 +200,7 @@ asio::awaitable<void> RelayConnectionPool::close_all() {
         }
     }
 
-    log().info("Closed all connections for relay {}", relay_info_.server_id);
+    log().debug("Closed all connections for relay {}", relay_info_.server_id);
 }
 
 std::shared_ptr<RelayChannel> RelayConnectionPool::active_connection() {
@@ -281,8 +295,8 @@ void RelayConnectionPool::select_best_connection() {
         active_connection_id_ = best_id;
         connections_[best_id].is_active = true;
 
-        log().info("Selected best connection for relay {}: conn_id=0x{:08x}, rtt={}ms",
-                   relay_info_.server_id, best_id, best_rtt);
+        log().debug("Selected best connection for relay {}: conn_id=0x{:08x}, rtt={}ms",
+                    relay_info_.server_id, best_id, best_rtt);
     }
 }
 
@@ -305,8 +319,8 @@ bool RelayConnectionPool::switch_to(ConnectionId connection_id) {
     active_connection_id_ = connection_id;
     it->second.is_active = true;
 
-    log().info("Switched to connection 0x{:08x} for relay {}",
-               connection_id, relay_info_.server_id);
+    log().debug("Switched to connection 0x{:08x} for relay {}",
+                connection_id, relay_info_.server_id);
 
     return true;
 }

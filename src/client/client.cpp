@@ -285,7 +285,7 @@ asio::awaitable<void> Client::ctrl_config_handler() {
             multi_relay_mgr_ = std::make_shared<MultiRelayManager>(
                 ioc_, ssl_ctx_, crypto_, peers_, relay_config);
 
-            log().info("MultiRelayManager initialized with {} relays", config.relays.size());
+            log().debug("MultiRelayManager created with {} relays", config.relays.size());
 
             // Start multi-relay manager
             // IMPORTANT: Capture shared_ptr copies to prevent use-after-free if stop() is called
@@ -317,7 +317,7 @@ asio::awaitable<void> Client::ctrl_config_handler() {
                 try {
                     // Use captured relay_mgr instead of self->multi_relay_mgr_ (which may be reset by stop())
                     co_await relay_mgr->initialize(relays, relay_token, use_tls, controller_hostname);
-                    log().info("MultiRelayManager initialized successfully");
+                    log().debug("MultiRelayManager initialization complete");
 
                     // Initialize latency measurer after relay manager is started
                     // Check if client still alive and manager still valid
@@ -1097,7 +1097,7 @@ asio::awaitable<bool> Client::start() {
     // Connect to relay channel (asynchronously, don't block startup)
     // Note: relay_ is kept as a fallback channel. Multi-relay system provides primary connectivity.
     state_ = ClientState::CONNECTING_RELAY;
-    log().info("Connecting to relay (async)...");
+    log().debug("Connecting to legacy relay (async)...");
 
     // Start relay connection in background (non-blocking)
     auto self = shared_from_this();

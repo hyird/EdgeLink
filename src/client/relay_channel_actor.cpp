@@ -193,8 +193,8 @@ asio::awaitable<bool> RelayChannelActor::connect_websocket(
         std::string target = std::string(parsed->path());
         if (target.empty()) target = "/api/v1/relay";
 
-        log().info("[{}] Connecting to relay: {}:{}{} (TLS: {})",
-                   name_, host, port, target, use_tls ? "yes" : "no");
+        log().debug("[{}] Connecting to relay: {}:{}{} (TLS: {})",
+                    name_, host, port, target, use_tls ? "yes" : "no");
 
         // DNS 解析
         tcp::resolver resolver(ioc_);
@@ -503,7 +503,7 @@ asio::awaitable<void> RelayChannelActor::handle_relay_auth_resp(const Frame& fra
     }
 
     conn_state_ = RelayChannelState::CONNECTED;
-    log().info("[{}] Relay channel connected", name_);
+    log().debug("[{}] Relay channel connected", name_);
 
     // 发送连接成功事件
     RelayChannelEvent event;

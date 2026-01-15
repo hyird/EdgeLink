@@ -262,7 +262,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
             endpoint_list += ep.endpoint().address().to_string() + ":" + std::to_string(ep.endpoint().port());
             endpoint_count++;
         }
-        log().info("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
+        log().debug("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
         log().debug("DNS resolution took {} ms", dns_elapsed);
 
         if (use_tls_) {
@@ -459,7 +459,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
             endpoint_list += ep.endpoint().address().to_string() + ":" + std::to_string(ep.endpoint().port());
             endpoint_count++;
         }
-        log().info("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
+        log().debug("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
         log().debug("DNS resolution took {} ms", dns_elapsed);
 
         // 生成此连接的唯一标识符
@@ -1184,8 +1184,8 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
         std::string target = std::string(parsed->path());
         if (target.empty()) target = "/api/v1/relay";
 
-        log().info("Connecting to relay: {}:{}{} (TLS: {})",
-                     host, port, target, use_tls_ ? "yes" : "no");
+        log().debug("Connecting to relay: {}:{}{} (TLS: {})",
+                    host, port, target, use_tls_ ? "yes" : "no");
 
         // Resolve host
         tcp::resolver resolver(ioc_);
@@ -1199,7 +1199,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             endpoint_list += ep.endpoint().address().to_string() + ":" + std::to_string(ep.endpoint().port());
             endpoint_count++;
         }
-        log().info("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
+        log().debug("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
 
         // 生成此连接的唯一标识符
         ConnectionId connection_id = static_cast<ConnectionId>(
@@ -1271,7 +1271,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             plain_ws_->binary(true);
         }
 
-        log().info("Relay WebSocket connected, authenticating...");
+        log().debug("Relay WebSocket connected, authenticating...");
         state_ = ChannelState::AUTHENTICATING;
 
         // Build RELAY_AUTH
@@ -1547,7 +1547,7 @@ asio::awaitable<void> RelayChannel::handle_relay_auth_resp(const Frame& frame) {
     }
 
     state_ = ChannelState::CONNECTED;
-    log().info("Relay channel connected");
+    log().debug("Relay channel connected");
 
     if (channels_.connected) {
         channels_.connected->try_send(boost::system::error_code{});

@@ -35,8 +35,6 @@ asio::awaitable<bool> MultiRelayManager::initialize(
         co_return false;
     }
 
-    log().info("Initializing multi-relay manager with {} relay(s)", relays.size());
-
     size_t success_count = 0;
 
     // 为每个 Relay 创建连接池并连接
@@ -44,13 +42,10 @@ asio::awaitable<bool> MultiRelayManager::initialize(
         // 如果 relay hostname 是 "builtin" 或为空，使用控制器的 hostname
         RelayInfo actual_relay = relay;
         if (actual_relay.hostname.empty() || actual_relay.hostname == "builtin") {
-            log().info("Relay {} uses builtin relay, using controller hostname: {}",
-                       relay.server_id, controller_hostname);
+            log().debug("Relay {} uses builtin relay, using controller hostname: {}",
+                        relay.server_id, controller_hostname);
             actual_relay.hostname = controller_hostname;
         }
-
-        log().info("Setting up relay pool for {} (id={}, region={})",
-                   actual_relay.hostname, actual_relay.server_id, actual_relay.region);
 
         auto pool = std::make_shared<RelayConnectionPool>(
             ioc_, ssl_ctx_, crypto_, peers_, actual_relay, use_tls);
@@ -65,9 +60,6 @@ asio::awaitable<bool> MultiRelayManager::initialize(
             std::unique_lock lock(mutex_);
             relay_pools_[relay.server_id] = pool;
             success_count++;
-
-            log().info("Relay pool {} initialized with {} connection(s)",
-                       relay.server_id, pool->connection_count());
         } else {
             log().warn("Failed to initialize relay pool for {}", relay.server_id);
         }
@@ -201,8 +193,8 @@ std::vector<std::shared_ptr<RelayConnectionPool>> MultiRelayManager::all_relay_p
 }
 
 void MultiRelayManager::handle_peer_routing_update(const PeerRoutingUpdate& update) {
-    log().info("Received PEER_ROUTING_UPDATE v{} with {} routes",
-               update.version, update.routes.size());
+    log().debug("Received PEER_ROUTING_UPDATE v{} with {} routes",
+                update.version, update.routes.size());
 
     // Validate routes before applying
     size_t valid_count = 0;
