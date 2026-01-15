@@ -4,10 +4,14 @@
 #include <optional>
 
 #ifdef _WIN32
+// winsock2.h must be included before windows.h
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #else
 #include <unistd.h>
 #include <limits.h>
+#include <sys/socket.h>
 #ifdef __APPLE__
 #include <sys/param.h>
 #ifndef HOST_NAME_MAX
@@ -69,8 +73,9 @@ std::string get_arch() {
 #endif
 }
 
-// Check if IPv6 is available on this system
-// Returns true if the system has IPv6 support and connectivity
+// Check if IPv6 is available on this system using a simple socket test
+// This must be called BEFORE any io_context is running to avoid thread-local storage conflicts
+// Returns true if the system has IPv6 support
 bool is_ipv6_available() {
     static std::optional<bool> cached_result;
 
@@ -79,22 +84,29 @@ bool is_ipv6_available() {
         return *cached_result;
     }
 
-    try {
-        // Try to create an IPv6 socket
-        asio::io_context ioc;
-        tcp::socket socket(ioc, tcp::v6());
-
-        // Successfully created IPv6 socket - IPv6 is available
-        cached_result = true;
-        log().debug("IPv6 is available on this system");
-        return true;
-
-    } catch (const std::exception& e) {
-        // Failed to create IPv6 socket - IPv6 not available
+    // Use raw socket API to avoid io_context conflicts
+    // Try to create an IPv6 socket using POSIX/Windows API
+#ifdef _WIN32
+    SOCKET sock = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) {
         cached_result = false;
-        log().info("IPv6 not available on this system, will use IPv4 only: {}", e.what());
+        log().info("IPv6 not available on this system (socket creation failed)");
         return false;
     }
+    ::closesocket(sock);
+#else
+    int sock = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) {
+        cached_result = false;
+        log().info("IPv6 not available on this system (socket creation failed)");
+        return false;
+    }
+    ::close(sock);
+#endif
+
+    cached_result = true;
+    log().debug("IPv6 is available on this system");
+    return true;
 }
 
 // Happy Eyeballs连接策略：快速尝试多个endpoints
