@@ -1,6 +1,7 @@
 #include "client/channel.hpp"
 #include "common/logger.hpp"
 #include <chrono>
+#include <optional>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -68,8 +69,37 @@ std::string get_arch() {
 #endif
 }
 
+// Check if IPv6 is available on this system
+// Returns true if the system has IPv6 support and connectivity
+bool is_ipv6_available() {
+    static std::optional<bool> cached_result;
+
+    // Cache the result to avoid repeated checks
+    if (cached_result.has_value()) {
+        return *cached_result;
+    }
+
+    try {
+        // Try to create an IPv6 socket
+        asio::io_context ioc;
+        tcp::socket socket(ioc, tcp::v6());
+
+        // Successfully created IPv6 socket - IPv6 is available
+        cached_result = true;
+        log().debug("IPv6 is available on this system");
+        return true;
+
+    } catch (const std::exception& e) {
+        // Failed to create IPv6 socket - IPv6 not available
+        cached_result = false;
+        log().info("IPv6 not available on this system, will use IPv4 only: {}", e.what());
+        return false;
+    }
+}
+
 // Happy Eyeballs连接策略：快速尝试多个endpoints
 // 使用短超时顺序尝试，实现快速故障转移
+// 自动过滤不可用的地址族（如 IPv6 不可用时跳过所有 IPv6 地址）
 // 参数：
 //   stream - TCP stream（lowest layer）
 //   endpoints - DNS解析的endpoint列表
@@ -81,8 +111,17 @@ asio::awaitable<std::optional<tcp::endpoint>> async_connect_happy_eyeballs(
     const tcp::resolver::results_type& endpoints,
     std::chrono::milliseconds per_endpoint_timeout) {
 
+    bool ipv6_available = is_ipv6_available();
+    size_t ipv6_skipped = 0;
+
     for (const auto& ep : endpoints) {
         auto endpoint = ep.endpoint();
+
+        // Skip IPv6 addresses if IPv6 is not available
+        if (!ipv6_available && endpoint.address().is_v6()) {
+            ipv6_skipped++;
+            continue;
+        }
 
         try {
             log().debug("尝试连接 {} (超时{}ms)",
@@ -123,6 +162,10 @@ asio::awaitable<std::optional<tcp::endpoint>> async_connect_happy_eyeballs(
                 stream.socket().close(close_ec);
             }
         }
+    }
+
+    if (ipv6_skipped > 0) {
+        log().info("Skipped {} IPv6 address(es) (IPv6 not available)", ipv6_skipped);
     }
 
     log().error("所有endpoint连接失败");
