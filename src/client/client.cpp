@@ -1232,11 +1232,28 @@ asio::awaitable<void> Client::stop() {
         log().debug("Multi-relay manager stopped");
     }
 
-    // Stop P2P manager
+    // Stop P2P manager (with timeout to avoid hanging)
     if (p2p_mgr_) {
         log().debug("Stopping P2P manager...");
-        co_await p2p_mgr_->stop();
-        log().debug("P2P manager stopped");
+        try {
+            asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
+            timeout_timer.expires_after(std::chrono::seconds(3));
+
+            auto result = co_await (
+                p2p_mgr_->stop() ||
+                timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
+            );
+
+            if (result.index() == 0) {
+                log().debug("P2P manager stopped successfully");
+            } else {
+                log().warn("P2P manager stop timeout (3s), forcing shutdown");
+            }
+        } catch (const std::exception& e) {
+            log().warn("Error stopping P2P manager: {}", e.what());
+        } catch (...) {
+            log().warn("Unknown error stopping P2P manager");
+        }
     }
 
     // Stop route manager first (removes routes from system)
@@ -1247,16 +1264,29 @@ asio::awaitable<void> Client::stop() {
         log().debug("Route manager stopped");
     }
 
-    // Teardown TUN
+    // Teardown TUN (with timeout to avoid hanging)
     log().debug("Tearing down TUN device...");
     // Wait for TUN packet handler to exit before tearing down
     if (tun_packet_ch_ && tun_handler_done_ch_) {
         tun_packet_ch_->close();
         try {
-            co_await tun_handler_done_ch_->async_receive(asio::use_awaitable);
-            log().debug("TUN packet handler confirmed stopped");
+            asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
+            timeout_timer.expires_after(std::chrono::seconds(2));
+
+            auto result = co_await (
+                tun_handler_done_ch_->async_receive(asio::as_tuple(asio::use_awaitable)) ||
+                timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
+            );
+
+            if (result.index() == 0) {
+                log().debug("TUN packet handler confirmed stopped");
+            } else {
+                log().warn("TUN packet handler stop timeout (2s), forcing teardown");
+            }
+        } catch (const std::exception& e) {
+            log().warn("Error waiting for TUN packet handler: {}", e.what());
         } catch (...) {
-            log().warn("Failed to wait for TUN packet handler to stop");
+            log().warn("Unknown error waiting for TUN packet handler");
         }
     }
 
@@ -1314,16 +1344,52 @@ asio::awaitable<void> Client::stop() {
         log().debug("All {} handlers exited successfully", completed);
     }
 
+    // Close relay channel (with timeout)
     if (relay_) {
         log().debug("Closing relay channel...");
-        co_await relay_->close();
-        log().debug("Relay channel closed");
+        try {
+            asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
+            timeout_timer.expires_after(std::chrono::seconds(2));
+
+            auto result = co_await (
+                relay_->close() ||
+                timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
+            );
+
+            if (result.index() == 0) {
+                log().debug("Relay channel closed successfully");
+            } else {
+                log().warn("Relay channel close timeout (2s)");
+            }
+        } catch (const std::exception& e) {
+            log().warn("Error closing relay channel: {}", e.what());
+        } catch (...) {
+            log().warn("Unknown error closing relay channel");
+        }
     }
 
+    // Close control channel (with timeout)
     if (control_) {
         log().debug("Closing control channel...");
-        co_await control_->close();
-        log().debug("Control channel closed");
+        try {
+            asio::steady_timer timeout_timer(co_await asio::this_coro::executor);
+            timeout_timer.expires_after(std::chrono::seconds(2));
+
+            auto result = co_await (
+                control_->close() ||
+                timeout_timer.async_wait(asio::as_tuple(asio::use_awaitable))
+            );
+
+            if (result.index() == 0) {
+                log().debug("Control channel closed successfully");
+            } else {
+                log().warn("Control channel close timeout (2s)");
+            }
+        } catch (const std::exception& e) {
+            log().warn("Error closing control channel: {}", e.what());
+        } catch (...) {
+            log().warn("Unknown error closing control channel");
+        }
     }
 
     log().info("Client stopped successfully");
