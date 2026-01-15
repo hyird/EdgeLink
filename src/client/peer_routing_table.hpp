@@ -34,12 +34,6 @@ public:
     // 获取所有路由
     std::vector<PeerRoute> all_routes() const;
 
-    // 设置到指定 Peer 的路由（本地覆盖）
-    void set_route(const PeerRoute& route);
-
-    // 移除到指定 Peer 的路由
-    void remove_route(NodeId peer_id);
-
     // 清空路由表
     void clear();
 
@@ -51,9 +45,6 @@ public:
 
     // 检查是否有到指定 Peer 的路由
     bool has_route(NodeId peer_id) const;
-
-    // 获取使用指定 Relay 的所有 Peer
-    std::vector<NodeId> get_peers_via_relay(ServerId relay_id) const;
 
 private:
     mutable std::shared_mutex mutex_;

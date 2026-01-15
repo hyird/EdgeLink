@@ -63,19 +63,6 @@ std::vector<PeerRoute> PeerRoutingTable::all_routes() const {
     return result;
 }
 
-void PeerRoutingTable::set_route(const PeerRoute& route) {
-    std::unique_lock lock(mutex_);
-    routes_[route.peer_node_id] = route;
-    log().debug("Set local route: peer={} -> relay={}, conn=0x{:08x}",
-                route.peer_node_id, route.relay_id, route.connection_id);
-}
-
-void PeerRoutingTable::remove_route(NodeId peer_id) {
-    std::unique_lock lock(mutex_);
-    routes_.erase(peer_id);
-    log().debug("Removed route for peer {}", peer_id);
-}
-
 void PeerRoutingTable::clear() {
     std::unique_lock lock(mutex_);
     routes_.clear();
@@ -91,17 +78,6 @@ size_t PeerRoutingTable::size() const {
 bool PeerRoutingTable::has_route(NodeId peer_id) const {
     std::shared_lock lock(mutex_);
     return routes_.find(peer_id) != routes_.end();
-}
-
-std::vector<NodeId> PeerRoutingTable::get_peers_via_relay(ServerId relay_id) const {
-    std::vector<NodeId> result;
-    std::shared_lock lock(mutex_);
-    for (const auto& [id, route] : routes_) {
-        if (route.relay_id == relay_id) {
-            result.push_back(id);
-        }
-    }
-    return result;
 }
 
 } // namespace edgelink::client
