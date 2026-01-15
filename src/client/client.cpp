@@ -1094,58 +1094,45 @@ asio::awaitable<bool> Client::start() {
         co_return false;
     }
 
-    // Connect to relay channel
+    // Connect to relay channel (asynchronously, don't block startup)
+    // Note: relay_ is kept as a fallback channel. Multi-relay system provides primary connectivity.
     state_ = ClientState::CONNECTING_RELAY;
-    log().info("Connecting to relay...");
+    log().info("Connecting to relay (async)...");
 
-    connected = co_await relay_->connect(control_->relay_token());
-    if (!connected) {
-        log().warn("Failed to connect to relay {}:{}", host, port);
+    // Start relay connection in background (non-blocking)
+    auto self = shared_from_this();
+    asio::co_spawn(ioc_, [self, relay_token = control_->relay_token()]() -> asio::awaitable<void> {
         try {
-            co_await control_->close();
-        } catch (...) {}
-        control_.reset();
-        relay_.reset();
-        if (config_.auto_reconnect) {
-            log().info("Will retry in {}s...", config_.reconnect_interval.count());
-            state_ = ClientState::STOPPED;
-            asio::co_spawn(ioc_, reconnect(), asio::detached);
-        } else {
-            state_ = ClientState::STOPPED;
-        }
-        co_return false;
-    }
+            bool connected = co_await self->relay_->connect(relay_token);
+            if (connected) {
+                // Wait for authentication with timeout
+                asio::steady_timer timer(self->ioc_);
+                timer.expires_after(std::chrono::seconds(30));
 
-    // Wait for relay auth (30s timeout for high-latency networks)
-    timer.expires_after(std::chrono::seconds(30));
-    while (!relay_->is_connected()) {
-        auto result = co_await (timer.async_wait(asio::use_awaitable) ||
-                                asio::post(ioc_, asio::use_awaitable));
-        if (timer.expiry() <= std::chrono::steady_clock::now()) {
-            log().warn("Relay authentication timeout (30s) for {}:{}", host, port);
-            break;
-        }
-        co_await asio::post(ioc_, asio::use_awaitable);
-    }
+                while (!self->relay_->is_connected()) {
+                    auto result = co_await (timer.async_wait(asio::use_awaitable) ||
+                                            asio::post(self->ioc_, asio::use_awaitable));
+                    if (timer.expiry() <= std::chrono::steady_clock::now()) {
+                        log().warn("Relay authentication timeout (30s)");
+                        break;
+                    }
+                    co_await asio::post(self->ioc_, asio::use_awaitable);
+                }
 
-    if (!relay_->is_connected()) {
-        log().error("Failed to authenticate relay connection");
-        try {
-            co_await control_->close();
-        } catch (...) {}
-        control_.reset();
-        relay_.reset();
-        if (config_.auto_reconnect) {
-            log().info("Will retry in {}s...", config_.reconnect_interval.count());
-            state_ = ClientState::STOPPED;
-            asio::co_spawn(ioc_, reconnect(), asio::detached);
-        } else {
-            state_ = ClientState::STOPPED;
+                if (self->relay_->is_connected()) {
+                    log().info("Legacy relay channel connected successfully (fallback channel)");
+                } else {
+                    log().warn("Legacy relay authentication failed (using multi-relay only)");
+                }
+            } else {
+                log().warn("Legacy relay connection failed (using multi-relay only)");
+            }
+        } catch (const std::exception& e) {
+            log().warn("Legacy relay connection error: {} (using multi-relay only)", e.what());
         }
-        co_return false;
-    }
+    }, asio::detached);
 
-    // 连接成功
+    // Don't wait for relay - multi-relay system will provide connectivity
     log().info("Connected to controller: {}:{}", host, port);
 
     // Setup TUN device if enabled
