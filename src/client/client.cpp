@@ -2147,33 +2147,33 @@ asio::awaitable<uint16_t> Client::ping_peer(NodeId peer_id, std::chrono::millise
     log().debug("Ping sent to {} (seq={})", peer->info.virtual_ip.to_string(), seq);
 
     // Wait for response with timeout using parallel operations
-    asio::steady_timer timer(co_await asio::this_coro::executor);
-    timer.expires_after(timeout);
+    // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
+    asio::steady_timer timer(ioc_);
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(timeout);
 
     uint16_t latency = 0;
     bool got_response = false;
 
-    // Use experimental::make_parallel_group to wait for either timer or channel
-    auto result = co_await asio::experimental::make_parallel_group(
-        timer.async_wait(asio::deferred),
-        response_ch->async_receive(asio::deferred)
-    ).async_wait(
-        asio::experimental::wait_for_one(),
-        asio::use_awaitable
-    );
+    while (!got_response && std::chrono::steady_clock::now() < deadline) {
+        // 非阻塞检查 channel
+        response_ch->try_receive([&](boost::system::error_code ec, uint16_t rtt) {
+            if (!ec) {
+                latency = rtt;
+                got_response = true;
+            }
+        });
 
-    // Check which operation completed first
-    // make_parallel_group returns: [completion_order, timer_ec, channel_ec, channel_value]
-    auto completion_order = std::get<0>(result);
-    if (completion_order[0] == 1) {
-        // Channel received first (pong response)
-        boost::system::error_code ec = std::get<2>(result);
-        if (!ec) {
-            latency = std::get<3>(result);
-            got_response = true;
+        if (got_response) {
+            break;
         }
-    } else {
-        // Timer expired first (timeout)
+
+        // 短暂等待后重试
+        timer.expires_after(std::chrono::milliseconds(10));
+        co_await timer.async_wait(asio::use_awaitable);
+    }
+
+    if (!got_response) {
         log().debug("Ping timeout to {} (seq={})", peer->info.virtual_ip.to_string(), seq);
     }
 
