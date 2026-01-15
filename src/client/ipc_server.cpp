@@ -40,18 +40,11 @@ std::string IpcServer::get_default_socket_path() {
     }
     return "C:\\Windows\\Temp\\edgelink-client.sock";
 #elif defined(__APPLE__)
-    // macOS: use /tmp or user-specific path
-    const char* tmpdir = std::getenv("TMPDIR");
-    if (tmpdir) {
-        return std::string(tmpdir) + "edgelink-client.sock";
-    }
+    // macOS: use /tmp for consistency between daemon and CLI
     return "/tmp/edgelink-client.sock";
 #else
-    // Linux: use XDG_RUNTIME_DIR or /tmp
-    const char* runtime_dir = std::getenv("XDG_RUNTIME_DIR");
-    if (runtime_dir) {
-        return std::string(runtime_dir) + "/edgelink-client.sock";
-    }
+    // Linux: always use /tmp for consistency between daemon (root) and CLI (user)
+    // XDG_RUNTIME_DIR varies per user, causing mismatch when daemon runs as root
     return "/tmp/edgelink-client.sock";
 #endif
 }
@@ -102,9 +95,12 @@ bool IpcServer::start(const IpcServerConfig& config) {
         acceptor_->bind(asio::local::stream_protocol::endpoint(config_.socket_path));
         acceptor_->listen();
 
-        // Set socket permissions (user only)
+        // Set socket permissions (world read/write for daemon-CLI communication)
+        // This allows non-root users to connect when daemon runs as root
         std::filesystem::permissions(config_.socket_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+            std::filesystem::perms::group_read | std::filesystem::perms::group_write |
+            std::filesystem::perms::others_read | std::filesystem::perms::others_write,
             std::filesystem::perm_options::replace, ec);
 
         running_ = true;
@@ -761,7 +757,10 @@ bool IpcClient::connect() {
         socket_->connect(asio::local::stream_protocol::endpoint(socket_path_));
         connected_ = true;
         return true;
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+        // Print error to stderr for debugging
+        std::cerr << "IPC connect failed: " << e.what()
+                  << " (socket: " << socket_path_ << ")\n";
         connected_ = false;
         return false;
     }
