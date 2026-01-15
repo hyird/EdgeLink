@@ -143,8 +143,30 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::run() {
     log().info("Control session started");
 
     try {
-        // Run read and write loops concurrently
-        co_await (this->read_loop() || this->write_loop());
+        // 避免 parallel_group 导致的 TLS allocator 崩溃
+        // 使用 completion channel 等待任意循环结束
+        using CompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+        CompletionChannel completion_ch(co_await asio::this_coro::executor, 2);
+
+        // 启动 read_loop 和 write_loop
+        asio::co_spawn(co_await asio::this_coro::executor,
+            [this, &completion_ch]() -> asio::awaitable<void> {
+                co_await this->read_loop();
+                completion_ch.try_send(boost::system::error_code{});
+            }, asio::detached);
+
+        asio::co_spawn(co_await asio::this_coro::executor,
+            [this, &completion_ch]() -> asio::awaitable<void> {
+                co_await this->write_loop();
+                completion_ch.try_send(boost::system::error_code{});
+            }, asio::detached);
+
+        // 等待任意一个循环结束（通常是连接断开）
+        co_await completion_ch.async_receive(asio::use_awaitable);
+
+        // 关闭 write channel 以终止 write_loop
+        this->write_channel_.close();
+
     } catch (const std::exception& e) {
         log().debug("Control session ended: {}", e.what());
     }
@@ -760,7 +782,30 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::run() {
     log().info("Relay session started");
 
     try {
-        co_await (this->read_loop() || this->write_loop());
+        // 避免 parallel_group 导致的 TLS allocator 崩溃
+        // 使用 completion channel 等待任意循环结束
+        using CompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+        CompletionChannel completion_ch(co_await asio::this_coro::executor, 2);
+
+        // 启动 read_loop 和 write_loop
+        asio::co_spawn(co_await asio::this_coro::executor,
+            [this, &completion_ch]() -> asio::awaitable<void> {
+                co_await this->read_loop();
+                completion_ch.try_send(boost::system::error_code{});
+            }, asio::detached);
+
+        asio::co_spawn(co_await asio::this_coro::executor,
+            [this, &completion_ch]() -> asio::awaitable<void> {
+                co_await this->write_loop();
+                completion_ch.try_send(boost::system::error_code{});
+            }, asio::detached);
+
+        // 等待任意一个循环结束（通常是连接断开）
+        co_await completion_ch.async_receive(asio::use_awaitable);
+
+        // 关闭 write channel 以终止 write_loop
+        this->write_channel_.close();
+
     } catch (const std::exception& e) {
         log().debug("Relay session ended: {}", e.what());
     }
