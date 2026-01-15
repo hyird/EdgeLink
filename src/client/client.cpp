@@ -989,18 +989,16 @@ asio::awaitable<bool> Client::start() {
     state_ = ClientState::STARTING;
     log().info("Starting client...");
 
-    // Optimization: Copy all needed config values once under lock to avoid:
-    // 1. Data races with hot-reload config updates
-    // 2. Multiple lock acquisitions in loop
+    // Copy config values once under lock to avoid data races with hot-reload
     std::string state_dir;
     std::string authkey;
-    std::vector<std::string> controller_hosts;
+    std::string controller_url;
     bool tls;
     {
         std::shared_lock lock(config_mutex_);
         state_dir = config_.state_dir.empty() ? "." : config_.state_dir;
         authkey = config_.authkey;
-        controller_hosts = config_.controller_hosts;
+        controller_url = config_.controller_url.empty() ? "edge.a-z.xin" : config_.controller_url;
         tls = config_.tls;
     }
 
@@ -1026,178 +1024,35 @@ asio::awaitable<bool> Client::start() {
         }
     }
 
-    // 支持多 Controller URL 故障转移
-    if (controller_hosts.empty()) {
-        controller_hosts.push_back("edge.a-z.xin");
-    }
-
     log().info("TLS: {}", tls ? "enabled" : "disabled");
-    log().info("Controller hosts: {}", controller_hosts.size());
 
-    // 尝试连接每个 Controller
-    bool controller_connected = false;
+    // 解析 controller URL (格式: host 或 host:port)
+    auto [host, port] = ClientConfig::parse_host_port(controller_url, tls);
 
-    // IMPORTANT: Setup event channels only once before loop to avoid:
-    // 1. Handler leaks (active_handlers_ accumulating)
-    // 2. Channel destruction causing "Channel cancelled" errors
-    // 3. Multiple handler coroutines competing for same events
-    bool channels_setup = false;
+    // 构建完整 URL
+    std::string scheme = tls ? "wss://" : "ws://";
+    std::string base_url = scheme + host + ":" + std::to_string(port);
+    std::string control_url = base_url + "/api/v1/control";
+    std::string relay_url = base_url + "/api/v1/relay";
 
-    for (size_t i = 0; i < controller_hosts.size() && !controller_connected; ++i) {
-        const auto& host_port = controller_hosts[i];
+    log().debug("Control URL: {}", control_url);
+    log().debug("Relay URL: {}", relay_url);
 
-        // 解析 host:port 格式
-        auto [host, port] = ClientConfig::parse_host_port(host_port, tls);
+    // Create channels
+    control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, tls);
+    relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url, tls);
 
-        // 构建 URL
-        std::string scheme = tls ? "wss://" : "ws://";
-        std::string base_url = scheme + host + ":" + std::to_string(port);
-        std::string control_url = base_url + "/api/v1/control";
-        std::string relay_url = base_url + "/api/v1/relay";
+    // Setup event channels
+    setup_channels();
 
-        log().info("Trying controller {}/{}: {}:{}", i + 1, controller_hosts.size(), host, port);
-        log().debug("Control URL: {}", control_url);
-        log().debug("Relay URL: {}", relay_url);
+    // Connect to control channel
+    state_ = ClientState::AUTHENTICATING;
+    state_machine_.set_control_plane_state(ControlPlaneState::CONNECTING);
+    log().info("Connecting to controller...");
 
-        // Create channels
-        control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, tls);
-        relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url, tls);
-
-        // Setup event channels (only once on first iteration)
-        if (!channels_setup) {
-            setup_channels();
-            channels_setup = true;
-        } else {
-            // For subsequent iterations, only update the channel pointers
-            // (handlers are already running and will receive events from new channels)
-            ControlChannelEvents ctrl_events;
-            ctrl_events.auth_response = ctrl_auth_response_ch_.get();
-            ctrl_events.config = ctrl_config_ch_.get();
-            ctrl_events.config_update = ctrl_config_update_ch_.get();
-            ctrl_events.route_update = ctrl_route_update_ch_.get();
-            ctrl_events.peer_routing_update = ctrl_peer_routing_update_ch_.get();
-            ctrl_events.p2p_endpoint = ctrl_p2p_endpoint_ch_.get();
-            ctrl_events.error = ctrl_error_ch_.get();
-            ctrl_events.connected = ctrl_connected_ch_.get();
-            ctrl_events.disconnected = ctrl_disconnected_ch_.get();
-            control_->set_channels(ctrl_events);
-
-            RelayChannelEvents relay_events;
-            relay_events.data = relay_data_ch_.get();
-            relay_events.connected = relay_connected_ch_.get();
-            relay_events.disconnected = relay_disconnected_ch_.get();
-            relay_->set_channels(relay_events);
-        }
-
-        // Connect to control channel
-        state_ = ClientState::AUTHENTICATING;
-        state_machine_.set_control_plane_state(ControlPlaneState::CONNECTING);
-        log().info("Connecting to controller...");
-
-        bool connected = co_await control_->connect(authkey);
-        if (!connected) {
-            log().warn("Failed to connect to controller {}:{}", host, port);
-            control_.reset();
-            relay_.reset();
-            continue;  // 尝试下一个 controller
-        }
-
-        // Wait for auth response (30s timeout for high-latency networks)
-        asio::steady_timer timer(ioc_);
-        timer.expires_after(std::chrono::seconds(30));
-
-        bool auth_ok = false;
-        while (!control_->is_connected()) {
-            auto result = co_await (timer.async_wait(asio::use_awaitable) ||
-                                    asio::post(ioc_, asio::use_awaitable));
-            if (timer.expiry() <= std::chrono::steady_clock::now()) {
-                log().warn("Authentication timeout (30s) for {}:{}", host, port);
-                break;
-            }
-            co_await asio::post(ioc_, asio::use_awaitable);
-        }
-
-        if (!control_->is_connected()) {
-            try {
-                co_await control_->close();
-            } catch (const std::exception& e) {
-                log().debug("Failed to close control channel: {}", e.what());
-            } catch (...) {
-                log().debug("Failed to close control channel: unknown error");
-            }
-            control_.reset();
-            relay_.reset();
-            continue;  // 尝试下一个 controller
-        }
-
-        // Connect to relay channel
-        state_ = ClientState::CONNECTING_RELAY;
-        log().info("Connecting to relay...");
-
-        connected = co_await relay_->connect(control_->relay_token());
-        if (!connected) {
-            log().warn("Failed to connect to relay {}:{}", host, port);
-            try {
-                co_await control_->close();
-            } catch (const std::exception& e) {
-                log().debug("Failed to close control channel: {}", e.what());
-            } catch (...) {
-                log().debug("Failed to close control channel: unknown error");
-            }
-            control_.reset();
-            relay_.reset();
-            continue;  // 尝试下一个 controller
-        }
-
-        // Wait for relay auth (30s timeout for high-latency networks)
-        timer.expires_after(std::chrono::seconds(30));
-        while (!relay_->is_connected()) {
-            auto result = co_await (timer.async_wait(asio::use_awaitable) ||
-                                    asio::post(ioc_, asio::use_awaitable));
-            if (timer.expiry() <= std::chrono::steady_clock::now()) {
-                log().warn("Relay authentication timeout (30s) for {}:{}", host, port);
-                break;
-            }
-            co_await asio::post(ioc_, asio::use_awaitable);
-        }
-
-        if (!relay_->is_connected()) {
-            try {
-                co_await control_->close();
-            } catch (const std::exception& e) {
-                log().debug("Failed to close control channel: {}", e.what());
-            } catch (...) {
-                log().debug("Failed to close control channel: unknown error");
-            }
-            control_.reset();
-            relay_.reset();
-            continue;  // 尝试下一个 controller
-        }
-
-        // 连接成功
-        controller_connected = true;
-        log().info("Connected to controller: {}:{}", host, port);
-
-        // Setup TUN device if enabled
-        // TUN requires control channel with valid virtual_ip (from authentication)
-        if (config_.enable_tun) {
-            // Verify dependencies are met (should always be true at this point)
-            if (!control_ || control_->virtual_ip().to_u32() == 0) {
-                log().error("Cannot setup TUN: control channel or virtual IP not available (initialization order violation)");
-                state_ = ClientState::STOPPED;
-                co_return false;  // Hard error - this indicates a programming bug
-            }
-
-            if (!setup_tun()) {
-                log().warn("TUN mode requested but failed to setup TUN device (likely OS/permission issue)");
-                // Soft failure - continue without TUN, as this is an operational error
-            }
-        }
-    }
-
-    // 所有 controller 都失败了
-    if (!controller_connected) {
-        log().error("Failed to connect to any controller");
+    bool connected = co_await control_->connect(authkey);
+    if (!connected) {
+        log().warn("Failed to connect to controller {}:{}", host, port);
         if (config_.auto_reconnect) {
             log().info("Will retry in {}s...", config_.reconnect_interval.count());
             state_ = ClientState::STOPPED;
@@ -1206,6 +1061,106 @@ asio::awaitable<bool> Client::start() {
             state_ = ClientState::STOPPED;
         }
         co_return false;
+    }
+
+    // Wait for auth response (30s timeout for high-latency networks)
+    asio::steady_timer timer(ioc_);
+    timer.expires_after(std::chrono::seconds(30));
+
+    while (!control_->is_connected()) {
+        auto result = co_await (timer.async_wait(asio::use_awaitable) ||
+                                asio::post(ioc_, asio::use_awaitable));
+        if (timer.expiry() <= std::chrono::steady_clock::now()) {
+            log().warn("Authentication timeout (30s) for {}:{}", host, port);
+            break;
+        }
+        co_await asio::post(ioc_, asio::use_awaitable);
+    }
+
+    if (!control_->is_connected()) {
+        log().error("Failed to authenticate with controller");
+        try {
+            co_await control_->close();
+        } catch (...) {}
+        control_.reset();
+        relay_.reset();
+        if (config_.auto_reconnect) {
+            log().info("Will retry in {}s...", config_.reconnect_interval.count());
+            state_ = ClientState::STOPPED;
+            asio::co_spawn(ioc_, reconnect(), asio::detached);
+        } else {
+            state_ = ClientState::STOPPED;
+        }
+        co_return false;
+    }
+
+    // Connect to relay channel
+    state_ = ClientState::CONNECTING_RELAY;
+    log().info("Connecting to relay...");
+
+    connected = co_await relay_->connect(control_->relay_token());
+    if (!connected) {
+        log().warn("Failed to connect to relay {}:{}", host, port);
+        try {
+            co_await control_->close();
+        } catch (...) {}
+        control_.reset();
+        relay_.reset();
+        if (config_.auto_reconnect) {
+            log().info("Will retry in {}s...", config_.reconnect_interval.count());
+            state_ = ClientState::STOPPED;
+            asio::co_spawn(ioc_, reconnect(), asio::detached);
+        } else {
+            state_ = ClientState::STOPPED;
+        }
+        co_return false;
+    }
+
+    // Wait for relay auth (30s timeout for high-latency networks)
+    timer.expires_after(std::chrono::seconds(30));
+    while (!relay_->is_connected()) {
+        auto result = co_await (timer.async_wait(asio::use_awaitable) ||
+                                asio::post(ioc_, asio::use_awaitable));
+        if (timer.expiry() <= std::chrono::steady_clock::now()) {
+            log().warn("Relay authentication timeout (30s) for {}:{}", host, port);
+            break;
+        }
+        co_await asio::post(ioc_, asio::use_awaitable);
+    }
+
+    if (!relay_->is_connected()) {
+        log().error("Failed to authenticate relay connection");
+        try {
+            co_await control_->close();
+        } catch (...) {}
+        control_.reset();
+        relay_.reset();
+        if (config_.auto_reconnect) {
+            log().info("Will retry in {}s...", config_.reconnect_interval.count());
+            state_ = ClientState::STOPPED;
+            asio::co_spawn(ioc_, reconnect(), asio::detached);
+        } else {
+            state_ = ClientState::STOPPED;
+        }
+        co_return false;
+    }
+
+    // 连接成功
+    log().info("Connected to controller: {}:{}", host, port);
+
+    // Setup TUN device if enabled
+    if (config_.enable_tun) {
+        // Verify dependencies are met
+        if (!control_ || control_->virtual_ip().to_u32() == 0) {
+            log().error("Cannot setup TUN: control channel or virtual IP not available (initialization order violation)");
+            state_ = ClientState::STOPPED;
+            co_return false;
+        }
+
+        if (!setup_tun()) {
+            log().warn("TUN mode requested but failed to setup TUN device (likely OS/permission issue)");
+            // Soft failure - continue without TUN
+        }
     }
 
     // Start IPC server for CLI control
@@ -1794,16 +1749,16 @@ asio::awaitable<void> Client::dns_refresh_loop() {
             bool auto_reconnect;
             {
                 std::shared_lock lock(config_mutex_);
-                if (config_.controller_hosts.empty()) {
+                if (config_.controller_url.empty()) {
                     continue;
                 }
-                controller_host = config_.controller_hosts[0];
+                controller_host = config_.controller_url;
                 use_tls = config_.tls;
                 auto_reconnect = config_.auto_reconnect;
                 interval = config_.dns_refresh_interval;  // Update interval in case config changed
             }
 
-            // 解析第一个 controller host
+            // 解析 controller host
             auto [host, port_num] = ClientConfig::parse_host_port(controller_host, use_tls);
             std::string port = std::to_string(port_num);
 
@@ -2451,7 +2406,7 @@ std::string Client::get_config_value(const std::string& key) const {
     std::shared_lock lock(config_mutex_);
 
     if (key == "controller.url") {
-        std::string url = config_.current_controller_host();
+        std::string url = config_.current_controller_url();
         lock.unlock();
         return url;
     } else if (key == "controller.tls") {

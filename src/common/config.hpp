@@ -79,13 +79,12 @@ struct ClientConfig {
     // Thread model settings
     size_t num_threads = 1;  // Number of worker threads (default: 1 = single-threaded)
 
-    // Connection settings
+    // Controller settings
     // 格式: host 或 host:port (port可省略，TLS时默认443，否则80)
-    // 例如: "controller.example.com" 或 "192.168.1.100:8080"
-    std::vector<std::string> controller_hosts = {"edge.a-z.xin"};  // 默认 controller
-    std::string authkey;
-    bool tls = true;  // Enable TLS (wss://) - default enabled
-    std::chrono::milliseconds failover_timeout{5000};  // 切换到下一个Controller的超时时间
+    // 例如: "edge.a-z.xin" 或 "192.168.1.100:8080"
+    std::string controller_url = "edge.a-z.xin";  // Controller URL
+    std::string authkey;                          // Auth key
+    bool tls = true;                              // Enable TLS (wss://) - default enabled
 
     // SSL/TLS settings
     bool ssl_verify = false;            // Verify server certificate (default: false for dev)
@@ -117,10 +116,9 @@ struct ClientConfig {
         uint32_t endpoint_refresh_interval = 60; // 端点刷新间隔（秒，定期广播确保同步）
     } p2p;
 
-    // 获取当前使用的controller host (格式: host:port)
-    std::string current_controller_host() const {
-        if (controller_hosts.empty()) return "localhost:8080";
-        return controller_hosts[0];
+    // 获取当前使用的controller url (格式: host 或 host:port)
+    std::string current_controller_url() const {
+        return controller_url.empty() ? "localhost:8080" : controller_url;
     }
 
     // 解析 host:port 为规范化格式

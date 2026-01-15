@@ -836,9 +836,7 @@ int cmd_up(int argc, char* argv[]) {
         if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
             ++i; // Already handled
         } else if (arg == "--controller" && i + 1 < argc) {
-            // 清空已有的 hosts，添加命令行指定的
-            cfg.controller_hosts.clear();
-            cfg.controller_hosts.push_back(argv[++i]);
+            cfg.controller_url = argv[++i];
         } else if ((arg == "-a" || arg == "--authkey") && i + 1 < argc) {
             cfg.authkey = argv[++i];
         } else if (arg == "--threads" && i + 1 < argc) {
@@ -904,10 +902,9 @@ int cmd_up(int argc, char* argv[]) {
 
         // Create client config
         client::ClientConfig client_cfg;
-        client_cfg.controller_hosts = cfg.controller_hosts;
+        client_cfg.controller_url = cfg.controller_url;
         client_cfg.authkey = cfg.authkey;
         client_cfg.tls = cfg.tls;
-        client_cfg.failover_timeout = cfg.failover_timeout;
         client_cfg.auto_reconnect = cfg.auto_reconnect;
         client_cfg.reconnect_interval = cfg.reconnect_interval;
         client_cfg.ping_interval = cfg.ping_interval;
@@ -1102,11 +1099,8 @@ int cmd_up(int argc, char* argv[]) {
         }, asio::detached);
 
         log.info("Client running, press Ctrl+C to stop");
-        if (!cfg.controller_hosts.empty()) {
-            log.info("  Controllers: {}", cfg.controller_hosts.size());
-            for (const auto& host : cfg.controller_hosts) {
-                log.info("    - {}", host);
-            }
+        if (!cfg.controller_url.empty()) {
+            log.info("  Controller: {}", cfg.controller_url);
         }
         if (cfg.enable_tun) {
             log.info("  TUN mode: enabled (MTU={})", cfg.tun_mtu);
