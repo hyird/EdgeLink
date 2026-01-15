@@ -113,6 +113,19 @@ public:
     void clear_node_endpoints(NodeId node_id);
 
     // ========================================================================
+    // 节点 exit_node 能力缓存
+    // ========================================================================
+
+    // 更新节点的 exit_node 能力
+    void update_node_exit_node(NodeId node_id, bool is_exit_node);
+
+    // 获取节点是否声明为 exit_node
+    bool is_node_exit_node(NodeId node_id) const;
+
+    // 清除节点的 exit_node 能力
+    void clear_node_exit_node(NodeId node_id);
+
+    // ========================================================================
     // 客户端状态机（统一管理所有客户端）
     // ========================================================================
 
@@ -182,6 +195,10 @@ private:
     // 节点端点缓存 (内存中，会话断开时清除)
     mutable std::shared_mutex endpoints_mutex_;
     std::unordered_map<NodeId, std::vector<Endpoint>> node_endpoints_;
+
+    // 节点 exit_node 能力缓存 (内存中，会话断开时清除)
+    mutable std::shared_mutex exit_node_mutex_;
+    std::unordered_map<NodeId, bool> node_exit_node_;
 
     // 客户端状态机（统一管理所有客户端）
     ControllerStateMachine state_machine_;

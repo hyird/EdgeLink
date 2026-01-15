@@ -77,6 +77,9 @@ void SessionManager::unregister_control_session(NodeId node_id) {
         node_ip_cache_.erase(node_id);
     }
 
+    // Clear exit_node capability
+    clear_node_exit_node(node_id);
+
     // 移除客户端
     remove_client(node_id);
 
@@ -299,6 +302,29 @@ void SessionManager::clear_node_endpoints(NodeId node_id) {
     std::unique_lock lock(endpoints_mutex_);
     node_endpoints_.erase(node_id);
     log().debug("Cleared endpoints for node {}", node_id);
+}
+
+// ============================================================================
+// 节点 exit_node 能力缓存
+// ============================================================================
+
+void SessionManager::update_node_exit_node(NodeId node_id, bool is_exit_node) {
+    std::unique_lock lock(exit_node_mutex_);
+    node_exit_node_[node_id] = is_exit_node;
+    if (is_exit_node) {
+        log().info("Node {} declared as exit node", node_id);
+    }
+}
+
+bool SessionManager::is_node_exit_node(NodeId node_id) const {
+    std::shared_lock lock(exit_node_mutex_);
+    auto it = node_exit_node_.find(node_id);
+    return it != node_exit_node_.end() && it->second;
+}
+
+void SessionManager::clear_node_exit_node(NodeId node_id) {
+    std::unique_lock lock(exit_node_mutex_);
+    node_exit_node_.erase(node_id);
 }
 
 // ============================================================================

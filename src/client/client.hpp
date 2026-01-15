@@ -65,7 +65,8 @@ struct ClientConfig {
 
     // Subnet routing settings (advertise local subnets to other peers)
     std::vector<std::string> advertise_routes;  // CIDR格式，如 "192.168.1.0/24", "10.0.0.0/8"
-    bool exit_node = false;                     // 作为出口节点，公告 0.0.0.0/0
+    bool exit_node = false;                     // 声明自己可作为出口节点（不会自动广播路由）
+    std::string use_exit_node;                  // 使用指定节点作为出口（节点名称或ID）
     bool accept_routes = true;                  // 是否接受其他节点的路由并应用到系统
     std::chrono::seconds route_announce_interval{60};  // 路由公告刷新间隔（秒，定期广播确保同步）
 
@@ -331,6 +332,9 @@ private:
     // Network routes (received from controller)
     std::vector<RouteInfo> routes_;
     mutable std::mutex routes_mutex_;
+
+    // Exit node tracking (for use_exit_node config)
+    std::atomic<NodeId> current_exit_node_id_{0};  // 当前使用的出口节点 ID
 
     // Pending ping state - 使用 channel 替代回调
     using PingResponseChannel = asio::experimental::channel<void(boost::system::error_code, uint16_t)>;

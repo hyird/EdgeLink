@@ -165,7 +165,8 @@ struct ClientConfig {
 
     // Subnet routing settings
     std::vector<std::string> advertise_routes;  // CIDR format routes to advertise
-    bool exit_node = false;                     // Act as exit node (advertise 0.0.0.0/0)
+    bool exit_node = false;                     // Declare this node can act as exit node
+    std::string use_exit_node;                  // Use specified node as exit (peer name or ID)
     bool accept_routes = true;                  // Accept routes from other nodes and apply to system
     std::chrono::seconds route_announce_interval{60};  // 路由公告刷新间隔（秒，定期广播确保同步）
 

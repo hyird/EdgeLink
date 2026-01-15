@@ -329,6 +329,9 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
     // Update node online status
     this->manager_.database().update_node_online(this->node_id_, true);
 
+    // Store exit_node capability (per-session, in memory)
+    this->manager_.update_node_exit_node(this->node_id_, request->exit_node);
+
     // Register session
     this->manager_.register_control_session(this->node_id_,
         std::static_pointer_cast<ISession>(this->shared_from_this()));
@@ -410,6 +413,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::send_config() {
         peer.node_key = node.node_key;
         peer.online = node.online;
         peer.name = node.hostname;
+        peer.exit_node = this->manager_.is_node_exit_node(node.id);
         config.peers.push_back(peer);
     }
 

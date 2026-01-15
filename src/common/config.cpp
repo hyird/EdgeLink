@@ -236,6 +236,9 @@ std::expected<ClientConfig, ConfigError> ClientConfig::parse(const std::string& 
             if (auto v = (*routing)["exit_node"].value<bool>()) {
                 config.exit_node = *v;
             }
+            if (auto v = (*routing)["use_exit_node"].value<std::string>()) {
+                config.use_exit_node = *v;
+            }
             if (auto v = (*routing)["accept_routes"].value<bool>()) {
                 config.accept_routes = *v;
             }

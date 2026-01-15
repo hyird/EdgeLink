@@ -192,6 +192,9 @@ public:
     bool is_connected() const { return state_ == ChannelState::CONNECTED; }
     const std::string& url() const { return url_; }
 
+    // Set exit node capability (before connect)
+    void set_exit_node(bool value) { exit_node_ = value; }
+
     // Auth info (after successful authentication)
     NodeId node_id() const { return node_id_; }
     NetworkId network_id() const { return network_id_; }
@@ -226,6 +229,7 @@ private:
     std::string url_;
     std::string authkey_;
     bool use_tls_;
+    bool exit_node_ = false;  // 声明自己可作为出口节点
 
     // WebSocket stream (either TLS or plain)
     std::unique_ptr<TlsWsStream> tls_ws_;

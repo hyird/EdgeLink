@@ -919,6 +919,7 @@ int cmd_up(int argc, char* argv[]) {
         client_cfg.ssl_allow_self_signed = cfg.ssl_allow_self_signed;
         client_cfg.advertise_routes = cfg.advertise_routes;
         client_cfg.exit_node = cfg.exit_node;
+        client_cfg.use_exit_node = cfg.use_exit_node;
         client_cfg.accept_routes = cfg.accept_routes;
         client_cfg.route_announce_interval = cfg.route_announce_interval;
 

@@ -384,6 +384,45 @@ asio::awaitable<void> Client::ctrl_config_handler() {
             }
             if (route_mgr_) {
                 route_mgr_->sync_routes(config.routes);
+
+                // 处理 use_exit_node 配置：如果指定了出口节点，添加默认路由
+                std::string use_exit_node_config = [&]() {
+                    std::shared_lock lock(config_mutex_);
+                    return config_.use_exit_node;
+                }();
+
+                if (!use_exit_node_config.empty()) {
+                    // 查找匹配的出口节点
+                    const PeerInfo* exit_peer = nullptr;
+                    for (const auto& peer : config.peers) {
+                        if (!peer.exit_node) continue;  // 必须声明为出口节点
+                        if (!peer.online) continue;     // 必须在线
+
+                        // 匹配节点名称或节点 ID
+                        if (peer.name == use_exit_node_config ||
+                            std::to_string(peer.node_id) == use_exit_node_config) {
+                            exit_peer = &peer;
+                            break;
+                        }
+                    }
+
+                    if (exit_peer) {
+                        // 创建默认路由 0.0.0.0/0 via exit_peer
+                        RouteInfo default_route;
+                        default_route.subnet = IPv4Address{0, 0, 0, 0};
+                        default_route.prefix_len = 0;
+                        default_route.gateway_node = exit_peer->node_id;
+                        default_route.metric = 100;
+
+                        route_mgr_->apply_route_update({default_route}, {});
+                        current_exit_node_id_ = exit_peer->node_id;  // 记录当前出口节点
+                        log().info("Added default route via exit node {} ({})",
+                                   exit_peer->name, exit_peer->virtual_ip.to_string());
+                    } else {
+                        current_exit_node_id_ = 0;  // 清除出口节点记录
+                        log().warn("Exit node '{}' not found or offline", use_exit_node_config);
+                    }
+                }
             }
         }
 
@@ -448,6 +487,20 @@ asio::awaitable<void> Client::ctrl_config_update_handler() {
                 if (p2p_mgr_) {
                     p2p_mgr_->disconnect_peer(peer_id);
                 }
+
+                // 检查离线的 peer 是否是当前使用的出口节点
+                if (route_mgr_ && current_exit_node_id_ == peer_id) {
+                    RouteInfo default_route;
+                    default_route.subnet = IPv4Address{0, 0, 0, 0};
+                    default_route.prefix_len = 0;
+                    default_route.gateway_node = peer_id;
+                    default_route.metric = 100;
+
+                    route_mgr_->apply_route_update({}, {default_route});
+                    current_exit_node_id_ = 0;
+                    log().warn("Exit node (peer_id={}) went offline, removed default route",
+                               peer_id);
+                }
             }
 
             bool accept_routes_config = [&]() {
@@ -472,6 +525,34 @@ asio::awaitable<void> Client::ctrl_config_update_handler() {
                     route_mgr_->apply_route_update(relevant_routes, {});
                     log().debug("Applied {} routes for {} newly online peers",
                                relevant_routes.size(), added_peer_ids.size());
+                }
+
+                // 检查新上线的 peer 是否是配置的出口节点
+                std::string use_exit_node_config = [&]() {
+                    std::shared_lock lock(config_mutex_);
+                    return config_.use_exit_node;
+                }();
+
+                if (!use_exit_node_config.empty() && current_exit_node_id_ == 0) {
+                    // 只有当前没有出口节点时才设置新的
+                    for (const auto& peer : update.add_peers) {
+                        if (!peer.exit_node || !peer.online) continue;
+                        if (peer.name == use_exit_node_config ||
+                            std::to_string(peer.node_id) == use_exit_node_config) {
+                            // 出口节点上线，添加默认路由
+                            RouteInfo default_route;
+                            default_route.subnet = IPv4Address{0, 0, 0, 0};
+                            default_route.prefix_len = 0;
+                            default_route.gateway_node = peer.node_id;
+                            default_route.metric = 100;
+
+                            route_mgr_->apply_route_update({default_route}, {});
+                            current_exit_node_id_ = peer.node_id;
+                            log().info("Exit node '{}' came online, added default route",
+                                       peer.name);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1076,6 +1157,12 @@ asio::awaitable<bool> Client::start() {
     // Create channels
     control_ = std::make_shared<ControlChannel>(ioc_, ssl_ctx_, crypto_, control_url, tls);
     relay_ = std::make_shared<RelayChannel>(ioc_, ssl_ctx_, crypto_, peers_, relay_url, tls);
+
+    // Set exit node capability
+    {
+        std::shared_lock lock(config_mutex_);
+        control_->set_exit_node(config_.exit_node);
+    }
 
     // Setup event channels
     setup_channels();
@@ -2369,17 +2456,10 @@ asio::awaitable<void> Client::announce_configured_routes() {
         log().info("Will announce route: {}", cidr);
     }
 
-    // 如果是出口节点，添加默认路由
+    // 注意：exit_node 不再自动广播 0.0.0.0/0
+    // exit_node 能力通过 AUTH 消息声明，客户端通过 use_exit_node 配置选择使用
     if (exit_node) {
-        RouteInfo default_route;
-        default_route.ip_type = IpType::IPv4;
-        default_route.prefix = {};  // 0.0.0.0
-        default_route.prefix_len = 0;  // /0
-        default_route.gateway_node = node_id();
-        default_route.metric = 100;
-        default_route.flags = RouteFlags::ENABLED | RouteFlags::EXIT_NODE;
-        routes.push_back(default_route);
-        log().info("Will announce exit node route: 0.0.0.0/0");
+        log().info("This node is declared as exit node (capability only, not broadcasting default route)");
     }
 
     if (!routes.empty()) {

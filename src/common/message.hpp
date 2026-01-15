@@ -34,6 +34,7 @@ struct AuthRequest {
     std::string version;
     uint64_t timestamp = 0;
     ConnectionId connection_id = 0;  // 连接标识符（用于多路连接场景）
+    bool exit_node = false;          // 声明自己可作为出口节点
     std::array<uint8_t, ED25519_SIGNATURE_SIZE> signature{};
     std::vector<uint8_t> auth_data; // Content depends on auth_type
 

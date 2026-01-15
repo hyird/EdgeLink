@@ -124,6 +124,7 @@ void write_peer_info(BinaryWriter& writer, const PeerInfo& peer) {
     writer.write_bytes(peer.virtual_ip.bytes);
     writer.write_array(peer.node_key);
     writer.write_u8(peer.online ? 0x01 : 0x00);
+    writer.write_u8(peer.exit_node ? 0x01 : 0x00);  // 出口节点标志
     writer.write_string(peer.name);
 
     writer.write_u16_be(static_cast<uint16_t>(peer.endpoints.size()));
@@ -144,9 +145,10 @@ std::expected<PeerInfo, ParseError> read_peer_info(BinaryReader& reader) {
     auto vip = reader.read_array<4>();
     auto node_key = reader.read_array<X25519_KEY_SIZE>();
     auto online = reader.read_u8();
+    auto exit_node = reader.read_u8();  // 出口节点标志
     auto name = reader.read_string();
 
-    if (!node_id || !vip || !node_key || !online || !name) {
+    if (!node_id || !vip || !node_key || !online || !exit_node || !name) {
         return std::unexpected(ParseError::INSUFFICIENT_DATA);
     }
 
@@ -154,6 +156,7 @@ std::expected<PeerInfo, ParseError> read_peer_info(BinaryReader& reader) {
     std::copy(vip->begin(), vip->end(), peer.virtual_ip.bytes.begin());
     peer.node_key = *node_key;
     peer.online = (*online != 0);
+    peer.exit_node = (*exit_node != 0);
     peer.name = *name;
 
     auto ep_count = reader.read_u16_be();
@@ -258,6 +261,7 @@ std::vector<uint8_t> AuthRequest::get_sign_data() const {
     writer.write_string(version);
     writer.write_u64_be(timestamp);
     writer.write_u32_be(connection_id);  // 连接标识符
+    writer.write_u8(exit_node ? 0x01 : 0x00);  // 出口节点标志
     writer.write_u16_be(static_cast<uint16_t>(auth_data.size()));
     writer.write_bytes(auth_data);
     return writer.take();
@@ -274,6 +278,7 @@ std::vector<uint8_t> AuthRequest::serialize() const {
     writer.write_string(version);
     writer.write_u64_be(timestamp);
     writer.write_u32_be(connection_id);  // 连接标识符
+    writer.write_u8(exit_node ? 0x01 : 0x00);  // 出口节点标志
     writer.write_array(signature);
     writer.write_u16_be(static_cast<uint16_t>(auth_data.size()));
     writer.write_bytes(auth_data);
@@ -293,11 +298,13 @@ std::expected<AuthRequest, ParseError> AuthRequest::parse(std::span<const uint8_
     auto version = reader.read_string();
     auto timestamp = reader.read_u64_be();
     auto connection_id = reader.read_u32_be();  // 连接标识符
+    auto exit_node_flag = reader.read_u8();     // 出口节点标志
     auto signature = reader.read_array<ED25519_SIGNATURE_SIZE>();
     auto auth_data_len = reader.read_u16_be();
 
     if (!auth_type || !machine_key || !node_key || !hostname || !os ||
-        !arch || !version || !timestamp || !connection_id || !signature || !auth_data_len) {
+        !arch || !version || !timestamp || !connection_id || !exit_node_flag ||
+        !signature || !auth_data_len) {
         return std::unexpected(ParseError::INSUFFICIENT_DATA);
     }
 
@@ -313,6 +320,7 @@ std::expected<AuthRequest, ParseError> AuthRequest::parse(std::span<const uint8_
     req.version = *version;
     req.timestamp = *timestamp;
     req.connection_id = *connection_id;
+    req.exit_node = (*exit_node_flag != 0);
     req.signature = *signature;
     req.auth_data = *auth_data;
 

@@ -367,6 +367,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         req.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         req.connection_id = 0;  // Controller 连接不使用 connection_id（单连接控制通道）
+        req.exit_node = exit_node_;  // 声明出口节点能力
         req.auth_data = std::vector<uint8_t>(authkey_.begin(), authkey_.end());
 
         // Sign the request
@@ -567,6 +568,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
         req.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         req.connection_id = connection_id;  // 设置连接标识符
+        req.exit_node = exit_node_;  // 声明出口节点能力
         // auth_data is empty for MACHINE auth type
 
         // Sign the request

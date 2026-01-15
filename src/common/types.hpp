@@ -286,6 +286,7 @@ struct PeerInfo {
     IPv4Address virtual_ip{};
     std::array<uint8_t, X25519_KEY_SIZE> node_key{};
     bool online = false;
+    bool exit_node = false;  // 该节点是否可作为出口节点
     std::string name;
     std::vector<Endpoint> endpoints;
     std::vector<SubnetInfo> allowed_subnets;
