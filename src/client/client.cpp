@@ -353,29 +353,29 @@ asio::awaitable<void> Client::ctrl_config_handler() {
             }
         }
 
+        // 启动 P2P manager（如果尚未运行）
+        // 注意：在当前协程中同步启动，避免 detached 协程导致的生命周期竞态
         if (p2p_mgr_ && !p2p_mgr_->is_running()) {
-            auto self = shared_from_this();
-            asio::co_spawn(ioc_, [self]() -> asio::awaitable<void> {
-                try {
-                    co_await self->p2p_mgr_->start();
-                    log().info("P2P manager started (STUN configured)");
+            try {
+                co_await p2p_mgr_->start();
+                log().info("P2P manager started (STUN configured)");
 
-                    std::vector<Endpoint> endpoints;
-                    {
-                        std::lock_guard lock(self->endpoints_mutex_);
-                        if (!self->last_reported_endpoints_.empty()) {
-                            endpoints = self->last_reported_endpoints_;
-                        }
+                // 重新发送上次的端点（如果有）
+                std::vector<Endpoint> endpoints;
+                {
+                    std::lock_guard lock(endpoints_mutex_);
+                    if (!last_reported_endpoints_.empty()) {
+                        endpoints = last_reported_endpoints_;
                     }
-
-                    if (!endpoints.empty() && self->control_ && self->control_->is_connected()) {
-                        co_await self->control_->send_endpoint_update(endpoints);
-                        log().info("Resent {} endpoints after P2P manager started", endpoints.size());
-                    }
-                } catch (const std::exception& e) {
-                    log().error("P2P manager failed: {}", e.what());
                 }
-            }(), asio::detached);
+
+                if (!endpoints.empty() && control_ && control_->is_connected()) {
+                    co_await control_->send_endpoint_update(endpoints);
+                    log().info("Resent {} endpoints after P2P manager started", endpoints.size());
+                }
+            } catch (const std::exception& e) {
+                log().error("P2P manager failed to start: {}", e.what());
+            }
         }
     }
 
