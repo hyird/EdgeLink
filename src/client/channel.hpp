@@ -187,6 +187,7 @@ public:
     // State
     ChannelState state() const { return state_; }
     bool is_connected() const { return state_ == ChannelState::CONNECTED; }
+    const std::string& url() const { return url_; }
 
     // Auth info (after successful authentication)
     NodeId node_id() const { return node_id_; }

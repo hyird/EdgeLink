@@ -36,10 +36,9 @@ struct ClientConfig {
     bool separate_data_plane_thread = false;   // 是否分离数据面到独立线程（需要 num_threads >= 2）
 
     // 连接设置 - 格式: host 或 host:port (port可省略，TLS时默认443，否则80)
-    std::vector<std::string> controller_hosts = {"edge.a-z.xin"};  // 默认 controller
+    std::string controller_url = "edge.a-z.xin";  // Controller URL
     std::string authkey;
     bool tls = true;  // Enable TLS (wss://) - default enabled
-    std::chrono::milliseconds failover_timeout{5000};  // 切换到下一个Controller的超时时间
     bool auto_reconnect = true;
     std::chrono::seconds reconnect_interval{5};
     std::chrono::seconds ping_interval{5};  // Keep connection alive, avoid CDN idle timeout
