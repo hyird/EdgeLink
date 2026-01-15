@@ -1144,13 +1144,15 @@ asio::awaitable<void> ControlChannel::send_raw(std::span<const uint8_t> data) {
 
 RelayChannel::RelayChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
                            CryptoEngine& crypto, PeerManager& peers,
-                           const std::string& url, bool use_tls)
+                           const std::string& url, bool use_tls,
+                           const std::string& host_override)
     : ioc_(ioc)
     , ssl_ctx_(ssl_ctx)
     , crypto_(crypto)
     , peers_(peers)
     , url_(url)
     , use_tls_(use_tls)
+    , host_override_(host_override)
     , write_timer_(ioc) {
     write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
 }
@@ -1178,18 +1180,21 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             co_return false;
         }
 
-        std::string host = std::string(parsed->host());
+        std::string connect_host = std::string(parsed->host());  // 用于 TCP 连接
         std::string port = parsed->has_port() ? std::string(parsed->port()) :
                            (use_tls_ ? "443" : "80");
         std::string target = std::string(parsed->path());
         if (target.empty()) target = "/api/v1/relay";
 
-        log().debug("Connecting to relay: {}:{}{} (TLS: {})",
-                    host, port, target, use_tls_ ? "yes" : "no");
+        // 用于 SNI 和 HTTP Host 头的 hostname（CDN 需要正确的 Host 头）
+        std::string ws_host = host_override_.empty() ? connect_host : host_override_;
 
-        // Resolve host
+        log().debug("Connecting to relay: {}:{}{} (TLS: {}, Host: {})",
+                    connect_host, port, target, use_tls_ ? "yes" : "no", ws_host);
+
+        // Resolve host (use connect_host for DNS, not ws_host)
         tcp::resolver resolver(ioc_);
-        auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
+        auto endpoints = co_await resolver.async_resolve(connect_host, port, asio::use_awaitable);
 
         // 记录所有解析的 endpoints
         size_t endpoint_count = 0;
@@ -1210,8 +1215,8 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             // Create TLS stream
             tls_ws_ = std::make_unique<TlsWsStream>(ioc_, ssl_ctx_);
 
-            // Set SNI
-            SSL_set_tlsext_host_name(tls_ws_->next_layer().native_handle(), host.c_str());
+            // Set SNI (use ws_host for CDN compatibility)
+            SSL_set_tlsext_host_name(tls_ws_->next_layer().native_handle(), ws_host.c_str());
 
             // Connect TCP - 使用Happy Eyeballs策略
             auto tcp_start = std::chrono::steady_clock::now();
@@ -1233,9 +1238,9 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
             co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
 
-            // WebSocket handshake
+            // WebSocket handshake (use ws_host as Host header for CDN)
             tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-            co_await tls_ws_->async_handshake(host, target, asio::use_awaitable);
+            co_await tls_ws_->async_handshake(ws_host, target, asio::use_awaitable);
 
             // Disable TCP timeout - WebSocket has its own timeout
             beast::get_lowest_layer(*tls_ws_).expires_never();
@@ -1262,9 +1267,9 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             log().debug("TCP connected to relay {} in {} ms",
                        connected_ep->address().to_string(), tcp_elapsed);
 
-            // WebSocket handshake
+            // WebSocket handshake (use ws_host as Host header for CDN)
             plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-            co_await plain_ws_->async_handshake(host, target, asio::use_awaitable);
+            co_await plain_ws_->async_handshake(ws_host, target, asio::use_awaitable);
 
             // Disable TCP timeout - WebSocket has its own timeout
             beast::get_lowest_layer(*plain_ws_).expires_never();

@@ -126,11 +126,11 @@ asio::awaitable<bool> RelayConnectionPool::connect_single(
         url = fmt::format("ws://{}:{}/api/v1/relay", addr_str, endpoint.port());
     }
 
-    log().debug("Connecting to relay endpoint: {}", url);
+    log().debug("Connecting to relay endpoint: {} (Host: {})", url, relay_info_.hostname);
 
-    // 创建 RelayChannel
+    // 创建 RelayChannel，传递原始 hostname 用于 CDN 的 Host 头
     auto channel = std::make_shared<RelayChannel>(
-        ioc_, ssl_ctx_, crypto_, peers_, url, use_tls_);
+        ioc_, ssl_ctx_, crypto_, peers_, url, use_tls_, relay_info_.hostname);
 
     // 生成连接 ID（需要在设置回调前生成）
     ConnectionId conn_id = generate_connection_id();

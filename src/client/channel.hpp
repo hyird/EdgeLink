@@ -265,8 +265,10 @@ private:
 
 class RelayChannel : public std::enable_shared_from_this<RelayChannel> {
 public:
+    // host_override: 用于 CDN 场景，URL 中是 IP 地址但需要正确的 Host 头
     RelayChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
-                 CryptoEngine& crypto, PeerManager& peers, const std::string& url, bool use_tls);
+                 CryptoEngine& crypto, PeerManager& peers, const std::string& url, bool use_tls,
+                 const std::string& host_override = "");
 
     // Connect and authenticate with relay token
     asio::awaitable<bool> connect(const std::vector<uint8_t>& relay_token);
@@ -308,6 +310,7 @@ private:
     PeerManager& peers_;
     std::string url_;
     bool use_tls_;
+    std::string host_override_;  // CDN 场景下的 Host 头覆盖
 
     // WebSocket stream (either TLS or plain)
     std::unique_ptr<TlsWsStream> tls_ws_;
