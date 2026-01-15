@@ -553,10 +553,9 @@ std::string IpcServer::handle_config_reload() {
 
         // 转换并应用配置
         ClientConfig new_config;
-        new_config.controller_hosts = result->controller_hosts;
+        new_config.controller_url = result->controller_url;
         new_config.authkey = result->authkey;
         new_config.tls = result->tls;
-        new_config.failover_timeout = result->failover_timeout;
         new_config.auto_reconnect = result->auto_reconnect;
         new_config.reconnect_interval = result->reconnect_interval;
         new_config.ping_interval = result->ping_interval;

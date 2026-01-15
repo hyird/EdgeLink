@@ -91,12 +91,12 @@ std::vector<ConfigChange> ConfigApplier::apply(const ClientConfig& old_cfg, cons
     }
 
     // ===== Controller 配置（热重载时重新连接）=====
-    if (old_cfg.controller_hosts != new_cfg.controller_hosts) {
+    if (old_cfg.controller_url != new_cfg.controller_url) {
         ConfigChange change;
         change.key = "controller.url";
-        change.old_value = old_cfg.current_controller_host();
-        change.new_value = new_cfg.current_controller_host();
-        change.applied = apply_controller_url(new_cfg.current_controller_host());
+        change.old_value = old_cfg.current_controller_url();
+        change.new_value = new_cfg.current_controller_url();
+        change.applied = apply_controller_url(new_cfg.current_controller_url());
         change.restart_required = false;
         change.message = "将重新连接到新的 Controller";
         changes.push_back(change);

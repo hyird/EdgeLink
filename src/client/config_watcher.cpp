@@ -70,10 +70,9 @@ bool ConfigWatcher::reload() {
 
     // 转换为 client::ClientConfig
     ClientConfig cfg;
-    cfg.controller_hosts = result->controller_hosts;
+    cfg.controller_url = result->controller_url;
     cfg.authkey = result->authkey;
     cfg.tls = result->tls;
-    cfg.failover_timeout = result->failover_timeout;
     cfg.auto_reconnect = result->auto_reconnect;
     cfg.reconnect_interval = result->reconnect_interval;
     cfg.ping_interval = result->ping_interval;
