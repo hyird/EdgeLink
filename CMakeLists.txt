@@ -86,6 +86,44 @@ endif()
 include(third_party/CMakeLists.txt)
 
 # =============================================================================
+# Protocol Buffers Code Generation
+# =============================================================================
+set(PROTO_FILES
+    ${CMAKE_SOURCE_DIR}/proto/edgelink.proto
+)
+
+# Output directory for generated files
+set(PROTO_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/proto)
+file(MAKE_DIRECTORY ${PROTO_OUTPUT_DIR})
+
+# Generate C++ source and header files from .proto
+set(PROTO_SRCS ${PROTO_OUTPUT_DIR}/edgelink.pb.cc)
+set(PROTO_HDRS ${PROTO_OUTPUT_DIR}/edgelink.pb.h)
+
+add_custom_command(
+    OUTPUT ${PROTO_SRCS} ${PROTO_HDRS}
+    COMMAND protoc
+        --cpp_out=${PROTO_OUTPUT_DIR}
+        --proto_path=${CMAKE_SOURCE_DIR}/proto
+        ${PROTO_FILES}
+    DEPENDS ${PROTO_FILES} protoc
+    COMMENT "Generating Protocol Buffer sources"
+    VERBATIM
+)
+
+# Create a library target for generated protobuf files
+add_library(edgelink-proto STATIC ${PROTO_SRCS})
+target_include_directories(edgelink-proto PUBLIC ${PROTO_OUTPUT_DIR})
+target_link_libraries(edgelink-proto PUBLIC protobuf::libprotobuf)
+
+# Suppress warnings in generated code
+if(MSVC)
+    target_compile_options(edgelink-proto PRIVATE /W0)
+else()
+    target_compile_options(edgelink-proto PRIVATE -w)
+endif()
+
+# =============================================================================
 # Common Library
 # =============================================================================
 add_library(edgelink-common STATIC
@@ -107,6 +145,7 @@ target_include_directories(edgelink-common PUBLIC
 )
 
 target_link_libraries(edgelink-common PUBLIC
+    edgelink-proto
     Boost::asio
     Boost::beast
     Boost::json
@@ -258,11 +297,15 @@ if(BUILD_CLIENT)
         src/client/multi_relay_manager.cpp
         src/client/peer_latency_measurer.cpp
         src/client/relay_latency_reporter.cpp
+        src/client/prefs_store.cpp
     )
 
-    # Platform-specific TUN source
+    # Platform-specific TUN and service manager source
     if(WIN32)
-        list(APPEND CLIENT_SOURCE src/client/tun_windows.cpp)
+        list(APPEND CLIENT_SOURCE
+            src/client/tun_windows.cpp
+            src/client/service_manager_win.cpp
+        )
 
         # Optionally embed wintun.dll (only works with MSVC resource compiler)
         # For MinGW, we'll load wintun.dll from the same directory at runtime
@@ -284,9 +327,15 @@ if(BUILD_CLIENT)
             message(STATUS "Wintun DLL not embedded. Will load from exe directory at runtime.")
         endif()
     elseif(APPLE)
-        list(APPEND CLIENT_SOURCE src/client/tun_macos.cpp)
+        list(APPEND CLIENT_SOURCE
+            src/client/tun_macos.cpp
+            src/client/service_manager_mac.cpp
+        )
     else()
-        list(APPEND CLIENT_SOURCE src/client/tun.cpp)
+        list(APPEND CLIENT_SOURCE
+            src/client/tun.cpp
+            src/client/service_manager_linux.cpp
+        )
     endif()
 
     add_executable(edgelink-client ${CLIENT_SOURCE})
@@ -308,6 +357,8 @@ if(BUILD_CLIENT)
             iphlpapi
             ntdll
             setupapi
+            shell32
+            advapi32
         )
 
         if(EDGELINK_WINTUN_EMBEDDED)
@@ -361,6 +412,7 @@ message(STATUS "EdgeLink Build Configuration:")
 message(STATUS "  Platform:      ${EDGELINK_PLATFORM}")
 message(STATUS "  Build Type:    ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Shared Libs:   ${BUILD_SHARED_LIBS}")
+message(STATUS "  Protobuf:      enabled")
 if(EDGELINK_MUSL)
 message(STATUS "  Libc:          musl (full static)")
 elseif(EDGELINK_STATIC)

@@ -1,5 +1,7 @@
 #include "client/client.hpp"
 #include "client/ipc_server.hpp"
+#include "client/prefs_store.hpp"
+#include "client/service_manager.hpp"
 #include "client/version.hpp"
 #include "common/crypto.hpp"
 #include "common/config.hpp"
@@ -13,6 +15,7 @@
 #include <filesystem>
 #include <iostream>
 #include <iomanip>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -48,6 +51,7 @@ void print_usage() {
               << "Commands:\n"
               << "  up          Start client and connect to network\n"
               << "  down        Stop the running client daemon\n"
+              << "  set         Set runtime configuration (exit node, routes, etc.)\n"
               << "  status      Show connection status\n"
               << "  peers       List all peer nodes\n"
               << "  routes      List subnet routes\n"
@@ -74,15 +78,22 @@ void print_up_help() {
               << "  --ssl-verify          Enable SSL certificate verification\n"
               << "  --ssl-ca FILE         Custom CA certificate file\n"
               << "  --ssl-allow-self-signed  Allow self-signed certificates\n\n"
+              << "Service Options:\n"
+              << "  --foreground          Run in foreground (don't install/start as service)\n"
+              << "  --install-service     Install as system service and exit\n"
+              << "  --uninstall-service   Uninstall system service and exit\n\n"
               << "Logging Options:\n"
               << "  -d, --debug           Enable debug logging\n"
               << "  -v, --verbose         Enable verbose (trace) logging\n\n"
               << "Other Options:\n"
               << "  -t, --test PEER MSG   Send test message to peer IP after connecting\n"
               << "  -h, --help            Show this help\n\n"
+              << "By default, 'up' will install and start the client as a system service.\n"
+              << "Use --foreground to run in the current terminal instead.\n\n"
               << "Examples:\n"
               << "  edgelink-client up -a tskey-dev-test123 --tun\n"
               << "  edgelink-client up -c client.toml\n"
+              << "  edgelink-client up --foreground -a tskey-dev-test123\n"
               << "  edgelink-client up -a tskey-dev-test123 --tls --ssl-allow-self-signed\n";
 }
 
@@ -154,6 +165,27 @@ void print_config_help() {
               << "  edgelink-client config set log.level debug\n"
               << "  edgelink-client config list --json\n"
               << "  edgelink-client config reload\n";
+}
+
+void print_set_help() {
+    std::cout << "EdgeLink Client - Set runtime configuration\n\n"
+              << "Usage: edgelink-client set [options]\n\n"
+              << "Options:\n"
+              << "  --exit-node=PEER           Use PEER as exit node (name or IP)\n"
+              << "  --exit-node=               Clear exit node setting\n"
+              << "  --advertise-exit-node      Declare this node as an exit node\n"
+              << "  --no-advertise-exit-node   Stop advertising as exit node\n"
+              << "  --advertise-routes=ROUTES  Advertise comma-separated CIDR routes\n"
+              << "  --accept-routes            Accept routes from other nodes\n"
+              << "  --no-accept-routes         Do not accept routes from other nodes\n"
+              << "  -h, --help                 Show this help\n\n"
+              << "Configuration is saved to prefs.toml and applied immediately if the\n"
+              << "client daemon is running.\n\n"
+              << "Examples:\n"
+              << "  edgelink-client set --exit-node=gateway\n"
+              << "  edgelink-client set --advertise-routes=192.168.1.0/24,10.0.0.0/8\n"
+              << "  edgelink-client set --advertise-exit-node\n"
+              << "  edgelink-client set --exit-node= --accept-routes\n";
 }
 
 // ============================================================================
@@ -749,6 +781,149 @@ int cmd_config(int argc, char* argv[]) {
 }
 
 // ============================================================================
+// Command: set
+// ============================================================================
+
+// Helper function to split string by delimiter
+std::vector<std::string> split_string(const std::string& str, char delim) {
+    std::vector<std::string> result;
+    std::stringstream ss(str);
+    std::string item;
+    while (std::getline(ss, item, delim)) {
+        // Trim whitespace
+        size_t start = item.find_first_not_of(" \t");
+        size_t end = item.find_last_not_of(" \t");
+        if (start != std::string::npos) {
+            result.push_back(item.substr(start, end - start + 1));
+        }
+    }
+    return result;
+}
+
+// Helper function to check if string starts with prefix
+bool starts_with(const std::string& str, const std::string& prefix) {
+    return str.size() >= prefix.size() && str.compare(0, prefix.size(), prefix) == 0;
+}
+
+int cmd_set(int argc, char* argv[]) {
+    // Parse arguments
+    std::optional<std::string> exit_node;
+    std::optional<bool> advertise_exit_node;
+    std::optional<std::vector<std::string>> advertise_routes;
+    std::optional<bool> accept_routes;
+    bool has_changes = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "-h" || arg == "--help") {
+            print_set_help();
+            return 0;
+        } else if (starts_with(arg, "--exit-node=")) {
+            exit_node = arg.substr(12);  // Length of "--exit-node="
+            has_changes = true;
+        } else if (arg == "--advertise-exit-node") {
+            advertise_exit_node = true;
+            has_changes = true;
+        } else if (arg == "--no-advertise-exit-node") {
+            advertise_exit_node = false;
+            has_changes = true;
+        } else if (starts_with(arg, "--advertise-routes=")) {
+            std::string routes_str = arg.substr(19);  // Length of "--advertise-routes="
+            advertise_routes = split_string(routes_str, ',');
+            has_changes = true;
+        } else if (arg == "--accept-routes") {
+            accept_routes = true;
+            has_changes = true;
+        } else if (arg == "--no-accept-routes") {
+            accept_routes = false;
+            has_changes = true;
+        } else {
+            std::cerr << "Unknown option: " << arg << "\n\n";
+            print_set_help();
+            return 1;
+        }
+    }
+
+    if (!has_changes) {
+        std::cerr << "No configuration changes specified.\n\n";
+        print_set_help();
+        return 1;
+    }
+
+    // 1. Load and update prefs.toml
+    auto state_dir = client::get_state_dir();
+    client::PrefsStore prefs(state_dir);
+    prefs.load();
+
+    if (exit_node) {
+        if (exit_node->empty()) {
+            prefs.clear_exit_node();
+            std::cout << "Cleared exit node setting.\n";
+        } else {
+            prefs.set_exit_node(*exit_node);
+            std::cout << "Set exit node: " << *exit_node << "\n";
+        }
+    }
+
+    if (advertise_exit_node) {
+        prefs.set_advertise_exit_node(*advertise_exit_node);
+        std::cout << "Advertise exit node: " << (*advertise_exit_node ? "enabled" : "disabled") << "\n";
+    }
+
+    if (advertise_routes) {
+        prefs.set_advertise_routes(*advertise_routes);
+        if (advertise_routes->empty()) {
+            std::cout << "Cleared advertised routes.\n";
+        } else {
+            std::cout << "Set advertised routes: ";
+            for (size_t i = 0; i < advertise_routes->size(); ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << (*advertise_routes)[i];
+            }
+            std::cout << "\n";
+        }
+    }
+
+    if (accept_routes) {
+        prefs.set_accept_routes(*accept_routes);
+        std::cout << "Accept routes: " << (*accept_routes ? "enabled" : "disabled") << "\n";
+    }
+
+    // Save prefs
+    if (!prefs.save()) {
+        std::cerr << "Error: Failed to save prefs: " << prefs.last_error() << "\n";
+        return 1;
+    }
+    std::cout << "Configuration saved to: " << prefs.path().string() << "\n";
+
+    // 2. If daemon is running, send update via IPC
+    IpcClient ipc;
+    if (ipc.connect()) {
+        // Send prefs update request
+        std::string response = ipc.send_request("PREFS_UPDATE");
+        try {
+            auto jv = boost::json::parse(response);
+            auto& obj = jv.as_object();
+            if (obj.at("status").as_string() == "ok") {
+                std::cout << "Configuration applied to running daemon.\n";
+            } else {
+                auto& msg = obj.at("message").as_string();
+                std::cerr << "Warning: Daemon update failed: " << std::string(msg.data(), msg.size()) << "\n";
+                std::cerr << "         Changes will take effect on next daemon start.\n";
+            }
+        } catch (const std::exception&) {
+            // Daemon might not support PREFS_UPDATE yet
+            std::cout << "Note: Daemon notified. Changes may require restart to take effect.\n";
+        }
+    } else {
+        std::cout << "Daemon is not running. Changes will take effect on next start.\n";
+    }
+
+    return 0;
+}
+
+// ============================================================================
 // Command: down
 // ============================================================================
 
@@ -797,12 +972,44 @@ int cmd_up(int argc, char* argv[]) {
     std::string config_file;
     std::string test_peer_ip;
     std::string test_message;
+    bool foreground = false;
+    bool install_service = false;
+    bool uninstall_service = false;
 
-    // First pass: look for config file
+    // First pass: look for config file and service options
     for (int i = 0; i < argc; ++i) {
         std::string arg = argv[i];
         if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
             config_file = argv[++i];
+        } else if (arg == "--foreground") {
+            foreground = true;
+        } else if (arg == "--install-service") {
+            install_service = true;
+        } else if (arg == "--uninstall-service") {
+            uninstall_service = true;
+        }
+    }
+
+    // Handle service management commands first
+    if (uninstall_service) {
+        if (ServiceManager::is_running()) {
+            std::cout << "Stopping service...\n";
+            if (!ServiceManager::stop()) {
+                std::cerr << "Warning: Failed to stop service: " << ServiceManager::last_error() << "\n";
+            }
+        }
+        if (ServiceManager::is_installed()) {
+            std::cout << "Uninstalling service...\n";
+            if (ServiceManager::uninstall()) {
+                std::cout << "Service uninstalled successfully.\n";
+                return 0;
+            } else {
+                std::cerr << "Error: Failed to uninstall service: " << ServiceManager::last_error() << "\n";
+                return 1;
+            }
+        } else {
+            std::cout << "Service is not installed.\n";
+            return 0;
         }
     }
 
@@ -862,11 +1069,84 @@ int cmd_up(int argc, char* argv[]) {
             cfg.ssl_ca_file = argv[++i];
         } else if (arg == "--ssl-allow-self-signed") {
             cfg.ssl_allow_self_signed = true;
+        } else if (arg == "--foreground" || arg == "--install-service" || arg == "--uninstall-service") {
+            // Already handled in first pass
         } else if (arg == "-h" || arg == "--help") {
             print_up_help();
             return 0;
         }
     }
+
+    // Handle --install-service: just install and exit
+    if (install_service) {
+        std::filesystem::path exe_path;
+#ifdef _WIN32
+        wchar_t path_buf[MAX_PATH];
+        GetModuleFileNameW(nullptr, path_buf, MAX_PATH);
+        exe_path = path_buf;
+#else
+        exe_path = std::filesystem::canonical("/proc/self/exe");
+#endif
+        std::cout << "Installing service from: " << exe_path.string() << "\n";
+        if (ServiceManager::install(exe_path)) {
+            std::cout << "Service installed successfully.\n";
+            std::cout << "Use 'edgelink-client up' to start the service.\n";
+            return 0;
+        } else {
+            std::cerr << "Error: Failed to install service: " << ServiceManager::last_error() << "\n";
+            return 1;
+        }
+    }
+
+    // Service mode (default): check if already running, install if needed, then start
+    if (!foreground) {
+        auto svc_status = ServiceManager::status();
+
+        if (svc_status == ServiceStatus::RUNNING) {
+            std::cout << "EdgeLink client is already running as a service.\n";
+            std::cout << "Use 'edgelink-client status' to view status.\n";
+            std::cout << "Use 'edgelink-client down' to stop.\n";
+            std::cout << "Use 'edgelink-client up --foreground' to run in foreground instead.\n";
+            return 0;
+        }
+
+        // Get executable path
+        std::filesystem::path exe_path;
+#ifdef _WIN32
+        wchar_t path_buf[MAX_PATH];
+        GetModuleFileNameW(nullptr, path_buf, MAX_PATH);
+        exe_path = path_buf;
+#else
+        exe_path = std::filesystem::canonical("/proc/self/exe");
+#endif
+
+        // Install service if not installed
+        if (svc_status == ServiceStatus::NOT_INSTALLED) {
+            std::cout << "Installing EdgeLink client service...\n";
+            if (!ServiceManager::install(exe_path)) {
+                std::cerr << "Error: Failed to install service: " << ServiceManager::last_error() << "\n";
+                std::cerr << "Try running with administrator/root privileges.\n";
+                std::cerr << "Or use --foreground to run without service installation.\n";
+                return 1;
+            }
+            std::cout << "Service installed successfully.\n";
+        }
+
+        // Start the service
+        std::cout << "Starting EdgeLink client service...\n";
+        if (!ServiceManager::start()) {
+            std::cerr << "Error: Failed to start service: " << ServiceManager::last_error() << "\n";
+            return 1;
+        }
+
+        std::cout << "EdgeLink client service started.\n";
+        std::cout << "Use 'edgelink-client status' to view status.\n";
+        std::cout << "Use 'edgelink-client down' to stop.\n";
+        return 0;
+    }
+
+    // Foreground mode: run directly in this process
+    std::cout << "Running in foreground mode...\n";
 
     // Setup logging with new system
     setup_logging(cfg.log_level, cfg.log_file, cfg.module_log_levels);
@@ -1185,6 +1465,11 @@ int main(int argc, char* argv[]) {
     // Handle 'down' command
     if (command == "down") {
         return cmd_down(argc - 2, argv + 2);
+    }
+
+    // Handle 'set' command
+    if (command == "set") {
+        return cmd_set(argc - 2, argv + 2);
     }
 
     // Handle 'status' command

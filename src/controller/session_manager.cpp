@@ -2,6 +2,8 @@
 #include "controller/session.hpp"
 #include "common/logger.hpp"
 #include "common/message.hpp"
+#include "common/frame.hpp"
+#include "common/proto_convert.hpp"
 
 namespace edgelink::controller {
 
@@ -183,7 +185,13 @@ asio::awaitable<void> SessionManager::broadcast_config_update(NetworkId network_
             update.add_peers.push_back(peer);
         }
 
-        co_await session->send_frame(FrameType::CONFIG_UPDATE, update.serialize());
+        // Convert to protobuf and send
+        pb::ConfigUpdate pb_update;
+        to_proto(update, &pb_update);
+        auto result = FrameCodec::encode_protobuf(FrameType::CONFIG_UPDATE, pb_update);
+        if (result) {
+            co_await session->send_raw(*result);
+        }
         ++sent_count;
     }
 
@@ -215,8 +223,13 @@ asio::awaitable<void> SessionManager::notify_peer_status(NodeId target_node, Nod
     peer_info.name = peer->hostname;
     update.add_peers.push_back(peer_info);
 
-    auto payload = update.serialize();
-    co_await session->send_frame(FrameType::CONFIG_UPDATE, payload);
+    // Convert to protobuf and send
+    pb::ConfigUpdate pb_update;
+    to_proto(update, &pb_update);
+    auto result = FrameCodec::encode_protobuf(FrameType::CONFIG_UPDATE, pb_update);
+    if (result) {
+        co_await session->send_raw(*result);
+    }
 }
 
 asio::awaitable<void> SessionManager::broadcast_route_update(
@@ -236,14 +249,21 @@ asio::awaitable<void> SessionManager::broadcast_route_update(
     update.version = version;
     update.add_routes = add_routes;
     update.del_routes = del_routes;
-    auto payload = update.serialize();
+
+    pb::RouteUpdate pb_update;
+    to_proto(update, &pb_update);
+    auto result = FrameCodec::encode_protobuf(FrameType::ROUTE_UPDATE, pb_update);
+    if (!result) {
+        log().error("Failed to encode ROUTE_UPDATE");
+        co_return;
+    }
 
     for (const auto& session : sessions) {
         if (session->node_id() == except_node) {
             continue;
         }
 
-        co_await session->send_frame(FrameType::ROUTE_UPDATE, payload);
+        co_await session->send_raw(*result);
         ++sent_count;
     }
 

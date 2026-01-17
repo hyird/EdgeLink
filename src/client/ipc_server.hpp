@@ -149,6 +149,7 @@ private:
     std::string handle_config_set(const std::string& key, const std::string& value);
     std::string handle_config_list();
     std::string handle_config_reload();
+    std::string handle_prefs_update();
 
     // JSON encoding helpers
     std::string encode_status_response(IpcStatus status, const IpcStatusResponse& data);
@@ -203,6 +204,7 @@ public:
     std::string config_set(const std::string& key, const std::string& value);
     std::string config_list();
     std::string config_reload();
+    std::string prefs_update();
 
 private:
     std::string socket_path_;

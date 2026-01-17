@@ -13,6 +13,8 @@ std::string frame_error_message(FrameError error) {
         case FrameError::PAYLOAD_TOO_LARGE: return "Payload too large";
         case FrameError::DECOMPRESSION_FAILED: return "Decompression failed";
         case FrameError::INVALID_FRAGMENT: return "Invalid fragment header";
+        case FrameError::PROTOBUF_SERIALIZE_FAILED: return "Protobuf serialization failed";
+        case FrameError::PROTOBUF_PARSE_FAILED: return "Protobuf parsing failed";
         default: return "Unknown error";
     }
 }

@@ -4,6 +4,7 @@
 #include "common/logger.hpp"
 #include "common/frame.hpp"
 #include "common/message.hpp"
+#include "common/proto_convert.hpp"
 #include "common/performance_monitor.hpp"
 
 #include <chrono>
@@ -272,13 +273,18 @@ asio::awaitable<void> P2PManagerActor::handle_send_data_cmd(const P2PManagerCmd&
     }
 
     // 构造 DATA 帧
-    DataPayload data_payload;
-    data_payload.src_node = crypto_.node_id();
-    data_payload.nonce = nonce;
-    data_payload.encrypted_payload = std::move(*encrypted);
+    pb::DataPayload data_payload;
+    data_payload.set_src_node(crypto_.node_id());
+    data_payload.set_dst_node(cmd.peer_id);
+    data_payload.set_nonce(nonce.data(), nonce.size());
+    data_payload.set_encrypted_payload(encrypted->data(), encrypted->size());
 
-    auto frame_data = data_payload.serialize();
-    auto frame = FrameCodec::encode(FrameType::DATA, frame_data);
+    auto frame_result = FrameCodec::encode_protobuf(FrameType::DATA, data_payload);
+    if (!frame_result) {
+        log().error("[{}] Failed to encode DATA frame", name_);
+        co_return;
+    }
+    auto& frame = *frame_result;
 
     // 发送
     try {
@@ -388,39 +394,50 @@ void P2PManagerActor::handle_udp_packet(const asio::ip::udp::endpoint& from,
     // 根据帧类型处理
     switch (frame.header.type) {
         case FrameType::P2P_PING: {
-            auto ping = P2PPing::parse(frame.payload);
-            if (ping) {
-                handle_p2p_ping(from, *ping);
+            auto pb_ping = FrameCodec::decode_protobuf<pb::P2PPing>(frame.data());
+            if (pb_ping) {
+                P2PPing ping;
+                from_proto(*pb_ping, &ping);
+                handle_p2p_ping(from, ping);
             }
             break;
         }
 
         case FrameType::P2P_PONG: {
-            auto pong = P2PPing::parse(frame.payload);
-            if (pong) {
-                handle_p2p_pong(from, *pong);
+            auto pb_pong = FrameCodec::decode_protobuf<pb::P2PPong>(frame.data());
+            if (pb_pong) {
+                P2PPing pong;
+                from_proto_pong(*pb_pong, &pong);
+                handle_p2p_pong(from, pong);
             }
             break;
         }
 
         case FrameType::P2P_KEEPALIVE: {
-            // 从帧中提取 NodeId（简化：假设在 payload 的前 4 字节）
-            if (frame.payload.size() >= 4) {
-                NodeId peer_id = (static_cast<uint32_t>(frame.payload[0]) << 24) |
-                                 (static_cast<uint32_t>(frame.payload[1]) << 16) |
-                                 (static_cast<uint32_t>(frame.payload[2]) << 8) |
-                                 static_cast<uint32_t>(frame.payload[3]);
-
+            auto pb_keepalive = FrameCodec::decode_protobuf<pb::P2PKeepalive>(frame.data());
+            if (pb_keepalive) {
                 P2PKeepalive keepalive;
+                from_proto(*pb_keepalive, &keepalive);
+                // 从 keepalive 中没有 peer_id，使用 frame 前 4 字节
+                NodeId peer_id = 0;
+                if (frame.payload.size() >= 4) {
+                    peer_id = (static_cast<uint32_t>(frame.payload[0]) << 24) |
+                              (static_cast<uint32_t>(frame.payload[1]) << 16) |
+                              (static_cast<uint32_t>(frame.payload[2]) << 8) |
+                              static_cast<uint32_t>(frame.payload[3]);
+                }
                 handle_p2p_keepalive(from, peer_id, keepalive);
             }
             break;
         }
 
         case FrameType::DATA: {
-            auto data_payload = DataPayload::parse(frame.payload);
-            if (data_payload) {
-                handle_p2p_data(from, data_payload->src_node, data_payload->encrypted_payload);
+            // Use protobuf DataPayload
+            auto pb_data = FrameCodec::decode_protobuf<pb::DataPayload>(frame.data());
+            if (pb_data) {
+                DataPayload data_payload;
+                from_proto(*pb_data, &data_payload);
+                handle_p2p_data(from, data_payload.src_node, data_payload.encrypted_payload);
             }
             break;
         }
@@ -622,8 +639,13 @@ asio::awaitable<void> P2PManagerActor::send_p2p_ping(NodeId peer_id,
     ping.seq_num = ++ctx.ping_seq;
     ping.timestamp = now_us();
 
-    auto ping_data = ping.serialize();
-    auto frame = FrameCodec::encode(FrameType::P2P_PING, ping_data);
+    pb::P2PPing pb_ping;
+    to_proto(ping, &pb_ping);
+    auto frame_result = FrameCodec::encode_protobuf(FrameType::P2P_PING, pb_ping);
+    if (!frame_result) {
+        co_return;
+    }
+    auto& frame = *frame_result;
 
     // 发送
     try {
@@ -643,13 +665,18 @@ asio::awaitable<void> P2PManagerActor::send_p2p_ping(NodeId peer_id,
 }
 
 void P2PManagerActor::send_p2p_pong(const P2PPing& ping, const asio::ip::udp::endpoint& to) {
-    // 构造 PONG（使用相同的序列号）
+    // 构造 PONG（使用相同的序列号）- protobuf
     P2PPing pong;
     pong.seq_num = ping.seq_num;
     pong.timestamp = now_us();
 
-    auto pong_data = pong.serialize();
-    auto frame = FrameCodec::encode(FrameType::P2P_PONG, pong_data);
+    pb::P2PPong pb_pong;
+    to_proto_pong(pong, &pb_pong);
+    auto frame_result = FrameCodec::encode_protobuf(FrameType::P2P_PONG, pb_pong);
+    if (!frame_result) {
+        return;
+    }
+    auto& frame = *frame_result;
 
     // 异步发送（不等待）
     udp_socket_->async_send_to(

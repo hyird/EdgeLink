@@ -3,6 +3,8 @@
 #include "client/control_channel_actor.hpp"
 #include "common/logger.hpp"
 #include "common/frame.hpp"
+#include "common/proto_convert.hpp"  // Proto conversion helpers (includes edgelink.pb.h)
+#include "common/auth_proto_helpers.hpp"  // Auth protobuf helpers
 
 #include <chrono>
 
@@ -229,17 +231,18 @@ asio::awaitable<void> ControlChannelActor::handle_send_ping_cmd() {
     }
 
     // 构造 PING 消息
-    Ping ping;
-    ping.seq_num = ++ping_seq_;
-    ping.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+    pb::Ping ping;
+    ping.set_seq_num(++ping_seq_);
+    uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    ping.set_timestamp(now);
 
-    last_ping_time_ = ping.timestamp;
+    last_ping_time_ = now;
 
-    auto payload = ping.serialize();
-    co_await send_frame(FrameType::PING, payload);
-
-    log.debug("[{}] Sent PING seq={}", name_, ping.seq_num);
+    auto result = FrameCodec::encode_protobuf(FrameType::PING, ping);
+    if (result) {
+        co_await send_raw(*result);
+    }
 }
 
 asio::awaitable<void> ControlChannelActor::handle_send_endpoint_update_cmd(const ControlChannelCmd& cmd) {
@@ -260,8 +263,12 @@ asio::awaitable<void> ControlChannelActor::handle_send_endpoint_update_cmd(const
     pending_endpoints_ = cmd.endpoints;
     endpoint_ack_pending_ = true;
 
-    auto payload = update.serialize();
-    co_await send_frame(FrameType::ENDPOINT_UPDATE, payload);
+    pb::EndpointUpdate pb_update;
+    to_proto(update, &pb_update);
+    auto result = FrameCodec::encode_protobuf(FrameType::ENDPOINT_UPDATE, pb_update);
+    if (result) {
+        co_await send_raw(*result);
+    }
 
     log.debug("[{}] Sent ENDPOINT_UPDATE request_id={}, {} endpoints",
               name_, update.request_id, cmd.endpoints.size());
@@ -275,8 +282,13 @@ asio::awaitable<void> ControlChannelActor::handle_send_p2p_init_cmd(const Contro
         co_return;
     }
 
-    auto payload = cmd.p2p_init.serialize();
-    co_await send_frame(FrameType::P2P_INIT, payload);
+    // Use protobuf
+    pb::P2PInit pb_init;
+    to_proto(cmd.p2p_init, &pb_init);
+    auto result = FrameCodec::encode_protobuf(FrameType::P2P_INIT, pb_init);
+    if (result) {
+        co_await send_raw(*result);
+    }
 
     log.debug("[{}] Sent P2P_INIT to peer={}", name_, cmd.p2p_init.target_node);
 }
@@ -293,8 +305,12 @@ asio::awaitable<void> ControlChannelActor::handle_send_route_announce_cmd(const 
     announce.request_id = ++route_request_id_;
     announce.routes = cmd.routes;
 
-    auto payload = announce.serialize();
-    co_await send_frame(FrameType::ROUTE_ANNOUNCE, payload);
+    pb::RouteAnnounce pb_announce;
+    to_proto(announce, &pb_announce);
+    auto result = FrameCodec::encode_protobuf(FrameType::ROUTE_ANNOUNCE, pb_announce);
+    if (result) {
+        co_await send_raw(*result);
+    }
 
     log.debug("[{}] Sent ROUTE_ANNOUNCE: {} routes", name_, cmd.routes.size());
 }
@@ -416,30 +432,36 @@ asio::awaitable<bool> ControlChannelActor::connect_websocket(
         conn_state_ = ControlChannelState::AUTHENTICATING;
 
         // 构造并发送 AUTH_REQUEST
-        AuthRequest req;
-        req.auth_type = AuthType::AUTHKEY;
-        req.machine_key = crypto_.machine_key().public_key;
-        req.node_key = crypto_.node_key().public_key;
-        req.hostname = get_hostname();
-        req.os = get_os_name();
-        req.arch = get_arch();
-        req.version = "1.0.0";
-        req.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        req.auth_data = std::vector<uint8_t>(authkey.begin(), authkey.end());
+        pb::AuthRequest req;
+        req.set_auth_type(pb::AUTH_TYPE_AUTHKEY);
+        req.set_machine_key(crypto_.machine_key().public_key.data(),
+                           crypto_.machine_key().public_key.size());
+        req.set_node_key(crypto_.node_key().public_key.data(),
+                        crypto_.node_key().public_key.size());
+        req.set_hostname(get_hostname());
+        req.set_os(get_os_name());
+        req.set_arch(get_arch());
+        req.set_version("1.0.0");
+        req.set_timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        req.set_auth_data(authkey);
 
         // 签名请求
-        auto sign_data = req.get_sign_data();
+        auto sign_data = get_auth_sign_data(req);
         auto sig = crypto_.sign(sign_data);
         if (!sig) {
             log.error("[{}] Failed to sign AUTH_REQUEST", name_);
             co_return false;
         }
-        req.signature = std::move(*sig);
+        req.set_signature(sig->data(), sig->size());
 
         // 发送认证请求
-        auto payload = req.serialize();
-        co_await send_frame(FrameType::AUTH_REQUEST, payload);
+        auto result = FrameCodec::encode_protobuf(FrameType::AUTH_REQUEST, req);
+        if (!result) {
+            log.error("[{}] Failed to encode AUTH_REQUEST", name_);
+            co_return false;
+        }
+        co_await send_raw(*result);
 
         // 启动读写循环
         read_loop_running_ = true;
@@ -611,7 +633,6 @@ asio::awaitable<void> ControlChannelActor::send_raw(std::span<const uint8_t> dat
 
 asio::awaitable<void> ControlChannelActor::handle_frame(const Frame& frame) {
     auto& log = Logger::get("ControlChannelActor");
-    log.debug("[{}] Received {} frame", name_, frame_type_name(frame.header.type));
 
     switch (frame.header.type) {
         case FrameType::AUTH_RESPONSE:
@@ -659,36 +680,49 @@ asio::awaitable<void> ControlChannelActor::handle_frame(const Frame& frame) {
 asio::awaitable<void> ControlChannelActor::handle_auth_response(const Frame& frame) {
     auto& log = Logger::get("ControlChannelActor");
 
-    auto resp = AuthResponse::parse(frame.payload);
-    if (!resp) {
-        log.error("[{}] Failed to parse AUTH_RESPONSE", name_);
+    // 使用 protobuf 解析 AUTH_RESPONSE
+    auto pb_resp = FrameCodec::decode_protobuf<pb::AuthResponse>(frame.data());
+    if (!pb_resp) {
+        log.error("[{}] Failed to parse AUTH_RESPONSE: {}",
+                  name_, frame_error_message(pb_resp.error()));
         co_return;
     }
 
-    if (!resp->success) {
+    if (!pb_resp->success()) {
         log.error("[{}] Authentication failed: {} (code {})",
-                  name_, resp->error_msg, resp->error_code);
+                  name_, pb_resp->error_msg(), pb_resp->error_code());
 
         ControlChannelEvent event;
         event.type = CtrlEventType::CTRL_ERROR;
-        event.error_code = resp->error_code;
-        event.reason = resp->error_msg;
+        event.error_code = static_cast<uint16_t>(pb_resp->error_code());
+        event.reason = pb_resp->error_msg();
         send_event(event);
         co_return;
     }
 
     // 保存认证信息
-    node_id_ = resp->node_id;
-    network_id_ = resp->network_id;
-    virtual_ip_ = resp->virtual_ip;
+    node_id_ = pb_resp->node_id();
+    network_id_ = pb_resp->network_id();
+    from_proto(pb_resp->virtual_ip(), &virtual_ip_);
     // subnet_mask 会在 CONFIG 中获取
-    auth_token_ = resp->auth_token;
-    relay_token_ = resp->relay_token;
+    auth_token_ = std::vector<uint8_t>(pb_resp->auth_token().begin(), pb_resp->auth_token().end());
+    relay_token_ = std::vector<uint8_t>(pb_resp->relay_token().begin(), pb_resp->relay_token().end());
 
     crypto_.set_node_id(node_id_);
 
     log.info("[{}] Authenticated as node {} with IP {}",
              name_, node_id_, virtual_ip_.to_string());
+
+    // 转换为 C++ 类型用于事件
+    AuthResponse cpp_resp;
+    cpp_resp.success = pb_resp->success();
+    cpp_resp.node_id = pb_resp->node_id();
+    from_proto(pb_resp->virtual_ip(), &cpp_resp.virtual_ip);
+    cpp_resp.network_id = pb_resp->network_id();
+    cpp_resp.auth_token = auth_token_;
+    cpp_resp.relay_token = relay_token_;
+    cpp_resp.error_code = static_cast<uint16_t>(pb_resp->error_code());
+    cpp_resp.error_msg = pb_resp->error_msg();
 
     // 发送认证响应事件
     ControlChannelEvent event;
@@ -696,28 +730,33 @@ asio::awaitable<void> ControlChannelActor::handle_auth_response(const Frame& fra
     event.node_id = node_id_;
     event.virtual_ip = virtual_ip_;
     event.relay_token = relay_token_;
-    event.auth_response = *resp;
+    event.auth_response = cpp_resp;
     send_event(event);
 }
 
 asio::awaitable<void> ControlChannelActor::handle_config(const Frame& frame) {
     auto& log = Logger::get("ControlChannelActor");
 
-    auto config = Config::parse(frame.payload);
-    if (!config) {
-        log.error("[{}] Failed to parse CONFIG", name_);
+    // Use protobuf Config message
+    auto pb_config = FrameCodec::decode_protobuf<pb::Config>(frame.data());
+    if (!pb_config) {
+        log.error("[{}] Failed to parse CONFIG: {}", name_, frame_error_message(pb_config.error()));
         co_return;
     }
 
+    // Convert to C++ Config
+    Config config;
+    from_proto(*pb_config, &config);
+
     log.info("[{}] Received CONFIG v{} with {} peers",
-             name_, config->version, config->peers.size());
+             name_, config.version, config.peers.size());
 
     // 更新子网掩码
-    subnet_mask_ = config->subnet_mask;
+    subnet_mask_ = config.subnet_mask;
 
     // 更新 relay token（如果存在）
-    if (!config->relay_token.empty()) {
-        relay_token_ = config->relay_token;
+    if (!config.relay_token.empty()) {
+        relay_token_ = config.relay_token;
     }
 
     // 标记为已连接
@@ -726,7 +765,7 @@ asio::awaitable<void> ControlChannelActor::handle_config(const Frame& frame) {
     // 发送配置接收事件
     ControlChannelEvent event;
     event.type = CtrlEventType::CONFIG_RECEIVED;
-    event.config = *config;
+    event.config = config;
     send_event(event);
 
     // 发送连接成功事件
@@ -738,14 +777,19 @@ asio::awaitable<void> ControlChannelActor::handle_config(const Frame& frame) {
 asio::awaitable<void> ControlChannelActor::handle_config_update(const Frame& frame) {
     auto& log = Logger::get("ControlChannelActor");
 
-    auto update = ConfigUpdate::parse(frame.payload);
-    if (!update) {
-        log.error("[{}] Failed to parse CONFIG_UPDATE", name_);
+    // Use protobuf ConfigUpdate message
+    auto pb_update = FrameCodec::decode_protobuf<pb::ConfigUpdate>(frame.data());
+    if (!pb_update) {
+        log.error("[{}] Failed to parse CONFIG_UPDATE: {}", name_, frame_error_message(pb_update.error()));
         co_return;
     }
 
+    // Convert to C++ ConfigUpdate
+    ConfigUpdate update;
+    from_proto(*pb_update, &update);
+
     log.info("[{}] Received CONFIG_UPDATE v{} with {} added, {} removed peers",
-             name_, update->version, update->add_peers.size(), update->del_peer_ids.size());
+             name_, update.version, update.add_peers.size(), update.del_peer_ids.size());
 
     // 发送配置更新事件
     ControlChannelEvent event;
@@ -757,68 +801,77 @@ asio::awaitable<void> ControlChannelActor::handle_config_update(const Frame& fra
 asio::awaitable<void> ControlChannelActor::handle_route_update(const Frame& frame) {
     auto& log = Logger::get("ControlChannelActor");
 
-    auto update = RouteUpdate::parse(frame.payload);
-    if (!update) {
-        log.error("[{}] Failed to parse ROUTE_UPDATE", name_);
+    auto pb_update = FrameCodec::decode_protobuf<pb::RouteUpdate>(frame.data());
+    if (!pb_update) {
+        log.error("[{}] Failed to parse ROUTE_UPDATE: {}", name_, frame_error_message(pb_update.error()));
         co_return;
     }
+    RouteUpdate update;
+    from_proto(*pb_update, &update);
 
     log.info("[{}] Received ROUTE_UPDATE v{} with {} added, {} removed routes",
-             name_, update->version, update->add_routes.size(), update->del_routes.size());
+             name_, update.version, update.add_routes.size(), update.del_routes.size());
 
     // 发送路由更新事件
     ControlChannelEvent event;
     event.type = CtrlEventType::ROUTE_UPDATE;
-    event.route_update = *update;
+    event.route_update = update;
     send_event(event);
 }
 
 asio::awaitable<void> ControlChannelActor::handle_route_ack(const Frame& frame) {
     auto& log = Logger::get("ControlChannelActor");
 
-    auto ack = RouteAck::parse(frame.payload);
-    if (!ack) {
-        log.error("[{}] Failed to parse ROUTE_ACK", name_);
+    auto pb_ack = FrameCodec::decode_protobuf<pb::RouteAck>(frame.data());
+    if (!pb_ack) {
+        log.error("[{}] Failed to parse ROUTE_ACK: {}", name_, frame_error_message(pb_ack.error()));
         co_return;
     }
+    RouteAck ack;
+    from_proto(*pb_ack, &ack);
 
-    log.debug("[{}] Received ROUTE_ACK for request_id={}", name_, ack->request_id);
+    log.debug("[{}] Received ROUTE_ACK for request_id={}", name_, ack.request_id);
     // 路由确认不需要特殊处理
 }
 
 asio::awaitable<void> ControlChannelActor::handle_p2p_endpoint(const Frame& frame) {
     auto& log = Logger::get("ControlChannelActor");
 
-    auto msg = P2PEndpointMsg::parse(frame.payload);
-    if (!msg) {
+    auto pb_msg = FrameCodec::decode_protobuf<pb::P2PEndpoint>(frame.data());
+    if (!pb_msg) {
         log.error("[{}] Failed to parse P2P_ENDPOINT", name_);
         co_return;
     }
 
+    P2PEndpointMsg msg;
+    from_proto(*pb_msg, &msg);
+
     log.info("[{}] Received P2P_ENDPOINT for peer {} with {} endpoints",
-             name_, msg->peer_node, msg->endpoints.size());
+             name_, msg.peer_node, msg.endpoints.size());
 
     // 发送 P2P 端点事件
     ControlChannelEvent event;
     event.type = CtrlEventType::P2P_ENDPOINT;
-    event.p2p_endpoint = *msg;
+    event.p2p_endpoint = msg;
     send_event(event);
 }
 
 asio::awaitable<void> ControlChannelActor::handle_endpoint_ack(const Frame& frame) {
     auto& log = Logger::get("ControlChannelActor");
 
-    auto ack = EndpointAck::parse(frame.payload);
-    if (!ack) {
-        log.error("[{}] Failed to parse ENDPOINT_ACK", name_);
+    auto pb_ack = FrameCodec::decode_protobuf<pb::EndpointAck>(frame.data());
+    if (!pb_ack) {
+        log.error("[{}] Failed to parse ENDPOINT_ACK: {}", name_, frame_error_message(pb_ack.error()));
         co_return;
     }
+    EndpointAck ack;
+    from_proto(*pb_ack, &ack);
 
-    log.debug("[{}] Received ENDPOINT_ACK for request_id={}", name_, ack->request_id);
+    log.debug("[{}] Received ENDPOINT_ACK for request_id={}", name_, ack.request_id);
 
     // 清除待确认状态
     if (endpoint_ack_pending_.load() &&
-        pending_endpoint_request_id_ == ack->request_id) {
+        pending_endpoint_request_id_ == ack.request_id) {
         endpoint_ack_pending_ = false;
         log.debug("[{}] Endpoint update acknowledged", name_);
     }
@@ -827,37 +880,42 @@ asio::awaitable<void> ControlChannelActor::handle_endpoint_ack(const Frame& fram
 asio::awaitable<void> ControlChannelActor::handle_pong(const Frame& frame) {
     auto& log = Logger::get("ControlChannelActor");
 
-    auto pong = Pong::parse(frame.payload);
+    // 使用 protobuf 解析 PONG
+    auto pong = FrameCodec::decode_protobuf<pb::Pong>(frame.data());
     if (!pong) {
-        log.error("[{}] Failed to parse PONG", name_);
+        log.error("[{}] Failed to parse PONG: {}", name_, frame_error_message(pong.error()));
         co_return;
     }
 
     // 计算延迟
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    auto latency = now - pong->timestamp;
+    auto latency = now - pong->timestamp();
 
-    log.debug("[{}] Received PONG seq={}, latency={}ms",
-              name_, pong->seq_num, latency);
+    // Only log if latency is unusually high
+    if (latency > 500) {
+        log.warn("[{}] High latency: {}ms", name_, latency);
+    }
 }
 
 asio::awaitable<void> ControlChannelActor::handle_error(const Frame& frame) {
     auto& log = Logger::get("ControlChannelActor");
 
-    auto err = ErrorPayload::parse(frame.payload);
-    if (!err) {
-        log.error("[{}] Failed to parse FRAME_ERROR", name_);
+    auto pb_err = FrameCodec::decode_protobuf<pb::FrameError>(frame.data());
+    if (!pb_err) {
+        log.error("[{}] Failed to parse FRAME_ERROR: {}", name_, frame_error_message(pb_err.error()));
         co_return;
     }
+    ErrorPayload err;
+    from_proto(*pb_err, &err);
 
-    log.error("[{}] Received FRAME_ERROR: {} (code {})", name_, err->error_msg, err->error_code);
+    log.error("[{}] Received FRAME_ERROR: {} (code {})", name_, err.error_msg, err.error_code);
 
     // 发送错误事件
     ControlChannelEvent event;
     event.type = CtrlEventType::CTRL_ERROR;
-    event.error_code = err->error_code;
-    event.reason = err->error_msg;
+    event.error_code = err.error_code;
+    event.reason = err.error_msg;
     send_event(event);
 }
 

@@ -1,0 +1,638 @@
+// EdgeLink Protocol Buffer Definitions
+// This file defines all message types for the EdgeLink protocol.
+//
+// Frame format:
+// +--------+--------+--------+------------------+
+// | Type   | Flags  | Length | Protobuf Payload |
+// | 1 byte | 1 byte | 2 bytes| N bytes          |
+// +--------+--------+--------+------------------+
+
+syntax = "proto3";
+package edgelink.pb;
+
+option cc_enable_arenas = true;
+option optimize_for = SPEED;
+
+// ============================================================================
+// Constants (for reference, actual values in C++ code)
+// ============================================================================
+// ED25519_PUBLIC_KEY_SIZE = 32
+// ED25519_SIGNATURE_SIZE = 64
+// X25519_KEY_SIZE = 32
+// CHACHA20_NONCE_SIZE = 12
+// POLY1305_TAG_SIZE = 16
+// P2P_MAGIC = 0x454C4E4B ("ELNK")
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+// Authentication type
+enum AuthType {
+  AUTH_TYPE_UNKNOWN = 0;
+  AUTH_TYPE_USER = 1;
+  AUTH_TYPE_AUTHKEY = 2;
+  AUTH_TYPE_MACHINE = 3;
+}
+
+// IP address type
+enum IpType {
+  IP_TYPE_UNKNOWN = 0;
+  IP_TYPE_V4 = 4;
+  IP_TYPE_V6 = 6;
+}
+
+// Endpoint type
+enum EndpointType {
+  ENDPOINT_TYPE_UNKNOWN = 0;
+  ENDPOINT_TYPE_LAN = 1;
+  ENDPOINT_TYPE_STUN = 2;
+  ENDPOINT_TYPE_UPNP = 3;
+  ENDPOINT_TYPE_RELAY = 4;
+}
+
+// Path type for routing
+enum PathType {
+  PATH_TYPE_UNKNOWN = 0;
+  PATH_TYPE_LAN = 1;
+  PATH_TYPE_STUN = 2;
+  PATH_TYPE_RELAY = 3;
+}
+
+// P2P connection status
+enum P2PStatus {
+  P2P_STATUS_DISCONNECTED = 0;
+  P2P_STATUS_P2P = 1;
+  P2P_STATUS_RELAY_ONLY = 2;
+}
+
+// Config update flags (bitmask)
+enum ConfigUpdateFlags {
+  CONFIG_UPDATE_FLAGS_NONE = 0;
+  CONFIG_UPDATE_FLAGS_RELAY_CHANGED = 1;
+  CONFIG_UPDATE_FLAGS_PEER_CHANGED = 2;
+  CONFIG_UPDATE_FLAGS_ROUTE_CHANGED = 4;
+  CONFIG_UPDATE_FLAGS_TOKEN_REFRESH = 8;
+  CONFIG_UPDATE_FLAGS_FULL_SYNC = 16;
+}
+
+// Route flags (bitmask)
+enum RouteFlags {
+  ROUTE_FLAGS_NONE = 0;
+  ROUTE_FLAGS_ENABLED = 1;
+  ROUTE_FLAGS_PRIMARY = 2;
+  ROUTE_FLAGS_EXIT_NODE = 4;
+  ROUTE_FLAGS_AUTO = 8;
+}
+
+// Config ACK status
+enum ConfigAckStatus {
+  CONFIG_ACK_STATUS_SUCCESS = 0;
+  CONFIG_ACK_STATUS_PARTIAL_FAILURE = 1;
+  CONFIG_ACK_STATUS_TOTAL_FAILURE = 2;
+}
+
+// Config error item type
+enum ConfigErrorItemType {
+  CONFIG_ERROR_ITEM_TYPE_UNKNOWN = 0;
+  CONFIG_ERROR_ITEM_TYPE_RELAY = 1;
+  CONFIG_ERROR_ITEM_TYPE_PEER = 2;
+  CONFIG_ERROR_ITEM_TYPE_ROUTE = 3;
+}
+
+// Data ACK flags (bitmask)
+enum DataAckFlags {
+  DATA_ACK_FLAGS_SUCCESS = 0;
+  DATA_ACK_FLAGS_DECRYPT_FAILED = 2;
+  DATA_ACK_FLAGS_DUPLICATE = 4;
+}
+
+// ============================================================================
+// Basic Types
+// ============================================================================
+
+// IPv4 address (4 bytes, network byte order)
+message IPv4Address {
+  fixed32 addr = 1;
+}
+
+// Network endpoint
+message Endpoint {
+  EndpointType type = 1;
+  IpType ip_type = 2;
+  bytes address = 3;        // 4 bytes for IPv4, 16 bytes for IPv6
+  uint32 port = 4;
+  uint32 priority = 5;
+}
+
+// Subnet information
+message SubnetInfo {
+  IpType ip_type = 1;
+  bytes prefix = 2;         // 4 bytes for IPv4, 16 bytes for IPv6
+  uint32 prefix_len = 3;
+}
+
+// Route information
+message RouteInfo {
+  IpType ip_type = 1;
+  bytes prefix = 2;
+  uint32 prefix_len = 3;
+  uint32 gateway_node = 4;  // NodeId
+  uint32 metric = 5;
+  uint32 flags = 6;         // RouteFlags bitmask
+}
+
+// Peer information
+message PeerInfo {
+  uint32 node_id = 1;
+  IPv4Address virtual_ip = 2;
+  bytes node_key = 3;                   // X25519 public key (32 bytes)
+  bool online = 4;
+  bool exit_node = 5;
+  string name = 6;
+  repeated Endpoint endpoints = 7;
+  repeated SubnetInfo allowed_subnets = 8;
+}
+
+// Relay server information
+message RelayInfo {
+  uint32 server_id = 1;
+  string hostname = 2;
+  repeated Endpoint endpoints = 3;
+  uint32 priority = 4;
+  string region = 5;
+}
+
+// STUN server information
+message StunInfo {
+  string hostname = 1;
+  uint32 port = 2;
+}
+
+// Latency measurement entry
+message LatencyEntry {
+  uint32 server_id = 1;
+  uint32 latency_ms = 2;
+  uint32 jitter_ms = 3;
+  uint32 packet_loss = 4;   // 0-100 percentage
+}
+
+// ============================================================================
+// Authentication Messages (0x01-0x04, 0x60-0x61)
+// ============================================================================
+
+// AUTH_REQUEST (0x01) - Client authentication request
+message AuthRequest {
+  AuthType auth_type = 1;
+  bytes machine_key = 2;    // ED25519 public key (32 bytes)
+  bytes node_key = 3;       // X25519 public key (32 bytes)
+  string hostname = 4;
+  string os = 5;
+  string arch = 6;
+  string version = 7;
+  uint64 timestamp = 8;
+  uint32 connection_id = 9;
+  bool exit_node = 10;      // Declare as exit node
+  bytes signature = 11;     // ED25519 signature (64 bytes)
+  bytes auth_data = 12;     // Auth type specific data (e.g., authkey)
+}
+
+// AUTH_RESPONSE (0x02) - Controller authentication response
+message AuthResponse {
+  bool success = 1;
+  uint32 node_id = 2;
+  IPv4Address virtual_ip = 3;
+  uint32 network_id = 4;
+  bytes auth_token = 5;     // JWT token
+  bytes relay_token = 6;    // JWT token for relay auth
+  uint32 error_code = 7;
+  string error_msg = 8;
+}
+
+// AUTH_CHALLENGE (0x03) - Multi-factor authentication challenge
+message AuthChallenge {
+  uint32 challenge_type = 1;  // ChallengeType: 1=TOTP, 2=SMS, 3=EMAIL
+  bytes challenge_data = 2;
+  uint64 expires_at = 3;
+}
+
+// AUTH_VERIFY (0x04) - Challenge response verification
+message AuthVerify {
+  bytes response_data = 1;
+  bytes signature = 2;
+}
+
+// RELAY_AUTH (0x60) - Relay server authentication
+message RelayAuth {
+  bytes relay_token = 1;
+  uint32 node_id = 2;
+  bytes node_key = 3;       // X25519 public key (32 bytes)
+  uint32 connection_id = 4;
+}
+
+// RELAY_AUTH_RESP (0x61) - Relay authentication response
+message RelayAuthResp {
+  bool success = 1;
+  uint32 error_code = 2;
+  string error_msg = 3;
+}
+
+// ============================================================================
+// Configuration Messages (0x10-0x12)
+// ============================================================================
+
+// CONFIG (0x10) - Full configuration from controller
+message Config {
+  uint64 version = 1;
+  uint32 network_id = 2;
+  IPv4Address subnet = 3;
+  uint32 subnet_mask = 4;
+  string network_name = 5;
+  repeated RelayInfo relays = 6;
+  repeated StunInfo stuns = 7;
+  repeated PeerInfo peers = 8;
+  repeated RouteInfo routes = 9;
+  bytes relay_token = 10;
+  uint64 relay_token_expires = 11;
+}
+
+// CONFIG_UPDATE (0x11) - Incremental configuration update
+message ConfigUpdate {
+  uint64 version = 1;
+  uint32 update_flags = 2;              // ConfigUpdateFlags bitmask
+  repeated RelayInfo add_relays = 3;
+  repeated uint32 del_relay_ids = 4;
+  repeated PeerInfo add_peers = 5;
+  repeated uint32 del_peer_ids = 6;
+  repeated RouteInfo add_routes = 7;
+  repeated RouteInfo del_routes = 8;
+  bytes relay_token = 9;                // When TOKEN_REFRESH flag is set
+  uint64 relay_token_expires = 10;
+}
+
+// CONFIG_ACK (0x12) - Configuration acknowledgment
+message ConfigAck {
+  uint64 version = 1;
+  ConfigAckStatus status = 2;
+  repeated ConfigErrorItem errors = 3;
+}
+
+// Config error item detail
+message ConfigErrorItem {
+  ConfigErrorItemType item_type = 1;
+  uint32 item_id = 2;
+  uint32 error_code = 3;
+  string error_msg = 4;
+}
+
+// ============================================================================
+// Data Messages (0x20-0x21)
+// ============================================================================
+
+// DATA (0x20) - Encrypted data payload
+message DataPayload {
+  uint32 src_node = 1;
+  uint32 dst_node = 2;
+  bytes nonce = 3;              // ChaCha20 nonce (12 bytes)
+  bytes encrypted_payload = 4;  // Includes Poly1305 auth tag at the end
+}
+
+// DATA_ACK (0x21) - Data acknowledgment
+message DataAck {
+  uint32 src_node = 1;
+  uint32 dst_node = 2;
+  bytes ack_nonce = 3;          // Nonce being acknowledged
+  uint32 ack_flags = 4;         // DataAckFlags bitmask
+}
+
+// ============================================================================
+// Heartbeat Messages (0x30-0x37)
+// ============================================================================
+
+// PING (0x30) - Heartbeat ping
+message Ping {
+  uint64 timestamp = 1;
+  uint32 seq_num = 2;
+}
+
+// PONG (0x31) - Heartbeat pong (same structure as Ping)
+message Pong {
+  uint64 timestamp = 1;
+  uint32 seq_num = 2;
+}
+
+// LATENCY_REPORT (0x32) - Node latency report to controller
+message LatencyReport {
+  uint64 timestamp = 1;
+  repeated LatencyReportEntry entries = 2;
+}
+
+message LatencyReportEntry {
+  uint32 peer_node_id = 1;
+  uint32 latency_ms = 2;    // 0 = timeout/unreachable
+  uint32 path_type = 3;     // 0 = relay, 1 = p2p
+}
+
+// CONNECTION_METRICS (0x33) - Client connection metrics report
+message ConnectionMetrics {
+  uint64 timestamp = 1;
+  uint32 channel_type = 2;  // 0 = control, 1 = relay
+  repeated ConnectionMetricsEntry connections = 3;
+}
+
+message ConnectionMetricsEntry {
+  uint32 connection_id = 1;
+  uint32 rtt_ms = 2;
+  uint32 packet_loss = 3;   // 0-100 percentage
+  bool is_active = 4;
+}
+
+// PATH_SELECTION (0x34) - Controller path selection instruction
+message PathSelection {
+  uint32 preferred_connection_id = 1;
+  uint32 channel_type = 2;  // 0 = control, 1 = relay
+  string reason = 3;        // Debug info
+}
+
+// PEER_PATH_REPORT (0x35) - Client peer path latency report
+message PeerPathReport {
+  uint64 timestamp = 1;
+  repeated PeerPathReportEntry entries = 2;
+}
+
+message PeerPathReportEntry {
+  uint32 peer_node_id = 1;
+  uint32 relay_id = 2;      // 0 = P2P direct
+  uint32 connection_id = 3;
+  uint32 latency_ms = 4;
+  uint32 packet_loss = 5;   // 0-100 percentage
+}
+
+// PEER_ROUTING_UPDATE (0x36) - Controller peer routing update
+message PeerRoutingUpdate {
+  uint64 version = 1;
+  repeated PeerRoutingEntry routes = 2;
+}
+
+message PeerRoutingEntry {
+  uint32 peer_node_id = 1;
+  uint32 relay_id = 2;      // 0 = P2P direct
+  uint32 connection_id = 3;
+  uint32 priority = 4;      // 0 = highest
+}
+
+// RELAY_LATENCY_REPORT (0x37) - Client relay latency report
+message RelayLatencyReport {
+  uint64 timestamp = 1;
+  repeated RelayLatencyReportEntry entries = 2;
+}
+
+message RelayLatencyReportEntry {
+  uint32 relay_id = 1;
+  uint32 connection_id = 2;
+  uint32 latency_ms = 3;
+  uint32 packet_loss = 4;   // 0-100 percentage
+}
+
+// ============================================================================
+// Routing Messages (0x80-0x83)
+// ============================================================================
+
+// ROUTE_ANNOUNCE (0x80) - Node announces routable subnets
+message RouteAnnounce {
+  uint32 request_id = 1;
+  repeated RouteInfo routes = 2;
+}
+
+// ROUTE_UPDATE (0x81) - Controller pushes route updates
+message RouteUpdate {
+  uint64 version = 1;
+  repeated RouteInfo add_routes = 2;
+  repeated RouteInfo del_routes = 3;
+}
+
+// ROUTE_WITHDRAW (0x82) - Node withdraws route announcements
+message RouteWithdraw {
+  uint32 request_id = 1;
+  repeated RouteInfo routes = 2;
+}
+
+// ROUTE_ACK (0x83) - Route operation acknowledgment
+message RouteAck {
+  uint32 request_id = 1;
+  bool success = 2;
+  uint32 error_code = 3;
+  string error_msg = 4;
+}
+
+// ============================================================================
+// P2P Messages (0x40-0x47)
+// ============================================================================
+
+// P2P_INIT (0x40) - Request peer endpoints from controller
+message P2PInit {
+  uint32 target_node = 1;
+  uint32 init_seq = 2;
+}
+
+// P2P_ENDPOINT (0x41) - Controller returns peer endpoints
+message P2PEndpoint {
+  uint32 init_seq = 1;
+  uint32 peer_node = 2;
+  bytes peer_key = 3;               // X25519 public key (32 bytes)
+  repeated Endpoint endpoints = 4;
+}
+
+// P2P_PING (0x42) - UDP hole punching probe
+message P2PPing {
+  uint32 magic = 1;         // "ELNK" (0x454C4E4B)
+  uint32 src_node = 2;
+  uint32 dst_node = 3;
+  uint64 timestamp = 4;     // Microseconds
+  uint32 seq_num = 5;
+  bytes nonce = 6;          // Random nonce (12 bytes)
+  bytes signature = 7;      // ED25519 signature (64 bytes)
+}
+
+// P2P_PONG (0x43) - UDP hole punching response (same structure as P2PPing)
+message P2PPong {
+  uint32 magic = 1;
+  uint32 src_node = 2;
+  uint32 dst_node = 3;
+  uint64 timestamp = 4;
+  uint32 seq_num = 5;
+  bytes nonce = 6;
+  bytes signature = 7;
+}
+
+// P2P_KEEPALIVE (0x44) - P2P connection keepalive
+message P2PKeepalive {
+  uint64 timestamp = 1;
+  uint32 seq_num = 2;
+  uint32 flags = 3;         // 0x01 = request response, 0x02 = response
+  bytes mac = 4;            // Poly1305 MAC (16 bytes)
+}
+
+// P2P_STATUS (0x45) - Report P2P status to controller
+message P2PStatusMsg {
+  uint32 peer_node = 1;
+  P2PStatus status = 2;
+  uint32 latency_ms = 3;
+  PathType path_type = 4;
+}
+
+// ENDPOINT_UPDATE (0x46) - Client reports its endpoints
+message EndpointUpdate {
+  uint32 request_id = 1;
+  repeated Endpoint endpoints = 2;
+}
+
+// ENDPOINT_ACK (0x47) - Endpoint update acknowledgment
+message EndpointAck {
+  uint32 request_id = 1;
+  bool success = 2;
+  uint32 endpoint_count = 3;
+}
+
+// ============================================================================
+// Server Messages (0x50-0x56)
+// ============================================================================
+
+// SERVER_REGISTER (0x50) - Relay server registration
+message ServerRegister {
+  uint32 server_id = 1;
+  string hostname = 2;
+  repeated Endpoint endpoints = 3;
+  string region = 4;
+  uint32 capacity = 5;
+}
+
+// SERVER_REGISTER_RESP (0x51) - Registration response
+message ServerRegisterResp {
+  bool success = 1;
+  uint32 server_id = 2;
+  uint32 error_code = 3;
+  string error_msg = 4;
+}
+
+// SERVER_NODE_LOC (0x52) - Node location info
+message ServerNodeLoc {
+  uint32 node_id = 1;
+  uint32 server_id = 2;
+}
+
+// SERVER_BLACKLIST (0x53) - Blacklist nodes
+message ServerBlacklist {
+  repeated uint32 node_ids = 1;
+  uint32 duration_sec = 2;
+}
+
+// SERVER_HEARTBEAT (0x54) - Server heartbeat
+message ServerHeartbeat {
+  uint64 timestamp = 1;
+  uint32 active_connections = 2;
+  uint32 bandwidth_mbps = 3;
+}
+
+// SERVER_RELAY_LIST (0x55) - List of relay servers
+message ServerRelayList {
+  repeated RelayInfo relays = 1;
+}
+
+// SERVER_LATENCY_REPORT (0x56) - Server latency report
+message ServerLatencyReport {
+  uint64 timestamp = 1;
+  repeated LatencyEntry entries = 2;
+}
+
+// ============================================================================
+// Mesh Messages (0x70-0x74)
+// ============================================================================
+
+// MESH_HELLO (0x70) - Mesh server hello
+message MeshHello {
+  uint32 server_id = 1;
+  string region = 2;
+  uint32 protocol_version = 3;
+}
+
+// MESH_HELLO_ACK (0x71) - Mesh hello acknowledgment
+message MeshHelloAck {
+  bool accepted = 1;
+  uint32 server_id = 2;
+}
+
+// MESH_FORWARD (0x72) - Forward message through mesh
+message MeshForward {
+  uint32 src_server = 1;
+  uint32 dst_server = 2;
+  bytes payload = 3;
+}
+
+// MESH_PING (0x73) - Mesh ping
+message MeshPing {
+  uint64 timestamp = 1;
+  uint32 seq = 2;
+}
+
+// MESH_PONG (0x74) - Mesh pong
+message MeshPong {
+  uint64 timestamp = 1;
+  uint32 seq = 2;
+}
+
+// ============================================================================
+// Security Messages (0x90-0x92)
+// ============================================================================
+
+// NODE_REVOKE (0x90) - Revoke a node
+message NodeRevoke {
+  uint32 node_id = 1;
+  string reason = 2;
+  uint64 revoke_time = 3;
+}
+
+// NODE_REVOKE_ACK (0x91) - Revoke acknowledgment
+message NodeRevokeAck {
+  uint32 node_id = 1;
+  bool success = 2;
+}
+
+// NODE_REVOKE_BATCH (0x92) - Batch revoke nodes
+message NodeRevokeBatch {
+  repeated NodeRevoke revokes = 1;
+}
+
+// ============================================================================
+// Lifecycle Messages (0xA0-0xA1)
+// ============================================================================
+
+// SHUTDOWN_NOTIFY (0xA0) - Graceful shutdown notification
+message ShutdownNotify {
+  string reason = 1;
+  uint32 grace_period_sec = 2;
+}
+
+// SHUTDOWN_ACK (0xA1) - Shutdown acknowledgment
+message ShutdownAck {
+  bool acknowledged = 1;
+}
+
+// ============================================================================
+// Generic Messages (0xFE-0xFF)
+// ============================================================================
+
+// GENERIC_ACK (0xFE) - Generic acknowledgment
+message GenericAck {
+  uint32 request_type = 1;  // FrameType being acknowledged
+  uint32 request_id = 2;
+  uint32 status = 3;        // 0 = success
+}
+
+// FRAME_ERROR (0xFF) - Error response
+message FrameError {
+  uint32 error_code = 1;
+  uint32 request_type = 2;  // FrameType that caused the error
+  uint32 request_id = 3;
+  string error_msg = 4;
+}

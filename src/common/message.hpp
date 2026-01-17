@@ -15,6 +15,7 @@ enum class ParseError {
     INVALID_FORMAT,
     STRING_TOO_LONG,
     ARRAY_TOO_LARGE,
+    PROTOBUF_ERROR,
 };
 
 std::string parse_error_message(ParseError error);
@@ -37,12 +38,6 @@ struct AuthRequest {
     bool exit_node = false;          // 声明自己可作为出口节点
     std::array<uint8_t, ED25519_SIGNATURE_SIZE> signature{};
     std::vector<uint8_t> auth_data; // Content depends on auth_type
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<AuthRequest, ParseError> parse(std::span<const uint8_t> data);
-
-    // Get data to be signed (everything except signature itself)
-    std::vector<uint8_t> get_sign_data() const;
 };
 
 // AUTH_RESPONSE (0x02)
@@ -55,9 +50,6 @@ struct AuthResponse {
     std::vector<uint8_t> relay_token;  // JWT
     uint16_t error_code = 0;
     std::string error_msg;
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<AuthResponse, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // RELAY_AUTH (0x60)
@@ -66,9 +58,6 @@ struct RelayAuth {
     NodeId node_id = 0;
     std::array<uint8_t, X25519_KEY_SIZE> node_key{};
     ConnectionId connection_id = 0;  // 连接标识符（用于多路连接场景）
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<RelayAuth, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // RELAY_AUTH_RESP (0x61)
@@ -76,9 +65,6 @@ struct RelayAuthResp {
     bool success = false;
     uint16_t error_code = 0;
     std::string error_msg;
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<RelayAuthResp, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ============================================================================
@@ -98,9 +84,6 @@ struct Config {
     std::vector<RouteInfo> routes;
     std::vector<uint8_t> relay_token;
     uint64_t relay_token_expires = 0;
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<Config, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // CONFIG_UPDATE (0x11)
@@ -117,9 +100,6 @@ struct ConfigUpdate {
     // Optional: when TOKEN_REFRESH flag is set
     std::vector<uint8_t> relay_token;
     uint64_t relay_token_expires = 0;
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<ConfigUpdate, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // CONFIG_ACK (0x12)
@@ -133,9 +113,6 @@ struct ConfigAck {
         uint16_t error_code;
     };
     std::vector<ErrorItem> error_items;
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<ConfigAck, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ============================================================================
@@ -148,9 +125,6 @@ struct DataPayload {
     NodeId dst_node = 0;
     std::array<uint8_t, CHACHA20_NONCE_SIZE> nonce{};
     std::vector<uint8_t> encrypted_payload; // Includes auth_tag at the end
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<DataPayload, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // DATA_ACK (0x21)
@@ -159,9 +133,6 @@ struct DataAck {
     NodeId dst_node = 0;
     std::array<uint8_t, CHACHA20_NONCE_SIZE> ack_nonce{};
     DataAckFlags ack_flags = DataAckFlags::SUCCESS;
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<DataAck, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ============================================================================
@@ -172,9 +143,6 @@ struct DataAck {
 struct Ping {
     uint64_t timestamp = 0;
     uint32_t seq_num = 0;
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<Ping, ParseError> parse(std::span<const uint8_t> data);
 };
 
 using Pong = Ping; // Same structure
@@ -189,9 +157,6 @@ struct LatencyReportEntry {
 struct LatencyReport {
     uint64_t timestamp = 0;                      // 测量时间戳
     std::vector<LatencyReportEntry> entries;     // 延迟条目列表
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<LatencyReport, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // CONNECTION_METRICS (0x33) - Client 上报连接延迟指标
@@ -206,9 +171,6 @@ struct ConnectionMetrics {
     uint64_t timestamp = 0;                          // 测量时间戳
     uint8_t channel_type = 0;                        // 0 = control, 1 = relay
     std::vector<ConnectionMetricsEntry> connections; // 连接指标列表
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<ConnectionMetrics, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // PATH_SELECTION (0x34) - Controller 指示连接路径选择
@@ -216,9 +178,6 @@ struct PathSelection {
     ConnectionId preferred_connection_id = 0;  // 优选连接 ID
     uint8_t channel_type = 0;                  // 0 = control, 1 = relay
     std::string reason;                        // 选择原因（用于调试）
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<PathSelection, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // PEER_PATH_REPORT (0x35) - Client 上报到每个 Peer 经过每个 Relay 的延迟
@@ -233,9 +192,6 @@ struct PeerPathReportEntry {
 struct PeerPathReport {
     uint64_t timestamp = 0;                          // 测量时间戳
     std::vector<PeerPathReportEntry> entries;        // 延迟条目列表
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<PeerPathReport, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // PEER_ROUTING_UPDATE (0x36) - Controller 下发每个 Peer 的最优路径
@@ -249,9 +205,6 @@ struct PeerRoutingEntry {
 struct PeerRoutingUpdate {
     uint64_t version = 0;                           // 版本号（增量更新）
     std::vector<PeerRoutingEntry> routes;           // 路由条目列表
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<PeerRoutingUpdate, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // RELAY_LATENCY_REPORT (0x37) - Client 上报到每个 Relay 的延迟
@@ -265,9 +218,6 @@ struct RelayLatencyReportEntry {
 struct RelayLatencyReport {
     uint64_t timestamp = 0;                              // 测量时间戳
     std::vector<RelayLatencyReportEntry> entries;        // 延迟条目列表
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<RelayLatencyReport, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ============================================================================
@@ -280,9 +230,6 @@ struct ErrorPayload {
     FrameType request_type = FrameType::FRAME_ERROR;
     uint32_t request_id = 0;
     std::string error_msg;
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<ErrorPayload, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // GENERIC_ACK (0xFE)
@@ -290,9 +237,6 @@ struct GenericAck {
     FrameType request_type = FrameType::FRAME_ERROR;
     uint32_t request_id = 0;
     uint8_t status = 0;
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<GenericAck, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ============================================================================
@@ -303,9 +247,6 @@ struct GenericAck {
 struct RouteAnnounce {
     uint32_t request_id = 0;               // 请求 ID，用于 ACK 匹配
     std::vector<RouteInfo> routes;         // 公告的路由列表
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<RouteAnnounce, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ROUTE_UPDATE (0x81) - Controller 推送路由更新给节点
@@ -313,18 +254,12 @@ struct RouteUpdate {
     uint64_t version = 0;                  // 路由表版本号
     std::vector<RouteInfo> add_routes;     // 新增路由
     std::vector<RouteInfo> del_routes;     // 删除路由
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<RouteUpdate, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ROUTE_WITHDRAW (0x82) - 节点撤销路由公告
 struct RouteWithdraw {
     uint32_t request_id = 0;               // 请求 ID
     std::vector<RouteInfo> routes;         // 撤销的路由列表
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<RouteWithdraw, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ROUTE_ACK (0x83) - 路由操作确认
@@ -333,9 +268,6 @@ struct RouteAck {
     bool success = false;
     uint16_t error_code = 0;
     std::string error_msg;
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<RouteAck, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ============================================================================
@@ -346,9 +278,6 @@ struct RouteAck {
 struct P2PInit {
     NodeId target_node = 0;         // 目标节点 ID
     uint32_t init_seq = 0;          // 请求序列号
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<P2PInit, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // P2P_ENDPOINT (0x41) - Controller 返回对端端点列表
@@ -357,9 +286,6 @@ struct P2PEndpointMsg {
     NodeId peer_node = 0;           // 对端节点 ID
     std::array<uint8_t, X25519_KEY_SIZE> peer_key{};  // 对端公钥
     std::vector<Endpoint> endpoints; // 对端端点列表
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<P2PEndpointMsg, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // P2P_PING (0x42) / P2P_PONG (0x43) - UDP 打洞探测
@@ -371,9 +297,6 @@ struct P2PPing {
     uint32_t seq_num = 0;           // 序列号
     std::array<uint8_t, CHACHA20_NONCE_SIZE> nonce{};  // 随机数
     std::array<uint8_t, ED25519_SIGNATURE_SIZE> signature{};  // Ed25519 签名
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<P2PPing, ParseError> parse(std::span<const uint8_t> data);
 
     // 获取待签名数据
     std::vector<uint8_t> get_sign_data() const;
@@ -387,9 +310,6 @@ struct P2PKeepalive {
     uint32_t seq_num = 0;           // 序列号
     uint8_t flags = 0;              // 0x01 = 请求响应, 0x02 = 响应
     std::array<uint8_t, POLY1305_TAG_SIZE> mac{};  // Poly1305 MAC
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<P2PKeepalive, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // P2P_STATUS (0x45) - 上报 P2P 状态给 Controller
@@ -398,18 +318,12 @@ struct P2PStatusMsg {
     P2PStatus status = P2PStatus::DISCONNECTED;  // 连接状态
     uint16_t latency_ms = 0;        // 往返延迟（毫秒）
     PathType path_type = PathType::RELAY;  // 路径类型
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<P2PStatusMsg, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ENDPOINT_UPDATE (0x46) - 客户端上报自己的端点
 struct EndpointUpdate {
     uint32_t request_id = 0;          // 请求 ID，用于确认匹配
     std::vector<Endpoint> endpoints;  // 本节点的端点列表
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<EndpointUpdate, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ENDPOINT_ACK (0x47) - 端点上报确认
@@ -417,9 +331,6 @@ struct EndpointAck {
     uint32_t request_id = 0;          // 对应的请求 ID
     bool success = true;              // 是否成功
     uint8_t endpoint_count = 0;       // 收到的端点数量
-
-    std::vector<uint8_t> serialize() const;
-    static std::expected<EndpointAck, ParseError> parse(std::span<const uint8_t> data);
 };
 
 // ============================================================================

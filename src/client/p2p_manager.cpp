@@ -1,6 +1,7 @@
 #include "client/p2p_manager.hpp"
 #include "common/logger.hpp"
 #include "common/constants.hpp"
+#include "common/proto_convert.hpp"
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -858,23 +859,29 @@ void P2PManager::handle_udp_packet(const asio::ip::udp::endpoint& from,
 
     switch (pkt_type) {
         case P2P_TYPE_PING: {
-            auto result = P2PPing::parse(payload);
-            if (result) {
-                handle_p2p_ping(from, *result);
+            pb::P2PPing pb_ping;
+            if (pb_ping.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+                P2PPing ping;
+                from_proto(pb_ping, &ping);
+                handle_p2p_ping(from, ping);
             }
             break;
         }
         case P2P_TYPE_PONG: {
-            auto result = P2PPing::parse(payload);
-            if (result) {
-                handle_p2p_pong(from, *result);
+            pb::P2PPong pb_pong;
+            if (pb_pong.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+                P2PPing pong;
+                from_proto_pong(pb_pong, &pong);
+                handle_p2p_pong(from, pong);
             }
             break;
         }
         case P2P_TYPE_KEEPALIVE: {
-            auto result = P2PKeepalive::parse(payload);
-            if (result) {
-                handle_p2p_keepalive(from, src_node, *result);
+            pb::P2PKeepalive pb_keepalive;
+            if (pb_keepalive.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+                P2PKeepalive keepalive;
+                from_proto(pb_keepalive, &keepalive);
+                handle_p2p_keepalive(from, src_node, keepalive);
             }
             break;
         }
@@ -1064,7 +1071,12 @@ asio::awaitable<void> P2PManager::send_p2p_ping(NodeId peer_id,
         }
     }
 
-    auto payload = ping.serialize();
+    // Serialize using protobuf
+    pb::P2PPing pb_ping;
+    to_proto(ping, &pb_ping);
+    std::string serialized;
+    pb_ping.SerializeToString(&serialized);
+    std::vector<uint8_t> payload(serialized.begin(), serialized.end());
 
     // 构建完整帧
     std::vector<uint8_t> frame;
@@ -1110,7 +1122,12 @@ void P2PManager::send_p2p_pong(const P2PPing& ping,
     pong.timestamp = ping.timestamp;
     pong.seq_num = ping.seq_num;
 
-    auto payload = pong.serialize();
+    // Serialize using protobuf (P2PPong)
+    pb::P2PPong pb_pong;
+    to_proto_pong(pong, &pb_pong);
+    std::string serialized;
+    pb_pong.SerializeToString(&serialized);
+    std::vector<uint8_t> payload(serialized.begin(), serialized.end());
 
     std::vector<uint8_t> frame;
     frame.reserve(P2P_FRAME_HEADER_SIZE + payload.size());
@@ -1164,7 +1181,12 @@ asio::awaitable<void> P2PManager::send_p2p_keepalive(NodeId peer_id) {
     keepalive.seq_num = 0;
     keepalive.flags = 0x01;
 
-    auto payload = keepalive.serialize();
+    // Serialize using protobuf
+    pb::P2PKeepalive pb_keepalive;
+    to_proto(keepalive, &pb_keepalive);
+    std::string serialized;
+    pb_keepalive.SerializeToString(&serialized);
+    std::vector<uint8_t> payload(serialized.begin(), serialized.end());
 
     std::vector<uint8_t> frame;
     frame.reserve(P2P_FRAME_HEADER_SIZE + payload.size());

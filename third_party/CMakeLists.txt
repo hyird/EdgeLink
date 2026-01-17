@@ -63,6 +63,12 @@ message(STATUS "Fetching Boost...")
 include(${CMAKE_CURRENT_LIST_DIR}/boost.cmake)
 
 # =============================================================================
+# 7. Protocol Buffers (message serialization)
+# =============================================================================
+message(STATUS "Fetching Protobuf...")
+include(${CMAKE_CURRENT_LIST_DIR}/protobuf.cmake)
+
+# =============================================================================
 # Thread support (system)
 # =============================================================================
 find_package(Threads REQUIRED)

@@ -409,7 +409,8 @@ asio::awaitable<void> Client::ctrl_config_handler() {
                     if (exit_peer) {
                         // 创建默认路由 0.0.0.0/0 via exit_peer
                         RouteInfo default_route;
-                        default_route.subnet = IPv4Address{0, 0, 0, 0};
+                        default_route.ip_type = IpType::IPv4;
+                        // prefix 默认初始化为 0，即 0.0.0.0
                         default_route.prefix_len = 0;
                         default_route.gateway_node = exit_peer->node_id;
                         default_route.metric = 100;
@@ -491,7 +492,8 @@ asio::awaitable<void> Client::ctrl_config_update_handler() {
                 // 检查离线的 peer 是否是当前使用的出口节点
                 if (route_mgr_ && current_exit_node_id_ == peer_id) {
                     RouteInfo default_route;
-                    default_route.subnet = IPv4Address{0, 0, 0, 0};
+                    default_route.ip_type = IpType::IPv4;
+                    // prefix 默认初始化为 0，即 0.0.0.0
                     default_route.prefix_len = 0;
                     default_route.gateway_node = peer_id;
                     default_route.metric = 100;
@@ -541,7 +543,8 @@ asio::awaitable<void> Client::ctrl_config_update_handler() {
                             std::to_string(peer.node_id) == use_exit_node_config) {
                             // 出口节点上线，添加默认路由
                             RouteInfo default_route;
-                            default_route.subnet = IPv4Address{0, 0, 0, 0};
+                            default_route.ip_type = IpType::IPv4;
+                            // prefix 默认初始化为 0，即 0.0.0.0
                             default_route.prefix_len = 0;
                             default_route.gateway_node = peer.node_id;
                             default_route.metric = 100;

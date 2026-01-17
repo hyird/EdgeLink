@@ -1,5 +1,7 @@
 #include "client/channel.hpp"
 #include "common/logger.hpp"
+#include "common/proto_convert.hpp"  // Proto conversion helpers (includes edgelink.pb.h)
+#include "common/auth_proto_helpers.hpp"  // Auth protobuf helpers
 #include <chrono>
 #include <optional>
 
@@ -262,8 +264,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
             endpoint_list += ep.endpoint().address().to_string() + ":" + std::to_string(ep.endpoint().port());
             endpoint_count++;
         }
-        log().debug("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
-        log().debug("DNS resolution took {} ms", dns_elapsed);
+        log().debug("DNS resolved {} endpoint(s) in {}ms", endpoint_count, dns_elapsed);
 
         if (use_tls_) {
             // Create TLS stream
@@ -288,17 +289,8 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
                 co_return false;
             }
 
-            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - tcp_start).count();
-            log().debug("TCP connected to {} in {} ms",
-                       connected_ep->address().to_string(), tcp_elapsed);
-
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
-            auto tls_start = std::chrono::steady_clock::now();
             co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
-            auto tls_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - tls_start).count();
-            log().debug("TLS handshake completed in {} ms", tls_elapsed);
 
             // WebSocket handshake
             tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
@@ -307,11 +299,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
                     req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
                 }));
 
-            auto ws_start = std::chrono::steady_clock::now();
             co_await tls_ws_->async_handshake(host, target, asio::use_awaitable);
-            auto ws_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - ws_start).count();
-            log().debug("WebSocket handshake completed in {} ms", ws_elapsed);
 
             // Disable TCP timeout - WebSocket has its own timeout
             beast::get_lowest_layer(*tls_ws_).expires_never();
@@ -333,11 +321,6 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
                 co_return false;
             }
 
-            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - tcp_start).count();
-            log().debug("TCP connected to {} in {} ms",
-                       connected_ep->address().to_string(), tcp_elapsed);
-
             // WebSocket handshake
             plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
             plain_ws_->set_option(websocket::stream_base::decorator(
@@ -356,32 +339,38 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         state_ = ChannelState::AUTHENTICATING;
 
         // Build AUTH_REQUEST
-        AuthRequest req;
-        req.auth_type = AuthType::AUTHKEY;
-        req.machine_key = crypto_.machine_key().public_key;
-        req.node_key = crypto_.node_key().public_key;
-        req.hostname = get_hostname();
-        req.os = get_os_name();
-        req.arch = get_arch();
-        req.version = "1.0.0";
-        req.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        req.connection_id = 0;  // Controller 连接不使用 connection_id（单连接控制通道）
-        req.exit_node = exit_node_;  // 声明出口节点能力
-        req.auth_data = std::vector<uint8_t>(authkey_.begin(), authkey_.end());
+        pb::AuthRequest req;
+        req.set_auth_type(pb::AUTH_TYPE_AUTHKEY);
+        req.set_machine_key(crypto_.machine_key().public_key.data(),
+                           crypto_.machine_key().public_key.size());
+        req.set_node_key(crypto_.node_key().public_key.data(),
+                        crypto_.node_key().public_key.size());
+        req.set_hostname(get_hostname());
+        req.set_os(get_os_name());
+        req.set_arch(get_arch());
+        req.set_version("1.0.0");
+        req.set_timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        req.set_connection_id(0);  // Controller 连接不使用 connection_id
+        req.set_exit_node(exit_node_);  // 声明出口节点能力
+        req.set_auth_data(authkey_);
 
         // Sign the request
-        auto sign_data = req.get_sign_data();
+        auto sign_data = get_auth_sign_data(req);
         auto sig = crypto_.sign(sign_data);
         if (!sig) {
             log().error("Failed to sign AUTH_REQUEST");
             co_return false;
         }
-        req.signature = *sig;
+        req.set_signature(sig->data(), sig->size());
 
         // Send AUTH_REQUEST
-        auto payload = req.serialize();
-        co_await send_frame(FrameType::AUTH_REQUEST, payload);
+        auto result = FrameCodec::encode_protobuf(FrameType::AUTH_REQUEST, req);
+        if (!result) {
+            log().error("Failed to encode AUTH_REQUEST");
+            co_return false;
+        }
+        co_await send_raw(*result);
 
         // Start read/write loops
         asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
@@ -460,8 +449,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
             endpoint_list += ep.endpoint().address().to_string() + ":" + std::to_string(ep.endpoint().port());
             endpoint_count++;
         }
-        log().debug("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
-        log().debug("DNS resolution took {} ms", dns_elapsed);
+        log().debug("DNS resolved {} endpoint(s) in {}ms", endpoint_count, dns_elapsed);
 
         // 生成此连接的唯一标识符
         ConnectionId connection_id = static_cast<ConnectionId>(
@@ -492,17 +480,8 @@ asio::awaitable<bool> ControlChannel::reconnect() {
                 co_return false;
             }
 
-            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - tcp_start).count();
-            log().debug("TCP reconnected to {} in {} ms",
-                       connected_ep->address().to_string(), tcp_elapsed);
-
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
-            auto tls_start = std::chrono::steady_clock::now();
             co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
-            auto tls_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - tls_start).count();
-            log().debug("TLS handshake completed in {} ms", tls_elapsed);
 
             // WebSocket handshake
             tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
@@ -534,11 +513,6 @@ asio::awaitable<bool> ControlChannel::reconnect() {
                 co_return false;
             }
 
-            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - tcp_start).count();
-            log().debug("TCP reconnected to {} in {} ms",
-                       connected_ep->address().to_string(), tcp_elapsed);
-
             // WebSocket handshake
             plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
             plain_ws_->set_option(websocket::stream_base::decorator(
@@ -556,34 +530,41 @@ asio::awaitable<bool> ControlChannel::reconnect() {
         log().info("WebSocket reconnected, authenticating with machine key...");
         state_ = ChannelState::AUTHENTICATING;
 
-        // Build AUTH_REQUEST with MACHINE auth type (no authkey needed)
-        AuthRequest req;
-        req.auth_type = AuthType::MACHINE;
-        req.machine_key = crypto_.machine_key().public_key;
-        req.node_key = crypto_.node_key().public_key;
-        req.hostname = get_hostname();
-        req.os = get_os_name();
-        req.arch = get_arch();
-        req.version = "1.0.0";
-        req.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        req.connection_id = connection_id;  // 设置连接标识符
-        req.exit_node = exit_node_;  // 声明出口节点能力
+        // Build AUTH_REQUEST with MACHINE auth type
+        pb::AuthRequest req;
+        req.set_auth_type(pb::AUTH_TYPE_MACHINE);
+        req.set_machine_key(crypto_.machine_key().public_key.data(),
+                           crypto_.machine_key().public_key.size());
+        req.set_node_key(crypto_.node_key().public_key.data(),
+                        crypto_.node_key().public_key.size());
+        req.set_hostname(get_hostname());
+        req.set_os(get_os_name());
+        req.set_arch(get_arch());
+        req.set_version("1.0.0");
+        req.set_timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        req.set_connection_id(connection_id);  // 设置连接标识符
+        req.set_exit_node(exit_node_);  // 声明出口节点能力
         // auth_data is empty for MACHINE auth type
 
         // Sign the request
-        auto sign_data = req.get_sign_data();
+        auto sign_data = get_auth_sign_data(req);
         auto sig = crypto_.sign(sign_data);
         if (!sig) {
             log().error("Failed to sign AUTH_REQUEST");
             state_ = ChannelState::DISCONNECTED;
             co_return false;
         }
-        req.signature = *sig;
+        req.set_signature(sig->data(), sig->size());
 
         // Send AUTH_REQUEST
-        auto payload = req.serialize();
-        co_await send_frame(FrameType::AUTH_REQUEST, payload);
+        auto result = FrameCodec::encode_protobuf(FrameType::AUTH_REQUEST, req);
+        if (!result) {
+            log().error("Failed to encode AUTH_REQUEST");
+            state_ = ChannelState::DISCONNECTED;
+            co_return false;
+        }
+        co_await send_raw(*result);
 
         // Start read/write loops
         asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
@@ -676,29 +657,49 @@ asio::awaitable<void> ControlChannel::close() {
 }
 
 asio::awaitable<void> ControlChannel::send_config_ack(uint64_t version, ConfigAckStatus status) {
-    ConfigAck ack;
-    ack.version = version;
-    ack.status = status;
-    co_await send_frame(FrameType::CONFIG_ACK, ack.serialize());
+    // Use protobuf ConfigAck
+    pb::ConfigAck ack;
+    ack.set_version(version);
+    ack.set_status(to_proto_config_ack_status(status));
+
+    auto result = FrameCodec::encode_protobuf(FrameType::CONFIG_ACK, ack);
+    if (result) {
+        co_await send_raw(*result);
+    }
 }
 
 asio::awaitable<void> ControlChannel::send_ping() {
-    Ping ping;
-    ping.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+    // Use protobuf Ping message
+    pb::Ping ping;
+    uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    ping.seq_num = ++ping_seq_;
-    last_ping_time_ = ping.timestamp;
+    ping.set_timestamp(now);
+    ping.set_seq_num(++ping_seq_);
+    last_ping_time_ = now;
 
-    co_await send_frame(FrameType::PING, ping.serialize());
+    auto result = FrameCodec::encode_protobuf(FrameType::PING, ping);
+    if (result) {
+        co_await send_raw(*result);
+    }
 }
 
 asio::awaitable<void> ControlChannel::send_latency_report(const LatencyReport& report) {
-    co_await send_frame(FrameType::LATENCY_REPORT, report.serialize());
+    pb::LatencyReport pb_report;
+    to_proto(report, &pb_report);
+    auto result = FrameCodec::encode_protobuf(FrameType::LATENCY_REPORT, pb_report);
+    if (result) {
+        co_await send_raw(*result);
+    }
     log().debug("Sent latency report with {} entries", report.entries.size());
 }
 
 asio::awaitable<void> ControlChannel::send_relay_latency_report(const RelayLatencyReport& report) {
-    co_await send_frame(FrameType::RELAY_LATENCY_REPORT, report.serialize());
+    pb::RelayLatencyReport pb_report;
+    to_proto(report, &pb_report);
+    auto result = FrameCodec::encode_protobuf(FrameType::RELAY_LATENCY_REPORT, pb_report);
+    if (result) {
+        co_await send_raw(*result);
+    }
     log().debug("Sent relay latency report with {} entries", report.entries.size());
 }
 
@@ -778,8 +779,6 @@ asio::awaitable<void> ControlChannel::write_loop() {
 }
 
 asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
-    log().debug("Control: received {} frame", frame_type_name(frame.header.type));
-
     switch (frame.header.type) {
         case FrameType::AUTH_RESPONSE:
             co_await handle_auth_response(frame);
@@ -819,16 +818,19 @@ asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
 }
 
 asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
-    auto resp = AuthResponse::parse(frame.payload);
-    if (!resp) {
-        log().error("Failed to parse AUTH_RESPONSE");
+    // Parse protobuf AuthResponse
+    auto pb_resp = FrameCodec::decode_protobuf<pb::AuthResponse>(frame.data());
+    if (!pb_resp) {
+        log().error("Failed to parse AUTH_RESPONSE: {}", frame_error_message(pb_resp.error()));
         co_return;
     }
 
-    if (!resp->success) {
-        log().error("Authentication failed: {} (code {})", resp->error_msg, resp->error_code);
+    if (!pb_resp->success()) {
+        log().error("Authentication failed: {} (code {})",
+                    pb_resp->error_msg(), pb_resp->error_code());
         if (channels_.error) {
-            bool sent = channels_.error->try_send(boost::system::error_code{}, resp->error_code, resp->error_msg);
+            bool sent = channels_.error->try_send(boost::system::error_code{},
+                static_cast<uint16_t>(pb_resp->error_code()), pb_resp->error_msg());
             if (!sent) {
                 log().warn("Failed to send auth error event (channel full or closed)");
             }
@@ -837,21 +839,33 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
     }
 
     // Store auth info
-    node_id_ = resp->node_id;
-    network_id_ = resp->network_id;
-    virtual_ip_ = resp->virtual_ip;
-    auth_token_ = resp->auth_token;
-    relay_token_ = resp->relay_token;
+    node_id_ = pb_resp->node_id();
+    network_id_ = pb_resp->network_id();
+    from_proto(pb_resp->virtual_ip(), &virtual_ip_);
+    auth_token_ = std::vector<uint8_t>(pb_resp->auth_token().begin(), pb_resp->auth_token().end());
+    relay_token_ = std::vector<uint8_t>(pb_resp->relay_token().begin(), pb_resp->relay_token().end());
 
     crypto_.set_node_id(node_id_);
 
-    log().info("Authenticated as node {} with IP {}", node_id_, virtual_ip_.to_string());
+    log().info("Authenticated as node {} with IP {}",
+               node_id_, virtual_ip_.to_string());
 
     // Note: state_ is set to CONNECTED after receiving CONFIG, not here
     // This ensures peers are populated before on_connected is called
 
     if (channels_.auth_response) {
-        bool sent = channels_.auth_response->try_send(boost::system::error_code{}, *resp);
+        // Convert to C++ type for channel compatibility
+        AuthResponse cpp_resp;
+        cpp_resp.success = pb_resp->success();
+        cpp_resp.node_id = pb_resp->node_id();
+        from_proto(pb_resp->virtual_ip(), &cpp_resp.virtual_ip);
+        cpp_resp.network_id = pb_resp->network_id();
+        cpp_resp.auth_token = auth_token_;
+        cpp_resp.relay_token = relay_token_;
+        cpp_resp.error_code = static_cast<uint16_t>(pb_resp->error_code());
+        cpp_resp.error_msg = pb_resp->error_msg();
+
+        bool sent = channels_.auth_response->try_send(boost::system::error_code{}, cpp_resp);
         if (!sent) {
             log().warn("Failed to send auth response event (channel full or closed)");
         }
@@ -859,24 +873,29 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
 }
 
 asio::awaitable<void> ControlChannel::handle_config(const Frame& frame) {
-    auto config = Config::parse(frame.payload);
-    if (!config) {
-        log().error("Failed to parse CONFIG");
+    // Use protobuf Config message
+    auto pb_config = FrameCodec::decode_protobuf<pb::Config>(frame.data());
+    if (!pb_config) {
+        log().error("Failed to parse CONFIG: {}", frame_error_message(pb_config.error()));
         co_return;
     }
 
-    log().info("Received CONFIG v{} with {} peers", config->version, config->peers.size());
+    // Convert to C++ Config
+    Config config;
+    from_proto(*pb_config, &config);
+
+    log().info("Received CONFIG v{} with {} peers", config.version, config.peers.size());
 
     // Save subnet mask for TUN configuration
-    subnet_mask_ = config->subnet_mask;
+    subnet_mask_ = config.subnet_mask;
 
     // Update relay token if present
-    if (!config->relay_token.empty()) {
-        relay_token_ = config->relay_token;
+    if (!config.relay_token.empty()) {
+        relay_token_ = config.relay_token;
     }
 
     if (channels_.config) {
-        bool sent = channels_.config->try_send(boost::system::error_code{}, *config);
+        bool sent = channels_.config->try_send(boost::system::error_code{}, config);
         if (!sent) {
             log().warn("Failed to send config event (channel full or closed)");
         }
@@ -894,26 +913,31 @@ asio::awaitable<void> ControlChannel::handle_config(const Frame& frame) {
     }
 
     // Send ACK
-    co_await send_config_ack(config->version, ConfigAckStatus::SUCCESS);
+    co_await send_config_ack(config.version, ConfigAckStatus::SUCCESS);
 }
 
 asio::awaitable<void> ControlChannel::handle_config_update(const Frame& frame) {
-    auto update = ConfigUpdate::parse(frame.payload);
-    if (!update) {
-        log().error("Failed to parse CONFIG_UPDATE");
+    // Use protobuf ConfigUpdate message
+    auto pb_update = FrameCodec::decode_protobuf<pb::ConfigUpdate>(frame.data());
+    if (!pb_update) {
+        log().error("Failed to parse CONFIG_UPDATE: {}", frame_error_message(pb_update.error()));
         co_return;
     }
 
-    log().debug("Received CONFIG_UPDATE v{}", update->version);
+    // Convert to C++ ConfigUpdate
+    ConfigUpdate update;
+    from_proto(*pb_update, &update);
+
+    log().debug("Received CONFIG_UPDATE v{}", update.version);
 
     // Update relay token if present
-    if (has_flag(update->update_flags, ConfigUpdateFlags::TOKEN_REFRESH)) {
-        relay_token_ = update->relay_token;
+    if (has_flag(update.update_flags, ConfigUpdateFlags::TOKEN_REFRESH)) {
+        relay_token_ = update.relay_token;
         log().debug("Relay token refreshed");
     }
 
     if (channels_.config_update) {
-        bool sent = channels_.config_update->try_send(boost::system::error_code{}, *update);
+        bool sent = channels_.config_update->try_send(boost::system::error_code{}, update);
         if (!sent) {
             log().warn("Failed to send config update event (channel full or closed)");
         }
@@ -921,17 +945,19 @@ asio::awaitable<void> ControlChannel::handle_config_update(const Frame& frame) {
 }
 
 asio::awaitable<void> ControlChannel::handle_route_update(const Frame& frame) {
-    auto update = RouteUpdate::parse(frame.payload);
-    if (!update) {
-        log().error("Failed to parse ROUTE_UPDATE");
+    auto pb_update = FrameCodec::decode_protobuf<pb::RouteUpdate>(frame.data());
+    if (!pb_update) {
+        log().error("Failed to parse ROUTE_UPDATE: {}", frame_error_message(pb_update.error()));
         co_return;
     }
+    RouteUpdate update;
+    from_proto(*pb_update, &update);
 
     log().debug("Received ROUTE_UPDATE v{}: +{} routes, -{} routes",
-                update->version, update->add_routes.size(), update->del_routes.size());
+                update.version, update.add_routes.size(), update.del_routes.size());
 
     if (channels_.route_update) {
-        bool sent = channels_.route_update->try_send(boost::system::error_code{}, *update);
+        bool sent = channels_.route_update->try_send(boost::system::error_code{}, update);
         if (!sent) {
             log().warn("Failed to send route update event (channel full or closed)");
         }
@@ -939,32 +965,36 @@ asio::awaitable<void> ControlChannel::handle_route_update(const Frame& frame) {
 }
 
 asio::awaitable<void> ControlChannel::handle_route_ack(const Frame& frame) {
-    auto ack = RouteAck::parse(frame.payload);
-    if (!ack) {
-        log().error("Failed to parse ROUTE_ACK");
+    auto pb_ack = FrameCodec::decode_protobuf<pb::RouteAck>(frame.data());
+    if (!pb_ack) {
+        log().error("Failed to parse ROUTE_ACK: {}", frame_error_message(pb_ack.error()));
         co_return;
     }
+    RouteAck ack;
+    from_proto(*pb_ack, &ack);
 
-    if (ack->success) {
-        log().debug("Route operation {} succeeded", ack->request_id);
+    if (ack.success) {
+        log().debug("Route operation {} succeeded", ack.request_id);
     } else {
         log().error("Route operation {} failed: {} (code {})",
-                    ack->request_id, ack->error_msg, ack->error_code);
+                    ack.request_id, ack.error_msg, ack.error_code);
     }
 }
 
 asio::awaitable<void> ControlChannel::handle_peer_routing_update(const Frame& frame) {
-    auto update = PeerRoutingUpdate::parse(frame.payload);
-    if (!update) {
-        log().error("Failed to parse PEER_ROUTING_UPDATE");
+    auto pb_update = FrameCodec::decode_protobuf<pb::PeerRoutingUpdate>(frame.data());
+    if (!pb_update) {
+        log().error("Failed to parse PEER_ROUTING_UPDATE: {}", frame_error_message(pb_update.error()));
         co_return;
     }
+    PeerRoutingUpdate update;
+    from_proto(*pb_update, &update);
 
     log().debug("Received PEER_ROUTING_UPDATE v{} with {} routes",
-                update->version, update->routes.size());
+                update.version, update.routes.size());
 
     if (channels_.peer_routing_update) {
-        channels_.peer_routing_update->try_send(boost::system::error_code{}, *update);
+        channels_.peer_routing_update->try_send(boost::system::error_code{}, update);
     }
 }
 
@@ -977,7 +1007,12 @@ asio::awaitable<void> ControlChannel::send_route_announce(const std::vector<Rout
     announce.request_id = ++route_request_id_;
     announce.routes = routes;
 
-    co_await send_frame(FrameType::ROUTE_ANNOUNCE, announce.serialize());
+    pb::RouteAnnounce pb_announce;
+    to_proto(announce, &pb_announce);
+    auto result = FrameCodec::encode_protobuf(FrameType::ROUTE_ANNOUNCE, pb_announce);
+    if (result) {
+        co_await send_raw(*result);
+    }
     log().info("Announced {} routes (request_id={})", routes.size(), announce.request_id);
 }
 
@@ -990,12 +1025,22 @@ asio::awaitable<void> ControlChannel::send_route_withdraw(const std::vector<Rout
     withdraw.request_id = ++route_request_id_;
     withdraw.routes = routes;
 
-    co_await send_frame(FrameType::ROUTE_WITHDRAW, withdraw.serialize());
+    pb::RouteWithdraw pb_withdraw;
+    to_proto(withdraw, &pb_withdraw);
+    auto result = FrameCodec::encode_protobuf(FrameType::ROUTE_WITHDRAW, pb_withdraw);
+    if (result) {
+        co_await send_raw(*result);
+    }
     log().info("Withdrew {} routes (request_id={})", routes.size(), withdraw.request_id);
 }
 
 asio::awaitable<void> ControlChannel::send_p2p_init(const P2PInit& init) {
-    co_await send_frame(FrameType::P2P_INIT, init.serialize());
+    pb::P2PInit pb_init;
+    to_proto(init, &pb_init);
+    auto result = FrameCodec::encode_protobuf(FrameType::P2P_INIT, pb_init);
+    if (result) {
+        co_await send_raw(*result);
+    }
     log().debug("Sent P2P_INIT: target_node={}, init_seq={}", init.target_node, init.init_seq);
 }
 
@@ -1009,7 +1054,12 @@ asio::awaitable<uint32_t> ControlChannel::send_endpoint_update(const std::vector
     pending_endpoints_ = endpoints;
     endpoint_ack_pending_ = true;
 
-    co_await send_frame(FrameType::ENDPOINT_UPDATE, update.serialize());
+    pb::EndpointUpdate pb_update;
+    to_proto(update, &pb_update);
+    auto result = FrameCodec::encode_protobuf(FrameType::ENDPOINT_UPDATE, pb_update);
+    if (result) {
+        co_await send_raw(*result);
+    }
     log().debug("Sent ENDPOINT_UPDATE: {} endpoints (request_id={})",
                 endpoints.size(), update.request_id);
 
@@ -1064,22 +1114,29 @@ asio::awaitable<void> ControlChannel::resend_pending_endpoints() {
     pending_endpoint_request_id_ = update.request_id;
     endpoint_ack_pending_ = true;
 
-    co_await send_frame(FrameType::ENDPOINT_UPDATE, update.serialize());
+    pb::EndpointUpdate pb_update;
+    to_proto(update, &pb_update);
+    auto result = FrameCodec::encode_protobuf(FrameType::ENDPOINT_UPDATE, pb_update);
+    if (result) {
+        co_await send_raw(*result);
+    }
     log().info("Resent ENDPOINT_UPDATE after reconnect: {} endpoints (request_id={})",
                update.endpoints.size(), update.request_id);
 }
 
 asio::awaitable<void> ControlChannel::handle_endpoint_ack(const Frame& frame) {
-    auto ack = EndpointAck::parse(frame.payload);
-    if (!ack) {
-        log().error("Failed to parse ENDPOINT_ACK");
+    auto pb_ack = FrameCodec::decode_protobuf<pb::EndpointAck>(frame.data());
+    if (!pb_ack) {
+        log().error("Failed to parse ENDPOINT_ACK: {}", frame_error_message(pb_ack.error()));
         co_return;
     }
+    EndpointAck ack;
+    from_proto(*pb_ack, &ack);
 
-    if (ack->request_id == pending_endpoint_request_id_) {
+    if (ack.request_id == pending_endpoint_request_id_) {
         endpoint_ack_pending_ = false;
         log().debug("Received ENDPOINT_ACK: request_id={}, success={}, count={}",
-                    ack->request_id, ack->success, ack->endpoint_count);
+                    ack.request_id, ack.success, ack.endpoint_count);
 
         // 通知等待者 ACK 已收到（通过取消定时器）
         if (endpoint_ack_timer_) {
@@ -1087,48 +1144,59 @@ asio::awaitable<void> ControlChannel::handle_endpoint_ack(const Frame& frame) {
         }
     } else {
         log().debug("Received ENDPOINT_ACK with unexpected request_id={} (expected {})",
-                    ack->request_id, pending_endpoint_request_id_);
+                    ack.request_id, pending_endpoint_request_id_);
     }
 }
 
 asio::awaitable<void> ControlChannel::handle_p2p_endpoint(const Frame& frame) {
-    auto msg = P2PEndpointMsg::parse(frame.payload);
-    if (!msg) {
+    auto pb_msg = FrameCodec::decode_protobuf<pb::P2PEndpoint>(frame.data());
+    if (!pb_msg) {
         log().error("Failed to parse P2P_ENDPOINT");
         co_return;
     }
 
+    P2PEndpointMsg msg;
+    from_proto(*pb_msg, &msg);
+
     log().debug("Received P2P_ENDPOINT: peer_node={}, init_seq={}, {} endpoints",
-                msg->peer_node, msg->init_seq, msg->endpoints.size());
+                msg.peer_node, msg.init_seq, msg.endpoints.size());
 
     if (channels_.p2p_endpoint) {
-        channels_.p2p_endpoint->try_send(boost::system::error_code{}, *msg);
+        channels_.p2p_endpoint->try_send(boost::system::error_code{}, msg);
     }
 }
 
 asio::awaitable<void> ControlChannel::handle_pong(const Frame& frame) {
-    auto pong = Pong::parse(frame.payload);
+    // Use protobuf Pong message
+    auto pong = FrameCodec::decode_protobuf<pb::Pong>(frame.data());
     if (!pong) {
+        log().warn("Failed to parse PONG: {}", frame_error_message(pong.error()));
         co_return;
     }
 
     uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    uint64_t rtt = now - pong->timestamp;
+    uint64_t rtt = now - pong->timestamp();
 
-    log().debug("Control PONG: RTT={}ms", rtt);
+    // Only log if RTT is unusually high
+    if (rtt > 500) {
+        log().warn("Control channel high latency: RTT={}ms", rtt);
+    }
 }
 
 asio::awaitable<void> ControlChannel::handle_error(const Frame& frame) {
-    auto error = ErrorPayload::parse(frame.payload);
-    if (!error) {
+    auto pb_error = FrameCodec::decode_protobuf<pb::FrameError>(frame.data());
+    if (!pb_error) {
+        log().error("Failed to parse FRAME_ERROR: {}", frame_error_message(pb_error.error()));
         co_return;
     }
+    ErrorPayload error;
+    from_proto(*pb_error, &error);
 
-    log().error("Control error {}: {}", error->error_code, error->error_msg);
+    log().error("Control error {}: {}", error.error_code, error.error_msg);
 
     if (channels_.error) {
-        channels_.error->try_send(boost::system::error_code{}, error->error_code, error->error_msg);
+        channels_.error->try_send(boost::system::error_code{}, error.error_code, error.error_msg);
     }
 }
 
@@ -1215,12 +1283,9 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             endpoint_list += ep.endpoint().address().to_string() + ":" + std::to_string(ep.endpoint().port());
             endpoint_count++;
         }
-        log().debug("DNS resolved to {} endpoint(s): {}", endpoint_count, endpoint_list);
-
         // 生成此连接的唯一标识符
         ConnectionId connection_id = static_cast<ConnectionId>(
             std::chrono::steady_clock::now().time_since_epoch().count() & 0xFFFFFFFF);
-        log().debug("Assigned connection_id: 0x{:08x}", connection_id);
 
         if (use_tls_) {
             // Create TLS stream
@@ -1240,11 +1305,6 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
                 log().error("所有 relay endpoint 连接失败");
                 co_return false;
             }
-
-            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - tcp_start).count();
-            log().debug("TCP connected to relay {} in {} ms",
-                       connected_ep->address().to_string(), tcp_elapsed);
 
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
             co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
@@ -1273,11 +1333,6 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
                 co_return false;
             }
 
-            auto tcp_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - tcp_start).count();
-            log().debug("TCP connected to relay {} in {} ms",
-                       connected_ep->address().to_string(), tcp_elapsed);
-
             // WebSocket handshake (use ws_host as Host header for CDN)
             plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
             co_await plain_ws_->async_handshake(ws_host, target, asio::use_awaitable);
@@ -1291,14 +1346,17 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
         state_ = ChannelState::AUTHENTICATING;
 
         // Build RELAY_AUTH
-        RelayAuth auth;
-        auth.relay_token = relay_token;
-        auth.node_id = crypto_.node_id();
-        auth.node_key = crypto_.node_key().public_key;
-        auth.connection_id = connection_id;  // 设置连接标识符
+        pb::RelayAuth auth;
+        auth.set_relay_token(relay_token.data(), relay_token.size());
+        auth.set_node_id(crypto_.node_id());
+        auth.set_node_key(crypto_.node_key().public_key.data(), crypto_.node_key().public_key.size());
+        auth.set_connection_id(connection_id);  // 设置连接标识符
 
         // Send RELAY_AUTH
-        co_await send_frame(FrameType::RELAY_AUTH, auth.serialize());
+        auto result = FrameCodec::encode_protobuf(FrameType::RELAY_AUTH, auth);
+        if (result) {
+            co_await send_raw(*result);
+        }
 
         // Start read/write loops
         asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
@@ -1414,29 +1472,34 @@ asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const ui
         co_return false;
     }
 
-    // Build DATA payload
-    DataPayload data;
-    data.src_node = crypto_.node_id();
-    data.dst_node = peer_id;
-    data.nonce = nonce;
-    data.encrypted_payload = std::move(*encrypted);
+    // Build DATA payload using protobuf
+    pb::DataPayload data;
+    data.set_src_node(crypto_.node_id());
+    data.set_dst_node(peer_id);
+    data.set_nonce(nonce.data(), nonce.size());
+    data.set_encrypted_payload(encrypted->data(), encrypted->size());
 
-    co_await send_frame(FrameType::DATA, data.serialize());
+    auto result = FrameCodec::encode_protobuf(FrameType::DATA, data);
+    if (result) {
+        co_await send_raw(*result);
+    }
 
-    log().debug("Queued {} bytes for {} (encrypted {} bytes)",
-                  plaintext.size(), peers_.get_peer_ip_str(peer_id), data.encrypted_payload.size());
     co_return true;
 }
 
 asio::awaitable<void> RelayChannel::send_ping() {
-    Ping ping;
-    ping.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+    // Use protobuf Ping message
+    pb::Ping ping;
+    uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    ping.seq_num = ++ping_seq_;
-    last_ping_time_ = ping.timestamp;
+    ping.set_timestamp(now);
+    ping.set_seq_num(++ping_seq_);
+    last_ping_time_ = now;
 
-    co_await send_frame(FrameType::PING, ping.serialize());
-    log().debug("Sent PING seq={} to relay", ping.seq_num);
+    auto result = FrameCodec::encode_protobuf(FrameType::PING, ping);
+    if (result) {
+        co_await send_raw(*result);
+    }
 }
 
 asio::awaitable<void> RelayChannel::read_loop() {
@@ -1456,16 +1519,12 @@ asio::awaitable<void> RelayChannel::read_loop() {
             std::span<const uint8_t> span(
                 static_cast<const uint8_t*>(data.data()), data.size());
 
-            log().debug("Relay read_loop: received {} bytes", span.size());
-
             auto result = FrameCodec::decode(span);
             if (!result) {
                 log().warn("Relay: failed to decode frame ({} bytes)", span.size());
                 continue;
             }
 
-            log().debug("Relay read_loop: decoded frame type 0x{:02X}",
-                         static_cast<uint8_t>(result->first.header.type));
             co_await handle_frame(result->first);
         }
     } catch (const boost::system::system_error& e) {
@@ -1495,7 +1554,6 @@ asio::awaitable<void> RelayChannel::write_loop() {
                     continue;
                 }
                 if (ec) {
-                    log().debug("Relay write_loop: timer error {}", ec.message());
                     break;
                 }
             }
@@ -1505,15 +1563,11 @@ asio::awaitable<void> RelayChannel::write_loop() {
                 auto data = std::move(write_queue_.front());
                 write_queue_.pop();
 
-                log().debug("Relay write_loop: sending {} bytes", data.size());
-
                 if (use_tls_) {
                     co_await tls_ws_->async_write(asio::buffer(data), asio::use_awaitable);
                 } else {
                     co_await plain_ws_->async_write(asio::buffer(data), asio::use_awaitable);
                 }
-
-                log().debug("Relay write_loop: sent {} bytes", data.size());
             }
         }
     } catch (const boost::system::system_error& e) {
@@ -1523,7 +1577,9 @@ asio::awaitable<void> RelayChannel::write_loop() {
     }
 
     // Write loop exited - WebSocket is closed
-    log().warn("Relay write_loop exited, {} queued messages dropped", write_queue_.size());
+    if (!write_queue_.empty()) {
+        log().warn("Relay write_loop exited, {} queued messages dropped", write_queue_.size());
+    }
     writing_ = false;
 
     // Clear queue to avoid memory leak
@@ -1551,19 +1607,21 @@ asio::awaitable<void> RelayChannel::handle_frame(const Frame& frame) {
 }
 
 asio::awaitable<void> RelayChannel::handle_relay_auth_resp(const Frame& frame) {
-    auto resp = RelayAuthResp::parse(frame.payload);
-    if (!resp) {
+    auto pb_resp = FrameCodec::decode_protobuf<pb::RelayAuthResp>(frame.data());
+    if (!pb_resp) {
         log().error("Failed to parse RELAY_AUTH_RESP");
         co_return;
     }
 
-    if (!resp->success) {
-        log().error("Relay auth failed: {} (code {})", resp->error_msg, resp->error_code);
+    RelayAuthResp resp;
+    from_proto(*pb_resp, &resp);
+
+    if (!resp.success) {
+        log().error("Relay auth failed: {} (code {})", resp.error_msg, resp.error_code);
         co_return;
     }
 
     state_ = ChannelState::CONNECTED;
-    log().debug("Relay channel connected");
 
     if (channels_.connected) {
         channels_.connected->try_send(boost::system::error_code{});
@@ -1571,34 +1629,34 @@ asio::awaitable<void> RelayChannel::handle_relay_auth_resp(const Frame& frame) {
 }
 
 asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
-    log().debug("Relay handle_data: processing {} bytes", frame.payload.size());
-
-    auto data = DataPayload::parse(frame.payload);
-    if (!data) {
-        log().warn("Failed to parse DATA payload");
+    // Use protobuf DataPayload
+    auto pb_data = FrameCodec::decode_protobuf<pb::DataPayload>(frame.data());
+    if (!pb_data) {
+        log().warn("Failed to parse DATA payload: {}", frame_error_message(pb_data.error()));
         co_return;
     }
 
-    log().debug("Relay handle_data: DATA from {} to me, encrypted {} bytes",
-                 peers_.get_peer_ip_str(data->src_node), data->encrypted_payload.size());
+    // Convert to C++ DataPayload
+    DataPayload data;
+    from_proto(*pb_data, &data);
 
     // Ensure session key exists for sender
-    if (!peers_.ensure_session_key(data->src_node)) {
-        log().warn("Cannot decrypt data from {}: no session key", peers_.get_peer_ip_str(data->src_node));
+    if (!peers_.ensure_session_key(data.src_node)) {
+        log().warn("Cannot decrypt data from {}: no session key", peers_.get_peer_ip_str(data.src_node));
         co_return;
     }
 
     // Decrypt
-    auto peer_ip = peers_.get_peer_ip_str(data->src_node);
-    auto plaintext = crypto_.decrypt(data->src_node, data->nonce, data->encrypted_payload);
+    auto peer_ip = peers_.get_peer_ip_str(data.src_node);
+    auto plaintext = crypto_.decrypt(data.src_node, data.nonce, data.encrypted_payload);
     if (!plaintext) {
         log().warn("Failed to decrypt data from {}, renegotiating session key...", peer_ip);
 
         // Clear old session key and re-derive
-        crypto_.remove_session_key(data->src_node);
+        crypto_.remove_session_key(data.src_node);
 
         // Try to derive new session key
-        if (!peers_.ensure_session_key(data->src_node)) {
+        if (!peers_.ensure_session_key(data.src_node)) {
             log().error("Failed to renegotiate session key for {}", peer_ip);
             co_return;
         }
@@ -1606,7 +1664,7 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
         log().info("Session key renegotiated for {}", peer_ip);
 
         // Retry decryption with new key
-        plaintext = crypto_.decrypt(data->src_node, data->nonce, data->encrypted_payload);
+        plaintext = crypto_.decrypt(data.src_node, data.nonce, data.encrypted_payload);
         if (!plaintext) {
             log().warn("Decryption still failed after renegotiation, {} may have different node_key", peer_ip);
             co_return;
@@ -1615,12 +1673,10 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
         log().info("Decryption succeeded after session key renegotiation for {}", peer_ip);
     }
 
-    peers_.update_last_seen(data->src_node);
-
-    log().debug("Relay handle_data: decrypted {} bytes from {}", plaintext->size(), peer_ip);
+    peers_.update_last_seen(data.src_node);
 
     if (channels_.data) {
-        bool sent = channels_.data->try_send(boost::system::error_code{}, data->src_node, std::move(*plaintext));
+        bool sent = channels_.data->try_send(boost::system::error_code{}, data.src_node, std::move(*plaintext));
         if (!sent) {
             log().warn("Failed to send data event for peer {} (channel full or closed)", peer_ip);
         }
@@ -1628,9 +1684,10 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
 }
 
 asio::awaitable<void> RelayChannel::handle_pong(const Frame& frame) {
-    auto pong = Pong::parse(frame.payload);
+    // Use protobuf Pong message
+    auto pong = FrameCodec::decode_protobuf<pb::Pong>(frame.data());
     if (!pong) {
-        log().warn("Failed to parse PONG");
+        log().warn("Failed to parse PONG: {}", frame_error_message(pong.error()));
         co_return;
     }
 
@@ -1640,7 +1697,11 @@ asio::awaitable<void> RelayChannel::handle_pong(const Frame& frame) {
 
     if (last_ping_time_ > 0) {
         uint16_t rtt_ms = static_cast<uint16_t>(now - last_ping_time_);
-        log().debug("Received PONG seq={}, RTT={}ms", pong->seq_num, rtt_ms);
+
+        // Only log if RTT is unusually high
+        if (rtt_ms > 500) {
+            log().warn("Relay channel high latency: RTT={}ms", rtt_ms);
+        }
 
         // Notify via callback
         if (channels_.on_pong) {

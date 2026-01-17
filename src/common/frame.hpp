@@ -7,6 +7,12 @@
 #include <span>
 #include <string>
 #include <vector>
+#include <type_traits>
+
+// Forward declaration for protobuf message base class
+namespace google::protobuf {
+class MessageLite;
+}
 
 namespace edgelink {
 
@@ -79,6 +85,8 @@ enum class FrameError {
     PAYLOAD_TOO_LARGE,
     DECOMPRESSION_FAILED,
     INVALID_FRAGMENT,
+    PROTOBUF_SERIALIZE_FAILED,
+    PROTOBUF_PARSE_FAILED,
 };
 
 std::string frame_error_message(FrameError error);
@@ -199,6 +207,91 @@ public:
     static std::vector<std::vector<uint8_t>> fragment(
         MessageId message_id, FrameType type,
         std::span<const uint8_t> payload, FrameFlags flags = FrameFlags::NONE);
+
+    // ========================================================================
+    // Protobuf Encoding/Decoding Helpers
+    // ========================================================================
+
+    /// Encode a protobuf message into a frame
+    /// @tparam T Protobuf message type (must inherit from google::protobuf::MessageLite)
+    /// @param type Frame type
+    /// @param msg Protobuf message to encode
+    /// @param flags Frame flags
+    /// @return Encoded frame bytes, or error if serialization fails
+    template<typename T>
+    static std::expected<std::vector<uint8_t>, FrameError> encode_protobuf(
+        FrameType type, const T& msg, FrameFlags flags = FrameFlags::NONE) {
+        static_assert(std::is_base_of_v<google::protobuf::MessageLite, T>,
+                      "T must be a protobuf message type");
+
+        std::string payload;
+        if (!msg.SerializeToString(&payload)) {
+            return std::unexpected(FrameError::PROTOBUF_SERIALIZE_FAILED);
+        }
+
+        std::span<const uint8_t> payload_span(
+            reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+
+        return encode(type, payload_span, flags);
+    }
+
+    /// Encode a protobuf message with optional compression
+    template<typename T>
+    static std::expected<std::vector<uint8_t>, FrameError> encode_protobuf_with_compression(
+        FrameType type, const T& msg, FrameFlags flags = FrameFlags::NONE) {
+        static_assert(std::is_base_of_v<google::protobuf::MessageLite, T>,
+                      "T must be a protobuf message type");
+
+        std::string payload;
+        if (!msg.SerializeToString(&payload)) {
+            return std::unexpected(FrameError::PROTOBUF_SERIALIZE_FAILED);
+        }
+
+        std::span<const uint8_t> payload_span(
+            reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+
+        return encode_with_compression(type, payload_span, flags);
+    }
+
+    /// Decode a frame payload into a protobuf message
+    /// @tparam T Protobuf message type
+    /// @param payload Frame payload bytes
+    /// @return Parsed protobuf message, or error if parsing fails
+    template<typename T>
+    static std::expected<T, FrameError> decode_protobuf(std::span<const uint8_t> payload) {
+        static_assert(std::is_base_of_v<google::protobuf::MessageLite, T>,
+                      "T must be a protobuf message type");
+
+        T msg;
+        if (!msg.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+            return std::unexpected(FrameError::PROTOBUF_PARSE_FAILED);
+        }
+        return msg;
+    }
+
+    /// Decode a frame and parse its payload as a protobuf message
+    /// @tparam T Protobuf message type
+    /// @param data Raw frame data
+    /// @return Tuple of (message, frame header, bytes consumed), or error
+    template<typename T>
+    static std::expected<std::tuple<T, FrameHeader, size_t>, FrameError> decode_frame_protobuf(
+        std::span<const uint8_t> data) {
+        static_assert(std::is_base_of_v<google::protobuf::MessageLite, T>,
+                      "T must be a protobuf message type");
+
+        auto frame_result = decode(data);
+        if (!frame_result) {
+            return std::unexpected(frame_result.error());
+        }
+
+        auto& [frame, consumed] = *frame_result;
+        auto msg_result = decode_protobuf<T>(frame.data());
+        if (!msg_result) {
+            return std::unexpected(msg_result.error());
+        }
+
+        return std::make_tuple(std::move(*msg_result), frame.header, consumed);
+    }
 
 private:
     static std::expected<FrameHeader, FrameError> decode_header(std::span<const uint8_t> data);

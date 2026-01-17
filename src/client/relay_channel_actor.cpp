@@ -2,6 +2,7 @@
 
 #include "client/relay_channel_actor.hpp"
 #include "common/logger.hpp"
+#include "common/proto_convert.hpp"
 #include <chrono>
 
 namespace edgelink::client {
@@ -153,19 +154,22 @@ asio::awaitable<void> RelayChannelActor::handle_send_data_cmd(const RelayChannel
     }
 
     // 构建 DATA payload
-    DataPayload data;
-    data.src_node = crypto_.node_id();
-    data.dst_node = cmd.peer_id;
-    data.nonce = nonce;
-    data.encrypted_payload = std::move(*encrypted);
+    pb::DataPayload data;
+    data.set_src_node(crypto_.node_id());
+    data.set_dst_node(cmd.peer_id);
+    data.set_nonce(nonce.data(), nonce.size());
+    data.set_encrypted_payload(encrypted->data(), encrypted->size());
 
     // 发送帧
-    co_await send_frame(FrameType::DATA, data.serialize());
+    auto frame_result = FrameCodec::encode_protobuf(FrameType::DATA, data);
+    if (frame_result) {
+        co_await send_raw(*frame_result);
+    }
 
     log().debug("[{}] Queued {} bytes for {} (encrypted {} bytes)",
                 name_, cmd.plaintext->size(),
                 peers_.get_peer_ip_str(cmd.peer_id),
-                data.encrypted_payload.size());
+                encrypted->size());
 }
 
 // ============================================================================
@@ -258,13 +262,16 @@ asio::awaitable<bool> RelayChannelActor::connect_websocket(
         conn_state_ = RelayChannelState::AUTHENTICATING;
 
         // 构建 RELAY_AUTH
-        RelayAuth auth;
-        auth.relay_token = relay_token;
-        auth.node_id = crypto_.node_id();
-        auth.node_key = crypto_.node_key().public_key;
+        pb::RelayAuth auth;
+        auth.set_relay_token(relay_token.data(), relay_token.size());
+        auth.set_node_id(crypto_.node_id());
+        auth.set_node_key(crypto_.node_key().public_key.data(), crypto_.node_key().public_key.size());
 
         // 发送 RELAY_AUTH
-        co_await send_frame(FrameType::RELAY_AUTH, auth.serialize());
+        auto result = FrameCodec::encode_protobuf(FrameType::RELAY_AUTH, auth);
+        if (result) {
+            co_await send_raw(*result);
+        }
 
         // 启动读写循环
         read_loop_running_ = true;
@@ -484,20 +491,23 @@ asio::awaitable<void> RelayChannelActor::handle_frame(const Frame& frame) {
 }
 
 asio::awaitable<void> RelayChannelActor::handle_relay_auth_resp(const Frame& frame) {
-    auto resp = RelayAuthResp::parse(frame.payload);
-    if (!resp) {
+    auto pb_resp = FrameCodec::decode_protobuf<pb::RelayAuthResp>(frame.data());
+    if (!pb_resp) {
         log().error("[{}] Failed to parse RELAY_AUTH_RESP", name_);
         co_return;
     }
 
-    if (!resp->success) {
+    RelayAuthResp resp;
+    from_proto(*pb_resp, &resp);
+
+    if (!resp.success) {
         log().error("[{}] Relay auth failed: {} (code {})",
-                    name_, resp->error_msg, resp->error_code);
+                    name_, resp.error_msg, resp.error_code);
 
         // 发送错误事件
         RelayChannelEvent event;
         event.type = RelayEventType::RELAY_ERROR;
-        event.reason = resp->error_msg;
+        event.reason = resp.error_msg;
         send_event(event);
         co_return;
     }
@@ -515,35 +525,38 @@ asio::awaitable<void> RelayChannelActor::handle_data(const Frame& frame) {
     log().debug("[{}] Processing DATA frame ({} bytes)",
                 name_, frame.payload.size());
 
-    auto data = DataPayload::parse(frame.payload);
-    if (!data) {
+    auto pb_data = FrameCodec::decode_protobuf<pb::DataPayload>(frame.data());
+    if (!pb_data) {
         log().warn("[{}] Failed to parse DATA payload", name_);
         co_return;
     }
 
+    DataPayload data;
+    from_proto(*pb_data, &data);
+
     log().debug("[{}] DATA from {} to me, encrypted {} bytes",
-                name_, peers_.get_peer_ip_str(data->src_node),
-                data->encrypted_payload.size());
+                name_, peers_.get_peer_ip_str(data.src_node),
+                data.encrypted_payload.size());
 
     // 确保发送者的会话密钥存在
-    if (!peers_.ensure_session_key(data->src_node)) {
+    if (!peers_.ensure_session_key(data.src_node)) {
         log().warn("[{}] Cannot decrypt data from {}: no session key",
-                   name_, peers_.get_peer_ip_str(data->src_node));
+                   name_, peers_.get_peer_ip_str(data.src_node));
         co_return;
     }
 
     // 解密数据
-    auto peer_ip = peers_.get_peer_ip_str(data->src_node);
-    auto plaintext = crypto_.decrypt(data->src_node, data->nonce, data->encrypted_payload);
+    auto peer_ip = peers_.get_peer_ip_str(data.src_node);
+    auto plaintext = crypto_.decrypt(data.src_node, data.nonce, data.encrypted_payload);
     if (!plaintext) {
         log().warn("[{}] Failed to decrypt data from {}, renegotiating session key...",
                    name_, peer_ip);
 
         // 清除旧的会话密钥并重新推导
-        crypto_.remove_session_key(data->src_node);
+        crypto_.remove_session_key(data.src_node);
 
         // 尝试推导新的会话密钥
-        if (!peers_.ensure_session_key(data->src_node)) {
+        if (!peers_.ensure_session_key(data.src_node)) {
             log().error("[{}] Failed to renegotiate session key for {}", name_, peer_ip);
             co_return;
         }
@@ -551,7 +564,7 @@ asio::awaitable<void> RelayChannelActor::handle_data(const Frame& frame) {
         log().info("[{}] Session key renegotiated for {}", name_, peer_ip);
 
         // 使用新密钥重试解密
-        plaintext = crypto_.decrypt(data->src_node, data->nonce, data->encrypted_payload);
+        plaintext = crypto_.decrypt(data.src_node, data.nonce, data.encrypted_payload);
         if (!plaintext) {
             log().warn("[{}] Decryption still failed after renegotiation, {} may have different node_key",
                        name_, peer_ip);
@@ -562,7 +575,7 @@ asio::awaitable<void> RelayChannelActor::handle_data(const Frame& frame) {
                    name_, peer_ip);
     }
 
-    peers_.update_last_seen(data->src_node);
+    peers_.update_last_seen(data.src_node);
 
     log().debug("[{}] Decrypted {} bytes from {}",
                 name_, plaintext->size(), peer_ip);
@@ -570,7 +583,7 @@ asio::awaitable<void> RelayChannelActor::handle_data(const Frame& frame) {
     // 发送数据接收事件
     RelayChannelEvent event;
     event.type = RelayEventType::DATA_RECEIVED;
-    event.src_node = data->src_node;
+    event.src_node = data.src_node;
     event.plaintext = std::make_shared<std::vector<uint8_t>>(std::move(*plaintext));
     send_event(event);
 }

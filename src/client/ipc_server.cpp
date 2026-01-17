@@ -1,5 +1,6 @@
 #include "client/ipc_server.hpp"
 #include "client/client.hpp"
+#include "client/prefs_store.hpp"
 #include "common/logger.hpp"
 #include "common/config.hpp"
 #include "common/config_metadata.hpp"
@@ -230,6 +231,8 @@ std::string IpcServer::process_request(const std::string& request) {
             return handle_config_list();
         } else if (cmd == "config_reload") {
             return handle_config_reload();
+        } else if (cmd == "prefs_update") {
+            return handle_prefs_update();
         } else {
             return encode_error(IpcStatus::INVALID_REQUEST, "Unknown command: " + cmd);
         }
@@ -590,6 +593,80 @@ std::string IpcServer::handle_config_reload() {
     return encode_config_reload_response(IpcStatus::OK, changes);
 }
 
+std::string IpcServer::handle_prefs_update() {
+    log().info("Prefs update requested via IPC");
+
+    try {
+        // 加载最新的 prefs.toml
+        auto state_dir = get_state_dir();
+        PrefsStore prefs(state_dir);
+
+        if (!prefs.load()) {
+            return encode_error(IpcStatus::ERROR, "Failed to load prefs: " + prefs.last_error());
+        }
+
+        // 应用到当前配置
+        ClientConfig& cfg = client_.config();
+        prefs.apply_to(cfg);
+
+        // 如果有配置应用器，通知它配置已更改
+        if (client_.config_applier()) {
+            // 创建一个包含 prefs 相关配置的变更列表
+            std::vector<ConfigChange> changes;
+
+            // exit_node 变更
+            if (prefs.exit_node()) {
+                ConfigChange change;
+                change.key = "routing.use_exit_node";
+                change.new_value = *prefs.exit_node();
+                change.applied = true;
+                changes.push_back(change);
+            }
+
+            // advertise_exit_node 变更
+            {
+                ConfigChange change;
+                change.key = "routing.exit_node";
+                change.new_value = prefs.advertise_exit_node() ? "true" : "false";
+                change.applied = true;
+                changes.push_back(change);
+            }
+
+            // advertise_routes 变更
+            {
+                ConfigChange change;
+                change.key = "routing.advertise_routes";
+                std::string routes_str;
+                for (const auto& r : prefs.advertise_routes()) {
+                    if (!routes_str.empty()) routes_str += ",";
+                    routes_str += r;
+                }
+                change.new_value = routes_str;
+                change.applied = true;
+                changes.push_back(change);
+            }
+
+            // accept_routes 变更
+            {
+                ConfigChange change;
+                change.key = "routing.accept_routes";
+                change.new_value = prefs.accept_routes() ? "true" : "false";
+                change.applied = true;
+                changes.push_back(change);
+            }
+
+            log().info("Applied {} prefs changes", changes.size());
+        }
+
+        // 触发路由重新公告（如果需要）
+        client_.request_route_reannounce();
+
+        return encode_ok("Prefs updated successfully");
+    } catch (const std::exception& e) {
+        return encode_error(IpcStatus::ERROR, std::string("Failed to update prefs: ") + e.what());
+    }
+}
+
 std::string IpcServer::encode_config_response(IpcStatus status, const IpcConfigItem& item) {
     json::object obj;
     obj["status"] = status == IpcStatus::OK ? "ok" : "error";
@@ -847,6 +924,10 @@ std::string IpcClient::config_list() {
 
 std::string IpcClient::config_reload() {
     return send_request(R"({"cmd":"config_reload"})");
+}
+
+std::string IpcClient::prefs_update() {
+    return send_request(R"({"cmd":"prefs_update"})");
 }
 
 } // namespace edgelink::client

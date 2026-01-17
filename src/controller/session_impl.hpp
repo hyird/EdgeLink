@@ -4,6 +4,8 @@
 #include "controller/session_manager.hpp"
 #include "common/crypto.hpp"
 #include "common/logger.hpp"
+#include "common/proto_convert.hpp"  // Proto conversion helpers (includes edgelink.pb.h)
+#include "common/auth_proto_helpers.hpp"  // Auth protobuf helpers
 
 namespace edgelink::controller {
 
@@ -121,7 +123,12 @@ asio::awaitable<void> SessionBase<StreamType>::send_error(uint16_t code,
     error.request_id = request_id;
     error.error_msg = message;
 
-    co_await send_frame(FrameType::FRAME_ERROR, error.serialize());
+    pb::FrameError pb_error;
+    to_proto(error, &pb_error);
+    auto result = FrameCodec::encode_protobuf(FrameType::FRAME_ERROR, pb_error);
+    if (result) {
+        co_await send_raw(*result);
+    }
 }
 
 // ============================================================================
@@ -200,8 +207,6 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::run() {
 
 template<typename StreamType>
 asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& frame) {
-    log().debug("Control: received {} frame", frame_type_name(frame.header.type));
-
     switch (frame.header.type) {
         case FrameType::AUTH_REQUEST:
             co_await handle_auth_request(frame);
@@ -256,26 +261,44 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& 
 
 template<typename StreamType>
 asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const Frame& frame) {
-    auto request = AuthRequest::parse(frame.payload);
-    if (!request) {
+    // Parse protobuf AuthRequest
+    auto pb_request = FrameCodec::decode_protobuf<pb::AuthRequest>(frame.data());
+    if (!pb_request) {
         co_await this->send_error(1002, "Invalid AUTH_REQUEST format", FrameType::AUTH_REQUEST);
         co_return;
     }
 
     log().info("Auth request from {} (auth_type={})",
-                 request->hostname, static_cast<int>(request->auth_type));
+                 pb_request->hostname(), static_cast<int>(pb_request->auth_type()));
+
+    // Convert bytes to arrays for crypto operations
+    std::array<uint8_t, ED25519_PUBLIC_KEY_SIZE> machine_key{};
+    std::array<uint8_t, X25519_KEY_SIZE> node_key{};
+    std::array<uint8_t, ED25519_SIGNATURE_SIZE> signature{};
+
+    if (pb_request->machine_key().size() >= machine_key.size()) {
+        std::memcpy(machine_key.data(), pb_request->machine_key().data(), machine_key.size());
+    }
+    if (pb_request->node_key().size() >= node_key.size()) {
+        std::memcpy(node_key.data(), pb_request->node_key().data(), node_key.size());
+    }
+    if (pb_request->signature().size() >= signature.size()) {
+        std::memcpy(signature.data(), pb_request->signature().data(), signature.size());
+    }
 
     // Verify signature
-    auto sign_data = request->get_sign_data();
-    if (!crypto::ed25519_verify(sign_data, request->signature, request->machine_key)) {
+    auto sign_data = get_auth_sign_data(*pb_request);
+    if (!crypto::ed25519_verify(sign_data, signature, machine_key)) {
         co_await this->send_error(1003, "Invalid signature", FrameType::AUTH_REQUEST);
         co_return;
     }
 
     // Handle authkey authentication
     NetworkId network_id = 0;
-    if (request->auth_type == AuthType::AUTHKEY) {
-        std::string authkey(request->auth_data.begin(), request->auth_data.end());
+    AuthType auth_type = from_proto_auth_type(pb_request->auth_type());
+
+    if (auth_type == AuthType::AUTHKEY) {
+        std::string authkey = pb_request->auth_data();
         auto key_record = this->manager_.database().get_authkey(authkey);
 
         if (!key_record) {
@@ -298,9 +321,9 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
         network_id = key_record->network_id;
         this->manager_.database().increment_authkey_use(authkey);
 
-    } else if (request->auth_type == AuthType::MACHINE) {
+    } else if (auth_type == AuthType::MACHINE) {
         // Reconnection - find existing node
-        auto existing = this->manager_.database().get_node_by_machine_key(request->machine_key);
+        auto existing = this->manager_.database().get_node_by_machine_key(machine_key);
         if (!existing) {
             co_await this->send_error(1007, "Unknown machine key", FrameType::AUTH_REQUEST);
             co_return;
@@ -313,8 +336,8 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
 
     // Find or create node
     auto node = this->manager_.database().find_or_create_node(
-        network_id, request->machine_key, request->node_key,
-        request->hostname, request->os, request->arch, request->version);
+        network_id, machine_key, node_key,
+        pb_request->hostname(), pb_request->os(), pb_request->arch(), pb_request->version());
 
     if (!node) {
         co_await this->send_error(1009, "Failed to create node", FrameType::AUTH_REQUEST);
@@ -330,7 +353,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
     this->manager_.database().update_node_online(this->node_id_, true);
 
     // Store exit_node capability (per-session, in memory)
-    this->manager_.update_node_exit_node(this->node_id_, request->exit_node);
+    this->manager_.update_node_exit_node(this->node_id_, pb_request->exit_node());
 
     // Register session
     this->manager_.register_control_session(this->node_id_,
@@ -346,17 +369,20 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
     }
 
     // Build AUTH_RESPONSE
-    AuthResponse response;
-    response.success = true;
-    response.node_id = this->node_id_;
-    response.virtual_ip = node->virtual_ip;
-    response.network_id = this->network_id_;
-    response.auth_token = std::vector<uint8_t>(auth_token->begin(), auth_token->end());
-    response.relay_token = std::vector<uint8_t>(relay_token->begin(), relay_token->end());
-    response.error_code = 0;
-    response.error_msg = "";
+    pb::AuthResponse response;
+    response.set_success(true);
+    response.set_node_id(this->node_id_);
+    to_proto(node->virtual_ip, response.mutable_virtual_ip());
+    response.set_network_id(this->network_id_);
+    response.set_auth_token(*auth_token);
+    response.set_relay_token(*relay_token);
+    response.set_error_code(0);
+    response.set_error_msg("");
 
-    co_await this->send_frame(FrameType::AUTH_RESPONSE, response.serialize());
+    auto result = FrameCodec::encode_protobuf(FrameType::AUTH_RESPONSE, response);
+    if (result) {
+        co_await this->send_raw(*result);
+    }
 
     log().info("Node {} authenticated: {} ({})",
                  this->node_id_, node->hostname, node->virtual_ip.to_string());
@@ -452,7 +478,14 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::send_config() {
     }
 
     config_version_ = config.version;
-    co_await this->send_frame(FrameType::CONFIG, config.serialize());
+
+    // Convert to protobuf and send
+    pb::Config pb_config;
+    to_proto(config, &pb_config);
+    auto result = FrameCodec::encode_protobuf(FrameType::CONFIG, pb_config);
+    if (result) {
+        co_await this->send_raw(*result);
+    }
 
     log().debug("Sent CONFIG to node {} with {} peers, {} routes",
                 this->node_id_, config.peers.size(), config.routes.size());
@@ -460,12 +493,14 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::send_config() {
 
 template<typename StreamType>
 asio::awaitable<void> ControlSessionImpl<StreamType>::handle_config_ack(const Frame& frame) {
-    auto ack = ConfigAck::parse(frame.payload);
-    if (!ack) {
+    // Use protobuf ConfigAck message
+    auto pb_ack = FrameCodec::decode_protobuf<pb::ConfigAck>(frame.data());
+    if (!pb_ack) {
+        log().warn("Failed to parse CONFIG_ACK: {}", frame_error_message(pb_ack.error()));
         co_return;
     }
 
-    log().debug("Node {} acknowledged config version {}", this->node_id_, ack->version);
+    log().debug("Node {} acknowledged config version {}", this->node_id_, pb_ack->version());
 
     // 通知状态机配置已确认
     this->manager_.state_machine().mark_config_acked(this->node_id_);
@@ -473,17 +508,22 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_config_ack(const Fr
 
 template<typename StreamType>
 asio::awaitable<void> ControlSessionImpl<StreamType>::handle_ping(const Frame& frame) {
-    auto ping = Ping::parse(frame.payload);
+    // Use protobuf Ping message
+    auto ping = FrameCodec::decode_protobuf<pb::Ping>(frame.data());
     if (!ping) {
+        log().warn("Failed to parse PING: {}", frame_error_message(ping.error()));
         co_return;
     }
 
     // Send PONG with same timestamp and seq_num
-    Pong pong;
-    pong.timestamp = ping->timestamp;
-    pong.seq_num = ping->seq_num;
+    pb::Pong pong;
+    pong.set_timestamp(ping->timestamp());
+    pong.set_seq_num(ping->seq_num());
 
-    co_await this->send_frame(FrameType::PONG, pong.serialize());
+    auto result = FrameCodec::encode_protobuf(FrameType::PONG, pong);
+    if (result) {
+        co_await this->send_raw(*result);
+    }
 
     // Update last seen
     if (this->authenticated_) {
@@ -498,33 +538,35 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_latency_report(cons
         co_return;
     }
 
-    auto report = LatencyReport::parse(frame.payload);
-    if (!report) {
-        log().warn("Invalid LATENCY_REPORT from node {}", this->node_id_);
+    auto pb_report = FrameCodec::decode_protobuf<pb::LatencyReport>(frame.data());
+    if (!pb_report) {
+        log().warn("Invalid LATENCY_REPORT from node {}: {}", this->node_id_, frame_error_message(pb_report.error()));
         co_return;
     }
+    LatencyReport report;
+    from_proto(*pb_report, &report);
 
     log().debug("Received latency report from node {} with {} entries",
-                this->node_id_, report->entries.size());
+                this->node_id_, report.entries.size());
 
     // 记录延迟数据（可用于路由优化、P2P 决策等）
-    for (const auto& entry : report->entries) {
+    for (const auto& entry : report.entries) {
         log().trace("  Node {} -> Node {}: {}ms (path={})",
                     this->node_id_, entry.peer_node_id,
                     entry.latency_ms, entry.path_type == 0 ? "relay" : "p2p");
     }
 
     // 构建存储条目
-    if (!report->entries.empty()) {
+    if (!report.entries.empty()) {
         std::vector<std::tuple<NodeId, uint16_t, uint8_t>> entries;
-        entries.reserve(report->entries.size());
-        for (const auto& entry : report->entries) {
+        entries.reserve(report.entries.size());
+        for (const auto& entry : report.entries) {
             entries.emplace_back(entry.peer_node_id, entry.latency_ms, entry.path_type);
         }
 
         // 存储到数据库
         auto result = this->manager_.database().save_latency_reports(
-            this->node_id_, entries, report->timestamp);
+            this->node_id_, entries, report.timestamp);
         if (!result) {
             log().warn("Failed to save latency report from node {}", this->node_id_);
         }
@@ -547,29 +589,36 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_peer_path_report(co
         co_return;
     }
 
-    auto report = PeerPathReport::parse(frame.payload);
-    if (!report) {
-        log().warn("Invalid PEER_PATH_REPORT from node {}", this->node_id_);
+    auto pb_report = FrameCodec::decode_protobuf<pb::PeerPathReport>(frame.data());
+    if (!pb_report) {
+        log().warn("Invalid PEER_PATH_REPORT from node {}: {}", this->node_id_, frame_error_message(pb_report.error()));
         co_return;
     }
+    PeerPathReport report;
+    from_proto(*pb_report, &report);
 
     log().debug("Received PEER_PATH_REPORT from node {} with {} entries",
-                this->node_id_, report->entries.size());
+                this->node_id_, report.entries.size());
 
     // 记录延迟数据
-    for (const auto& entry : report->entries) {
+    for (const auto& entry : report.entries) {
         log().trace("  Node {} -> Node {} via relay {}: {}ms (conn=0x{:08x}, loss={}%)",
                     this->node_id_, entry.peer_node_id, entry.relay_id,
                     entry.latency_ms, entry.connection_id, entry.packet_loss);
     }
 
     // 将数据传递给 PathDecisionEngine 并计算最优路由
-    this->manager_.path_decision().handle_peer_path_report(this->node_id_, *report);
+    this->manager_.path_decision().handle_peer_path_report(this->node_id_, report);
     auto routing = this->manager_.path_decision().compute_routing_for_node(this->node_id_);
 
     // 发送路由更新给该节点
     if (!routing.routes.empty()) {
-        co_await this->send_frame(FrameType::PEER_ROUTING_UPDATE, routing.serialize());
+        pb::PeerRoutingUpdate pb_routing;
+        to_proto(routing, &pb_routing);
+        auto result = FrameCodec::encode_protobuf(FrameType::PEER_ROUTING_UPDATE, pb_routing);
+        if (result) {
+            co_await this->send_raw(*result);
+        }
         log().debug("Sent PEER_ROUTING_UPDATE to node {} with {} entries",
                    this->node_id_, routing.routes.size());
     }
@@ -582,24 +631,26 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_relay_latency_repor
         co_return;
     }
 
-    auto report = RelayLatencyReport::parse(frame.payload);
-    if (!report) {
-        log().warn("Invalid RELAY_LATENCY_REPORT from node {}", this->node_id_);
+    auto pb_report = FrameCodec::decode_protobuf<pb::RelayLatencyReport>(frame.data());
+    if (!pb_report) {
+        log().warn("Invalid RELAY_LATENCY_REPORT from node {}: {}", this->node_id_, frame_error_message(pb_report.error()));
         co_return;
     }
+    RelayLatencyReport report;
+    from_proto(*pb_report, &report);
 
     log().debug("Received RELAY_LATENCY_REPORT from node {} with {} entries",
-                this->node_id_, report->entries.size());
+                this->node_id_, report.entries.size());
 
     // 记录延迟数据
-    for (const auto& entry : report->entries) {
+    for (const auto& entry : report.entries) {
         log().debug("  Node {} -> Relay {}: {}ms (conn=0x{:08x}, loss={}%)",
                     this->node_id_, entry.relay_id,
                     entry.latency_ms, entry.connection_id, entry.packet_loss);
     }
 
     // 将数据传递给 PathDecisionEngine
-    this->manager_.path_decision().handle_relay_latency_report(this->node_id_, *report);
+    this->manager_.path_decision().handle_relay_latency_report(this->node_id_, report);
 }
 
 template<typename StreamType>
@@ -609,31 +660,33 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_announce(cons
         co_return;
     }
 
-    auto announce = RouteAnnounce::parse(frame.payload);
-    if (!announce) {
+    auto pb_announce = FrameCodec::decode_protobuf<pb::RouteAnnounce>(frame.data());
+    if (!pb_announce) {
         co_await send_route_ack(0, false, 2001, "Invalid ROUTE_ANNOUNCE format");
         co_return;
     }
+    RouteAnnounce announce;
+    from_proto(*pb_announce, &announce);
 
-    log().info("Node {} announcing {} routes", this->node_id_, announce->routes.size());
+    log().info("Node {} announcing {} routes", this->node_id_, announce.routes.size());
 
     // 存储路由到数据库
     auto result = this->manager_.database().upsert_routes(
-        this->node_id_, this->network_id_, announce->routes);
+        this->node_id_, this->network_id_, announce.routes);
 
     if (!result) {
-        co_await send_route_ack(announce->request_id, false, 2002, "Failed to store routes");
+        co_await send_route_ack(announce.request_id, false, 2002, "Failed to store routes");
         co_return;
     }
 
     // 发送成功 ACK
-    co_await send_route_ack(announce->request_id, true);
+    co_await send_route_ack(announce.request_id, true);
 
     // 通知状态机路由公告
-    this->manager_.handle_route_announce(this->node_id_, announce->routes);
+    this->manager_.handle_route_announce(this->node_id_, announce.routes);
 
     // 通知其他节点路由更新
-    co_await this->manager_.broadcast_route_update(this->network_id_, this->node_id_, announce->routes, {});
+    co_await this->manager_.broadcast_route_update(this->network_id_, this->node_id_, announce.routes, {});
 }
 
 template<typename StreamType>
@@ -643,30 +696,32 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_withdraw(cons
         co_return;
     }
 
-    auto withdraw = RouteWithdraw::parse(frame.payload);
-    if (!withdraw) {
+    auto pb_withdraw = FrameCodec::decode_protobuf<pb::RouteWithdraw>(frame.data());
+    if (!pb_withdraw) {
         co_await send_route_ack(0, false, 2001, "Invalid ROUTE_WITHDRAW format");
         co_return;
     }
+    RouteWithdraw withdraw;
+    from_proto(*pb_withdraw, &withdraw);
 
-    log().info("Node {} withdrawing {} routes", this->node_id_, withdraw->routes.size());
+    log().info("Node {} withdrawing {} routes", this->node_id_, withdraw.routes.size());
 
     // 从数据库删除路由
-    auto result = this->manager_.database().delete_routes(this->node_id_, withdraw->routes);
+    auto result = this->manager_.database().delete_routes(this->node_id_, withdraw.routes);
 
     if (!result) {
-        co_await send_route_ack(withdraw->request_id, false, 2003, "Failed to delete routes");
+        co_await send_route_ack(withdraw.request_id, false, 2003, "Failed to delete routes");
         co_return;
     }
 
     // 发送成功 ACK
-    co_await send_route_ack(withdraw->request_id, true);
+    co_await send_route_ack(withdraw.request_id, true);
 
     // 通知状态机路由撤销
-    this->manager_.handle_route_withdraw(this->node_id_, withdraw->routes);
+    this->manager_.handle_route_withdraw(this->node_id_, withdraw.routes);
 
     // 通知其他节点路由更新
-    co_await this->manager_.broadcast_route_update(this->network_id_, this->node_id_, {}, withdraw->routes);
+    co_await this->manager_.broadcast_route_update(this->network_id_, this->node_id_, {}, withdraw.routes);
 }
 
 template<typename StreamType>
@@ -676,36 +731,42 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Fram
         co_return;
     }
 
-    auto init = P2PInit::parse(frame.payload);
-    if (!init) {
+    auto pb_init = FrameCodec::decode_protobuf<pb::P2PInit>(frame.data());
+    if (!pb_init) {
         log().error("Invalid P2P_INIT format");
         co_return;
     }
 
+    P2PInit init;
+    from_proto(*pb_init, &init);
+
     log().debug("P2P_INIT from node {} targeting node {}, seq={}",
-                this->node_id_, init->target_node, init->init_seq);
+                this->node_id_, init.target_node, init.init_seq);
 
     // 通知状态机 P2P 初始化
-    this->manager_.handle_p2p_init(this->node_id_, init->target_node, init->init_seq);
+    this->manager_.handle_p2p_init(this->node_id_, init.target_node, init.init_seq);
 
     // 查找目标节点的 Control Session
-    auto target_session = this->manager_.get_control_session(init->target_node);
+    auto target_session = this->manager_.get_control_session(init.target_node);
     if (!target_session) {
-        log().debug("Target node {} not connected, cannot provide endpoints", init->target_node);
+        log().debug("Target node {} not connected, cannot provide endpoints", init.target_node);
         // 发送空的 P2P_ENDPOINT 表示对端不在线
-        P2PEndpointMsg resp;
-        resp.init_seq = init->init_seq;
-        resp.peer_node = init->target_node;
-        resp.peer_key = {};  // 空公钥
-        resp.endpoints = {}; // 空端点列表
-        co_await this->send_frame(FrameType::P2P_ENDPOINT, resp.serialize());
+        pb::P2PEndpoint pb_resp;
+        pb_resp.set_init_seq(init.init_seq);
+        pb_resp.set_peer_node(init.target_node);
+        pb_resp.set_peer_key("", 0);  // 空公钥
+        // endpoints 空
+        auto result = FrameCodec::encode_protobuf(FrameType::P2P_ENDPOINT, pb_resp);
+        if (result) {
+            co_await this->send_raw(*result);
+        }
         co_return;
     }
 
     // 从数据库获取对端节点信息
-    auto peer_node = this->manager_.database().get_node(init->target_node);
+    auto peer_node = this->manager_.database().get_node(init.target_node);
     if (!peer_node) {
-        log().warn("Target node {} not found in database", init->target_node);
+        log().warn("Target node {} not found in database", init.target_node);
         co_return;
     }
 
@@ -720,19 +781,20 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Fram
     // 1. 发送目标节点的端点给发起方
     // ========================================================================
     P2PEndpointMsg resp;
-    resp.init_seq = init->init_seq;
-    resp.peer_node = init->target_node;
-
-    // 复制公钥 (node_key - X25519 密钥交换公钥)
+    resp.init_seq = init.init_seq;
+    resp.peer_node = init.target_node;
     resp.peer_key = peer_node->node_key;
-
-    // 获取对端上报的端点列表
-    resp.endpoints = this->manager_.get_node_endpoints(init->target_node);
+    resp.endpoints = this->manager_.get_node_endpoints(init.target_node);
 
     log().debug("Sending P2P_ENDPOINT to node {} for peer {}: {} endpoints",
-                this->node_id_, init->target_node, resp.endpoints.size());
+                this->node_id_, init.target_node, resp.endpoints.size());
 
-    co_await this->send_frame(FrameType::P2P_ENDPOINT, resp.serialize());
+    pb::P2PEndpoint pb_resp;
+    to_proto(resp, &pb_resp);
+    auto result = FrameCodec::encode_protobuf(FrameType::P2P_ENDPOINT, pb_resp);
+    if (result) {
+        co_await this->send_raw(*result);
+    }
 
     // ========================================================================
     // 2. 双向打洞：同时通知目标节点也开始向发起方打洞
@@ -740,17 +802,18 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Fram
     P2PEndpointMsg reverse_resp;
     reverse_resp.init_seq = 0;  // 被动打洞，seq=0
     reverse_resp.peer_node = this->node_id_;
-
-    // 复制发起方的公钥 (node_key - X25519 密钥交换公钥)
     reverse_resp.peer_key = src_node->node_key;
-
-    // 获取发起方的端点列表
     reverse_resp.endpoints = this->manager_.get_node_endpoints(this->node_id_);
 
     log().debug("Sending reverse P2P_ENDPOINT to node {} for peer {}: {} endpoints (bidirectional punch)",
-                init->target_node, this->node_id_, reverse_resp.endpoints.size());
+                init.target_node, this->node_id_, reverse_resp.endpoints.size());
 
-    co_await target_session->send_frame(FrameType::P2P_ENDPOINT, reverse_resp.serialize());
+    pb::P2PEndpoint pb_reverse;
+    to_proto(reverse_resp, &pb_reverse);
+    auto reverse_result = FrameCodec::encode_protobuf(FrameType::P2P_ENDPOINT, pb_reverse);
+    if (reverse_result) {
+        co_await target_session->send_raw(*reverse_result);
+    }
 }
 
 template<typename StreamType>
@@ -760,29 +823,36 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_endpoint_update(con
         co_return;
     }
 
-    auto update = EndpointUpdate::parse(frame.payload);
-    if (!update) {
-        log().error("Invalid ENDPOINT_UPDATE format");
+    auto pb_update = FrameCodec::decode_protobuf<pb::EndpointUpdate>(frame.data());
+    if (!pb_update) {
+        log().error("Invalid ENDPOINT_UPDATE format: {}", frame_error_message(pb_update.error()));
         co_return;
     }
+    EndpointUpdate update;
+    from_proto(*pb_update, &update);
 
     log().debug("Node {} reported {} endpoints (request_id={})",
-                this->node_id_, update->endpoints.size(), update->request_id);
-    for (const auto& ep : update->endpoints) {
+                this->node_id_, update.endpoints.size(), update.request_id);
+    for (const auto& ep : update.endpoints) {
         log().debug("  - {}.{}.{}.{}:{} (type={})",
                     ep.address[0], ep.address[1], ep.address[2], ep.address[3],
                     ep.port, static_cast<int>(ep.type));
     }
 
     // 存储端点到 SessionManager 并通知状态机
-    this->manager_.handle_endpoint_update(this->node_id_, update->endpoints);
+    this->manager_.handle_endpoint_update(this->node_id_, update.endpoints);
 
     // 发送确认
     EndpointAck ack;
-    ack.request_id = update->request_id;
+    ack.request_id = update.request_id;
     ack.success = true;
-    ack.endpoint_count = static_cast<uint8_t>(std::min(update->endpoints.size(), size_t(255)));
-    co_await this->send_frame(FrameType::ENDPOINT_ACK, ack.serialize());
+    ack.endpoint_count = static_cast<uint8_t>(std::min(update.endpoints.size(), size_t(255)));
+    pb::EndpointAck pb_ack;
+    to_proto(ack, &pb_ack);
+    auto result = FrameCodec::encode_protobuf(FrameType::ENDPOINT_ACK, pb_ack);
+    if (result) {
+        co_await this->send_raw(*result);
+    }
 }
 
 template<typename StreamType>
@@ -795,7 +865,12 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::send_route_ack(
     ack.error_code = error_code;
     ack.error_msg = error_msg;
 
-    co_await this->send_frame(FrameType::ROUTE_ACK, ack.serialize());
+    pb::RouteAck pb_ack;
+    to_proto(ack, &pb_ack);
+    auto result = FrameCodec::encode_protobuf(FrameType::ROUTE_ACK, pb_ack);
+    if (result) {
+        co_await this->send_raw(*result);
+    }
 }
 
 // ============================================================================
@@ -854,8 +929,6 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::run() {
 
 template<typename StreamType>
 asio::awaitable<void> RelaySessionImpl<StreamType>::handle_frame(const Frame& frame) {
-    log().debug("Relay: received {} frame", frame_type_name(frame.header.type));
-
     switch (frame.header.type) {
         case FrameType::RELAY_AUTH:
             co_await handle_relay_auth(frame);
@@ -882,14 +955,17 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_frame(const Frame& fr
 
 template<typename StreamType>
 asio::awaitable<void> RelaySessionImpl<StreamType>::handle_relay_auth(const Frame& frame) {
-    auto auth = RelayAuth::parse(frame.payload);
-    if (!auth) {
+    auto pb_auth = FrameCodec::decode_protobuf<pb::RelayAuth>(frame.data());
+    if (!pb_auth) {
         co_await this->send_error(1002, "Invalid RELAY_AUTH format", FrameType::RELAY_AUTH);
         co_return;
     }
 
+    RelayAuth auth;
+    from_proto(*pb_auth, &auth);
+
     // Verify relay token
-    std::string token(auth->relay_token.begin(), auth->relay_token.end());
+    std::string token(auth.relay_token.begin(), auth.relay_token.end());
     auto claims = this->manager_.jwt().verify_relay_token(token);
 
     if (!claims) {
@@ -898,14 +974,14 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_relay_auth(const Fram
     }
 
     // Verify node_id matches
-    if (claims->node_id != auth->node_id) {
+    if (claims->node_id != auth.node_id) {
         co_await this->send_error(1004, "Node ID mismatch", FrameType::RELAY_AUTH);
         co_return;
     }
 
     // Update state
     this->authenticated_ = true;
-    this->node_id_ = auth->node_id;
+    this->node_id_ = auth.node_id;
     this->network_id_ = claims->network_id;
 
     // Register relay session
@@ -913,12 +989,15 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_relay_auth(const Fram
         std::static_pointer_cast<ISession>(this->shared_from_this()));
 
     // Send success response
-    RelayAuthResp response;
-    response.success = true;
-    response.error_code = 0;
-    response.error_msg = "";
+    pb::RelayAuthResp response;
+    response.set_success(true);
+    response.set_error_code(0);
+    response.set_error_msg("");
 
-    co_await this->send_frame(FrameType::RELAY_AUTH_RESP, response.serialize());
+    auto result = FrameCodec::encode_protobuf(FrameType::RELAY_AUTH_RESP, response);
+    if (result) {
+        co_await this->send_raw(*result);
+    }
 
     log().info("Node {} authenticated to relay channel", this->node_id_);
 }
@@ -931,51 +1010,54 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_data(const Frame& fra
     }
 
     // Parse DATA payload to get dst_node
-    auto data = DataPayload::parse(frame.payload);
-    if (!data) {
+    auto pb_data = FrameCodec::decode_protobuf<pb::DataPayload>(frame.data());
+    if (!pb_data) {
         log().warn("Relay: failed to parse DATA payload");
         co_return; // Silently drop malformed data
     }
 
-    auto src_ip = this->manager_.get_node_ip_str(data->src_node);
-    auto dst_ip = this->manager_.get_node_ip_str(data->dst_node);
-
-    log().debug("Relay: DATA from {} to {} ({} bytes)", src_ip, dst_ip, frame.payload.size());
+    DataPayload data;
+    from_proto(*pb_data, &data);
 
     // Verify src_node matches authenticated node
-    if (data->src_node != this->node_id_) {
-        log().warn("Node {} attempted to send DATA with src_node={}",
-                     this->manager_.get_node_ip_str(this->node_id_), src_ip);
+    if (data.src_node != this->node_id_) {
+        log().warn("Node {} attempted to send DATA with wrong src_node={}",
+                     this->node_id_, data.src_node);
         co_return;
     }
 
     // Find target relay session
-    auto target = this->manager_.get_relay_session(data->dst_node);
+    auto target = this->manager_.get_relay_session(data.dst_node);
     if (!target) {
         // Target not connected to relay, drop silently
-        log().warn("Relay: DATA from {} to {} dropped: target not on relay", src_ip, dst_ip);
         co_return;
     }
 
     // Forward the entire frame as-is (we don't decrypt)
-    auto frame_data = FrameCodec::encode(FrameType::DATA, frame.payload);
-    co_await target->send_raw(frame_data);
-
-    log().debug("Relay: forwarded DATA from {} to {} ({} bytes)", src_ip, dst_ip, frame.payload.size());
+    auto frame_result = FrameCodec::encode_protobuf(FrameType::DATA, *pb_data);
+    if (frame_result) {
+        co_await target->send_raw(*frame_result);
+    }
 }
 
 template<typename StreamType>
 asio::awaitable<void> RelaySessionImpl<StreamType>::handle_ping(const Frame& frame) {
-    auto ping = Ping::parse(frame.payload);
+    // Use protobuf Ping message
+    auto ping = FrameCodec::decode_protobuf<pb::Ping>(frame.data());
     if (!ping) {
+        log().warn("Failed to parse PING: {}", frame_error_message(ping.error()));
         co_return;
     }
 
-    Pong pong;
-    pong.timestamp = ping->timestamp;
-    pong.seq_num = ping->seq_num;
+    // Send PONG with same timestamp and seq_num
+    pb::Pong pong;
+    pong.set_timestamp(ping->timestamp());
+    pong.set_seq_num(ping->seq_num());
 
-    co_await this->send_frame(FrameType::PONG, pong.serialize());
+    auto result = FrameCodec::encode_protobuf(FrameType::PONG, pong);
+    if (result) {
+        co_await this->send_raw(*result);
+    }
 }
 
 } // namespace edgelink::controller
