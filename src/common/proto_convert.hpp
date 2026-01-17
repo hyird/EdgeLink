@@ -25,7 +25,17 @@
 #include <cstring>
 
 // Include protobuf types (required for inline function implementations)
+// Disable GCC warning for protobuf's concept usage
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-requires"
+#endif
+
 #include "edgelink.pb.h"
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 namespace edgelink {
 

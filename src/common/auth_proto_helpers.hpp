@@ -9,7 +9,18 @@
 // uses forward declarations for protobuf types, which is insufficient for
 // these helper functions that need to access protobuf message fields.
 
+// Disable GCC warning for protobuf's concept usage
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-requires"
+#endif
+
 #include "edgelink.pb.h"
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
 #include "common/types.hpp"
 #include <vector>
 #include <cstdint>
