@@ -2,7 +2,7 @@
 
 #include "client/data_plane_actor.hpp"
 #include "client/relay_channel_actor.hpp"
-// #include "client/p2p_manager_actor.hpp"  // TODO: 待实现
+#include "client/p2p_manager_actor.hpp"
 #include "common/logger.hpp"
 #include "common/performance_monitor.hpp"
 
@@ -155,14 +155,16 @@ asio::awaitable<void> DataPlaneActor::handle_send_to_cmd(const DataPlaneCmd& cmd
     try {
         if (path == PeerDataPath::P2P) {
             PERF_INCREMENT("DataPlane.PacketsViaP2P");
-            // TODO: 通过 P2P Manager 发送
+            // 通过 P2P Manager 发送
             if (p2p_) {
-                // P2PManagerCmd send_cmd;
-                // send_cmd.type = P2PCmdType::SEND_DATA;
-                // send_cmd.peer_id = cmd.peer_id;
-                // send_cmd.plaintext = cmd.data;
-                // co_await p2p_->send_message(send_cmd);
-                log().warn("[{}] P2P send not yet implemented", name_);
+                using edgelink::messages::P2PManagerCmd;
+                using edgelink::messages::P2PCmdType;
+
+                P2PManagerCmd send_cmd;
+                send_cmd.type = P2PCmdType::SEND_DATA;
+                send_cmd.peer_id = cmd.peer_id;
+                send_cmd.plaintext = cmd.data;
+                co_await p2p_->send_message(send_cmd);
             } else {
                 log().error("[{}] P2P manager not set", name_);
             }

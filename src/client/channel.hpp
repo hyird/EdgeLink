@@ -165,6 +165,9 @@ public:
     // Send P2P_INIT (request peer endpoints from Controller)
     asio::awaitable<void> send_p2p_init(const P2PInit& init);
 
+    // Send P2P_STATUS (report P2P connection status to Controller)
+    asio::awaitable<void> send_p2p_status(const P2PStatusMsg& status);
+
     // Send ENDPOINT_UPDATE (report our endpoints to Controller)
     // Returns request_id for tracking acknowledgement
     asio::awaitable<uint32_t> send_endpoint_update(const std::vector<Endpoint>& endpoints);

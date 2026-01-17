@@ -716,7 +716,10 @@ asio::awaitable<void> ClientActor::handle_data_plane_event(const DataPlaneEvent&
         case DataPlaneEventType::DATA_RECEIVED:
             log().debug("[{}] DataPlane received data from {}: {} bytes",
                         name_, event.src_node, event.data->size());
-            // TODO: 转发给上层应用
+            // 转发给 TUN 设备
+            if (tun_actor_) {
+                co_await write_tun_packet(event.data);
+            }
             break;
 
         case DataPlaneEventType::DATA_ERROR:

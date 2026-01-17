@@ -793,8 +793,8 @@ asio::awaitable<void> ControlChannelActor::handle_config_update(const Frame& fra
 
     // 发送配置更新事件
     ControlChannelEvent event;
-    event.type = CtrlEventType::CONFIG_RECEIVED;  // 复用 CONFIG_RECEIVED
-    // TODO: 需要在 ControlChannelEvent 中添加 config_update 字段
+    event.type = CtrlEventType::CONFIG_RECEIVED;
+    event.config_update = update;
     send_event(event);
 }
 

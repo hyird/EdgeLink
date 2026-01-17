@@ -1728,9 +1728,10 @@ asio::awaitable<void> Client::p2p_status_handler() {
                 break;
             }
 
-            // TODO: 通过 Control Channel 发送 P2P_STATUS
-            log().debug("P2P status: peer={}, state={}, latency={}ms",
-                        status.peer_node, static_cast<int>(status.status), status.latency_ms);
+            // 通过 Control Channel 发送 P2P_STATUS
+            if (control_ && control_->is_connected()) {
+                co_await control_->send_p2p_status(status);
+            }
 
         } catch (const std::exception& e) {
             log().warn("P2P status handler exception: {}", e.what());

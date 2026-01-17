@@ -1044,6 +1044,17 @@ asio::awaitable<void> ControlChannel::send_p2p_init(const P2PInit& init) {
     log().debug("Sent P2P_INIT: target_node={}, init_seq={}", init.target_node, init.init_seq);
 }
 
+asio::awaitable<void> ControlChannel::send_p2p_status(const P2PStatusMsg& status) {
+    pb::P2PStatusMsg pb_status;
+    to_proto(status, &pb_status);
+    auto result = FrameCodec::encode_protobuf(FrameType::P2P_STATUS, pb_status);
+    if (result) {
+        co_await send_raw(*result);
+    }
+    log().debug("Sent P2P_STATUS: peer={}, status={}, latency={}ms",
+                status.peer_node, static_cast<int>(status.status), status.latency_ms);
+}
+
 asio::awaitable<uint32_t> ControlChannel::send_endpoint_update(const std::vector<Endpoint>& endpoints) {
     EndpointUpdate update;
     update.request_id = ++endpoint_request_id_;

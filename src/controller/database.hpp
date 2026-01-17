@@ -123,6 +123,9 @@ public:
     // Close database
     void close();
 
+    // Check if database is open
+    bool is_open() const { return db_ != nullptr; }
+
     // Initialize schema
     std::expected<void, DbError> init_schema();
 

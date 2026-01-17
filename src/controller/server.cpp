@@ -150,9 +150,14 @@ asio::awaitable<void> HttpSession::run() {
         co_return;
     }
     if (target == "/health/ready" || target == "/health/ready/") {
-        // TODO: Check database connectivity and other dependencies
-        co_await send_health_response(stream_, req, http::status::ok,
-            R"({"status":"ready"})");
+        // Check database connectivity
+        if (manager_.database().is_open()) {
+            co_await send_health_response(stream_, req, http::status::ok,
+                R"({"status":"ready"})");
+        } else {
+            co_await send_health_response(stream_, req, http::status::service_unavailable,
+                R"({"status":"not_ready","reason":"database not connected"})");
+        }
         co_return;
     }
 
@@ -240,9 +245,14 @@ asio::awaitable<void> PlainHttpSession::run() {
         co_return;
     }
     if (target == "/health/ready" || target == "/health/ready/") {
-        // TODO: Check database connectivity and other dependencies
-        co_await send_health_response(stream_, req, http::status::ok,
-            R"({"status":"ready"})");
+        // Check database connectivity
+        if (manager_.database().is_open()) {
+            co_await send_health_response(stream_, req, http::status::ok,
+                R"({"status":"ready"})");
+        } else {
+            co_await send_health_response(stream_, req, http::status::service_unavailable,
+                R"({"status":"not_ready","reason":"database not connected"})");
+        }
         co_return;
     }
 

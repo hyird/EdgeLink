@@ -49,7 +49,7 @@ void print_usage() {
               << "Usage:\n"
               << "  edgelink-client <command> [options]\n\n"
               << "Commands:\n"
-              << "  up          Start client and connect to network\n"
+              << "  up          Start client and connect to network (alias: daemon)\n"
               << "  down        Stop the running client daemon\n"
               << "  set         Set runtime configuration (exit node, routes, etc.)\n"
               << "  status      Show connection status\n"
@@ -1456,9 +1456,9 @@ int main(int argc, char* argv[]) {
         return cmd_version();
     }
 
-    // Handle 'up' command
-    if (command == "up") {
-        // Pass remaining arguments (skip program name and 'up')
+    // Handle 'up' command (also 'daemon' for backward compatibility with systemd)
+    if (command == "up" || command == "daemon") {
+        // Pass remaining arguments (skip program name and command)
         return cmd_up(argc - 2, argv + 2);
     }
 

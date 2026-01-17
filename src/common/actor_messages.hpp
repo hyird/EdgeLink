@@ -6,6 +6,8 @@
 #include "common/frame.hpp"
 #include "common/message.hpp"
 #include "common/types.hpp"
+#include "common/node_state.hpp"
+#include "common/connection_types.hpp"
 #include <variant>
 #include <vector>
 #include <memory>
@@ -20,9 +22,9 @@ using edgelink::NetworkId;
 using edgelink::IPv4Address;
 using edgelink::Endpoint;
 using edgelink::RouteInfo;
-// using edgelink::NodeEvent;  // TODO: 待定义
-// using edgelink::P2PConnectionState;  // TODO: 待定义
-// using edgelink::ConnectionPhase;  // TODO: 待定义
+using edgelink::NodeEvent;
+using edgelink::P2PConnectionState;
+using edgelink::ConnectionPhase;
 using edgelink::AuthResponse;
 using edgelink::Config;
 using edgelink::ConfigUpdate;
@@ -119,19 +121,16 @@ struct RouteMessage {
 // 状态机事件消息
 // ============================================================================
 
-// 状态机事件消息 - TODO: 待实现相关类型后启用
-/*
 struct StateMachineEvent {
-    edgelink::NodeEvent event;
+    NodeEvent event;
     NodeId related_node;
     std::variant<
         std::monostate,
-        edgelink::P2PConnectionState,
-        edgelink::ConnectionPhase,
+        P2PConnectionState,
+        ConnectionPhase,
         std::vector<Endpoint>
     > data;
 };
-*/
 
 // ============================================================================
 // 生命周期控制消息
@@ -266,6 +265,7 @@ struct ControlChannelEvent {
 
     // CONFIG_RECEIVED 参数
     Config config;
+    ConfigUpdate config_update;  // 用于增量配置更新
 
     // ROUTE_UPDATE 参数
     RouteUpdate route_update;
