@@ -27,7 +27,22 @@ set(protobuf_ABSL_PROVIDER "module" CACHE STRING "" FORCE)
 # Disable warnings for protobuf
 set(protobuf_DISABLE_RTTI OFF CACHE BOOL "" FORCE)
 
+# Fix MinGW compatibility: abseil's time_zone_lookup.cc uses WinRT APIs
+# (WindowsCreateStringReference, etc.) that are not available in MinGW headers.
+# We need to define NTDDI_VERSION to below Windows 10 to disable WinRT usage.
+if(MINGW)
+    # Save original compile definitions
+    get_directory_property(_original_compile_defs COMPILE_DEFINITIONS)
+    # Add NTDDI_VERSION for Windows 8.1 to disable WinRT API usage
+    add_compile_definitions(NTDDI_VERSION=0x06030000)
+endif()
+
 FetchContent_MakeAvailable(protobuf)
+
+if(MINGW)
+    # Restore original compile definitions
+    set_directory_properties(PROPERTIES COMPILE_DEFINITIONS "${_original_compile_defs}")
+endif()
 
 # Create alias targets for compatibility
 if(NOT TARGET protobuf::libprotobuf)
