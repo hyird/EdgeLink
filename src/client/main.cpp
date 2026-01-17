@@ -49,52 +49,49 @@ void print_usage() {
               << "Usage:\n"
               << "  edgelink-client <command> [options]\n\n"
               << "Commands:\n"
-              << "  up          Start client and connect to network (alias: daemon)\n"
+              << "  up          Configure and start the client (like tailscale up)\n"
               << "  down        Stop the running client daemon\n"
-              << "  set         Set runtime configuration (exit node, routes, etc.)\n"
+              << "  set         Modify runtime configuration (exit node, routes, etc.)\n"
               << "  status      Show connection status\n"
               << "  peers       List all peer nodes\n"
               << "  routes      List subnet routes\n"
               << "  ping        Ping a peer node\n"
               << "  config      View and modify configuration\n"
+              << "  daemon      Run daemon in foreground (for systemd/launchd)\n"
               << "  version     Show version information\n"
               << "  help        Show this help message\n\n"
               << "Run 'edgelink-client <command> --help' for more information on a command.\n";
 }
 
 void print_up_help() {
-    std::cout << "EdgeLink Client - Start and connect\n\n"
+    std::cout << "EdgeLink Client - Configure and start (like tailscale up)\n\n"
               << "Usage: edgelink-client up [options]\n\n"
               << "Connection Options:\n"
-              << "  -c, --config FILE     Load configuration from TOML file\n"
-              << "  --controller HOST     Controller address (host:port, port default 443 with TLS, 80 without)\n"
-              << "  -a, --authkey KEY     AuthKey for authentication (required for first connection)\n"
-              << "  --tls                 Enable TLS (wss://)\n\n"
-              << "TUN Options:\n"
-              << "  --tun                 Enable TUN device for IP-level routing\n"
-              << "  --tun-name NAME       TUN device name (default: auto)\n"
-              << "  --tun-mtu MTU         TUN device MTU (default: 1420)\n\n"
-              << "SSL Options:\n"
-              << "  --ssl-verify          Enable SSL certificate verification\n"
-              << "  --ssl-ca FILE         Custom CA certificate file\n"
-              << "  --ssl-allow-self-signed  Allow self-signed certificates\n\n"
+              << "  --controller HOST     Controller address (default: edge.a-z.xin)\n"
+              << "  -a, --authkey KEY     AuthKey for authentication (required)\n"
+              << "  --tls                 Enable TLS (default: enabled)\n"
+              << "  --no-tls              Disable TLS\n\n"
+              << "Routing Options:\n"
+              << "  --exit-node=PEER           Use PEER as exit node (name or IP)\n"
+              << "  --exit-node=               Clear exit node setting\n"
+              << "  --advertise-exit-node      Declare this node as an exit node\n"
+              << "  --no-advertise-exit-node   Stop advertising as exit node\n"
+              << "  --advertise-routes=ROUTES  Advertise comma-separated CIDR routes\n"
+              << "  --accept-routes            Accept routes from other nodes\n"
+              << "  --no-accept-routes         Do not accept routes from other nodes\n\n"
               << "Service Options:\n"
-              << "  --foreground          Run in foreground (don't install/start as service)\n"
-              << "  --install-service     Install as system service and exit\n"
-              << "  --uninstall-service   Uninstall system service and exit\n\n"
-              << "Logging Options:\n"
-              << "  -d, --debug           Enable debug logging\n"
-              << "  -v, --verbose         Enable verbose (trace) logging\n\n"
+              << "  --install-service     Install as system service only (don't start)\n"
+              << "  --uninstall-service   Uninstall system service and exit\n"
+              << "  --reset               Reset all prefs to defaults\n\n"
               << "Other Options:\n"
-              << "  -t, --test PEER MSG   Send test message to peer IP after connecting\n"
               << "  -h, --help            Show this help\n\n"
-              << "By default, 'up' will install and start the client as a system service.\n"
-              << "Use --foreground to run in the current terminal instead.\n\n"
+              << "The 'up' command saves configuration to prefs.toml and starts the daemon\n"
+              << "as a system service. If already running, it updates the configuration.\n\n"
               << "Examples:\n"
-              << "  edgelink-client up -a tskey-dev-test123 --tun\n"
-              << "  edgelink-client up -c client.toml\n"
-              << "  edgelink-client up --foreground -a tskey-dev-test123\n"
-              << "  edgelink-client up -a tskey-dev-test123 --tls --ssl-allow-self-signed\n";
+              << "  edgelink-client up --authkey tskey-xxx           # Minimal start\n"
+              << "  edgelink-client up --authkey tskey-xxx --no-tls  # Disable TLS\n"
+              << "  edgelink-client up --exit-node=gateway           # Use exit node\n"
+              << "  edgelink-client up --advertise-routes=192.168.1.0/24\n";
 }
 
 void print_status_help() {
@@ -963,52 +960,45 @@ int cmd_down(int argc, char* argv[]) {
 }
 
 // ============================================================================
-// Command: up
+// Command: daemon (前台运行，由 systemd/launchd 调用)
 // ============================================================================
 
-int cmd_up(int argc, char* argv[]) {
+void print_daemon_help() {
+    std::cout << "EdgeLink Client - Run daemon in foreground\n\n"
+              << "Usage: edgelink-client daemon [options]\n\n"
+              << "This command starts the EdgeLink client daemon in foreground mode.\n"
+              << "It reads configuration from prefs.toml (managed by 'edgelink-client up').\n"
+              << "This command is intended to be called by systemd/launchd services.\n\n"
+              << "Options:\n"
+              << "  -c, --config FILE     Load additional configuration from TOML file\n"
+              << "  --tun                 Enable TUN device for IP-level routing\n"
+              << "  --tun-name NAME       TUN device name (default: auto)\n"
+              << "  --tun-mtu MTU         TUN device MTU (default: 1420)\n"
+              << "  --ssl-verify          Enable SSL certificate verification\n"
+              << "  --ssl-ca FILE         Custom CA certificate file\n"
+              << "  --ssl-allow-self-signed  Allow self-signed certificates\n"
+              << "  -d, --debug           Enable debug logging\n"
+              << "  -v, --verbose         Enable verbose (trace) logging\n"
+              << "  -h, --help            Show this help\n\n"
+              << "Configuration is loaded from (in order of priority):\n"
+              << "  1. Command line arguments\n"
+              << "  2. prefs.toml (managed by 'edgelink-client up/set')\n"
+              << "  3. config.toml (if specified with -c)\n"
+              << "  4. Default values\n";
+}
+
+int cmd_daemon(int argc, char* argv[]) {
     // Default configuration
     edgelink::ClientConfig cfg;
     std::string config_file;
-    std::string test_peer_ip;
-    std::string test_message;
-    bool foreground = false;
-    bool install_service = false;
-    bool uninstall_service = false;
 
-    // First pass: look for config file and service options
+    // First pass: look for config file
     for (int i = 0; i < argc; ++i) {
         std::string arg = argv[i];
         if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
             config_file = argv[++i];
-        } else if (arg == "--foreground") {
-            foreground = true;
-        } else if (arg == "--install-service") {
-            install_service = true;
-        } else if (arg == "--uninstall-service") {
-            uninstall_service = true;
-        }
-    }
-
-    // Handle service management commands first
-    if (uninstall_service) {
-        if (ServiceManager::is_running()) {
-            std::cout << "Stopping service...\n";
-            if (!ServiceManager::stop()) {
-                std::cerr << "Warning: Failed to stop service: " << ServiceManager::last_error() << "\n";
-            }
-        }
-        if (ServiceManager::is_installed()) {
-            std::cout << "Uninstalling service...\n";
-            if (ServiceManager::uninstall()) {
-                std::cout << "Service uninstalled successfully.\n";
-                return 0;
-            } else {
-                std::cerr << "Error: Failed to uninstall service: " << ServiceManager::last_error() << "\n";
-                return 1;
-            }
-        } else {
-            std::cout << "Service is not installed.\n";
+        } else if (arg == "-h" || arg == "--help") {
+            print_daemon_help();
             return 0;
         }
     }
@@ -1030,10 +1020,17 @@ int cmd_up(int argc, char* argv[]) {
             cfg.state_dir = config_path.parent_path().string();
         }
     } else {
-        // No config file: default state_dir to current directory
+        // No config file: default state_dir to system location
         if (cfg.state_dir.empty()) {
-            cfg.state_dir = ".";
+            cfg.state_dir = client::get_state_dir().string();
         }
+    }
+
+    // Load prefs.toml and apply to config
+    auto prefs_state_dir = cfg.state_dir.empty() ? client::get_state_dir() : std::filesystem::path(cfg.state_dir);
+    client::PrefsStore prefs(prefs_state_dir);
+    if (prefs.load()) {
+        prefs.apply_to(reinterpret_cast<client::ClientConfig&>(cfg));
     }
 
     // Second pass: command line overrides
@@ -1048,9 +1045,6 @@ int cmd_up(int argc, char* argv[]) {
             cfg.authkey = argv[++i];
         } else if (arg == "--threads" && i + 1 < argc) {
             cfg.num_threads = static_cast<size_t>(std::stoul(argv[++i]));
-        } else if ((arg == "-t" || arg == "--test") && i + 2 < argc) {
-            test_peer_ip = argv[++i];
-            test_message = argv[++i];
         } else if (arg == "--tls") {
             cfg.tls = true;
         } else if (arg == "--tun") {
@@ -1069,90 +1063,17 @@ int cmd_up(int argc, char* argv[]) {
             cfg.ssl_ca_file = argv[++i];
         } else if (arg == "--ssl-allow-self-signed") {
             cfg.ssl_allow_self_signed = true;
-        } else if (arg == "--foreground" || arg == "--install-service" || arg == "--uninstall-service") {
-            // Already handled in first pass
         } else if (arg == "-h" || arg == "--help") {
-            print_up_help();
+            print_daemon_help();
             return 0;
         }
     }
-
-    // Handle --install-service: just install and exit
-    if (install_service) {
-        std::filesystem::path exe_path;
-#ifdef _WIN32
-        wchar_t path_buf[MAX_PATH];
-        GetModuleFileNameW(nullptr, path_buf, MAX_PATH);
-        exe_path = path_buf;
-#else
-        exe_path = std::filesystem::canonical("/proc/self/exe");
-#endif
-        std::cout << "Installing service from: " << exe_path.string() << "\n";
-        if (ServiceManager::install(exe_path)) {
-            std::cout << "Service installed successfully.\n";
-            std::cout << "Use 'edgelink-client up' to start the service.\n";
-            return 0;
-        } else {
-            std::cerr << "Error: Failed to install service: " << ServiceManager::last_error() << "\n";
-            return 1;
-        }
-    }
-
-    // Service mode (default): check if already running, install if needed, then start
-    if (!foreground) {
-        auto svc_status = ServiceManager::status();
-
-        if (svc_status == ServiceStatus::RUNNING) {
-            std::cout << "EdgeLink client is already running as a service.\n";
-            std::cout << "Use 'edgelink-client status' to view status.\n";
-            std::cout << "Use 'edgelink-client down' to stop.\n";
-            std::cout << "Use 'edgelink-client up --foreground' to run in foreground instead.\n";
-            return 0;
-        }
-
-        // Get executable path
-        std::filesystem::path exe_path;
-#ifdef _WIN32
-        wchar_t path_buf[MAX_PATH];
-        GetModuleFileNameW(nullptr, path_buf, MAX_PATH);
-        exe_path = path_buf;
-#else
-        exe_path = std::filesystem::canonical("/proc/self/exe");
-#endif
-
-        // Install service if not installed
-        if (svc_status == ServiceStatus::NOT_INSTALLED) {
-            std::cout << "Installing EdgeLink client service...\n";
-            if (!ServiceManager::install(exe_path)) {
-                std::cerr << "Error: Failed to install service: " << ServiceManager::last_error() << "\n";
-                std::cerr << "Try running with administrator/root privileges.\n";
-                std::cerr << "Or use --foreground to run without service installation.\n";
-                return 1;
-            }
-            std::cout << "Service installed successfully.\n";
-        }
-
-        // Start the service
-        std::cout << "Starting EdgeLink client service...\n";
-        if (!ServiceManager::start()) {
-            std::cerr << "Error: Failed to start service: " << ServiceManager::last_error() << "\n";
-            return 1;
-        }
-
-        std::cout << "EdgeLink client service started.\n";
-        std::cout << "Use 'edgelink-client status' to view status.\n";
-        std::cout << "Use 'edgelink-client down' to stop.\n";
-        return 0;
-    }
-
-    // Foreground mode: run directly in this process
-    std::cout << "Running in foreground mode...\n";
 
     // Setup logging with new system
     setup_logging(cfg.log_level, cfg.log_file, cfg.module_log_levels);
 
     auto& log = Logger::get("client");
-    log.info("EdgeLink Client {} starting... [build: {}]", version::VERSION, version::BUILD_ID);
+    log.info("EdgeLink Client {} starting (daemon mode)... [build: {}]", version::VERSION, version::BUILD_ID);
 
     // Initialize crypto
     if (!crypto::init()) {
@@ -1161,8 +1082,7 @@ int cmd_up(int argc, char* argv[]) {
     }
 
     if (cfg.authkey.empty()) {
-        log.error("AuthKey required. Use -a or --authkey option, or specify in config file.");
-        print_up_help();
+        log.error("AuthKey required. Set it with 'edgelink-client up --authkey KEY' first.");
         return 1;
     }
 
@@ -1177,7 +1097,6 @@ int cmd_up(int argc, char* argv[]) {
         asio::io_context ioc(static_cast<int>(num_threads));
 
         // 使用 work_guard 防止 io_context.run() 在没有挂起操作时提前返回
-        // 这在容器环境中特别重要，因为某些协程可能异步完成
         auto work_guard = asio::make_work_guard(ioc);
 
         // Create client config
@@ -1245,7 +1164,7 @@ int cmd_up(int argc, char* argv[]) {
         client->set_events(events);
 
         // 启动事件处理协程: on_connected
-        asio::co_spawn(ioc, [&ioc, &log, client, test_peer_ip, test_message,
+        asio::co_spawn(ioc, [&ioc, &log, client,
                              connected_ptr]() -> asio::awaitable<void> {
             while (true) {
                 auto [ec] = co_await connected_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
@@ -1254,26 +1173,6 @@ int cmd_up(int argc, char* argv[]) {
                 log.info("Client connected and ready");
                 log.info("  Virtual IP: {}", client->virtual_ip().to_string());
                 log.info("  Peers online: {}", client->peers().online_peer_count());
-
-                // Send test message if requested
-                if (!test_peer_ip.empty() && !test_message.empty()) {
-                    auto peer_ip = IPv4Address::from_string(test_peer_ip);
-                    std::vector<uint8_t> data(test_message.begin(), test_message.end());
-
-                    asio::co_spawn(ioc, [client, peer_ip, data]() -> asio::awaitable<void> {
-                        asio::steady_timer timer(co_await asio::this_coro::executor);
-                        timer.expires_after(std::chrono::milliseconds(500));
-                        co_await timer.async_wait(asio::use_awaitable);
-
-                        bool sent = co_await client->send_to_ip(peer_ip, data);
-                        auto& log = Logger::get("client");
-                        if (sent) {
-                            log.info("Test message sent to {}", peer_ip.to_string());
-                        } else {
-                            log.error("Failed to send test message");
-                        }
-                    }, asio::detached);
-                }
             }
         }, asio::detached);
 
@@ -1339,7 +1238,6 @@ int cmd_up(int argc, char* argv[]) {
         }
 
         // Setup signal handler with timeout protection
-        // 使用独立线程实现强制超时，不依赖 io_context
         std::atomic<bool> shutdown_requested{false};
         asio::signal_set signals(ioc, SIGINT, SIGTERM);
         signals.async_wait([&](const boost::system::error_code&, int sig) {
@@ -1358,16 +1256,14 @@ int cmd_up(int argc, char* argv[]) {
             asio::co_spawn(ioc, client->stop(), asio::detached);
 
             // 启动独立线程实现强制超时（2 秒）
-            // 不依赖 io_context，确保快速退出
             std::thread([&ioc, &log]() {
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 log.warn("Shutdown timeout (2s), forcing exit");
-                ioc.stop();  // 强制停止所有 io_context 操作
+                ioc.stop();
 
-                // 如果 2.5 秒后还在运行，强制进程退出
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 log.error("Hard timeout reached, force exiting process");
-                std::_Exit(1);  // 强制退出，不调用析构函数
+                std::_Exit(1);
             }).detach();
         });
 
@@ -1379,7 +1275,7 @@ int cmd_up(int argc, char* argv[]) {
             }
         }, asio::detached);
 
-        log.info("Client running, press Ctrl+C to stop");
+        log.info("Daemon running, press Ctrl+C to stop");
         if (!cfg.controller_url.empty()) {
             log.info("  Controller: {}", cfg.controller_url);
         }
@@ -1417,10 +1313,9 @@ int cmd_up(int argc, char* argv[]) {
             }
         }
 
-        log.info("Client stopped");
+        log.info("Daemon stopped");
 
         // Explicitly shutdown LogManager before static destructors run
-        // to avoid race conditions with any remaining async handlers
         LogManager::instance().shutdown();
 
     } catch (const std::exception& e) {
@@ -1429,6 +1324,281 @@ int cmd_up(int argc, char* argv[]) {
         return 1;
     }
 
+    return 0;
+}
+
+// ============================================================================
+// Command: up (配置管理和服务启动，类似 tailscale up)
+// ============================================================================
+
+// 显示当前配置（类似 tailscale up 的输出）
+void print_prefs_summary(const client::PrefsStore& prefs) {
+    std::cout << "\n";
+    std::cout << "# Configuration\n";
+
+    // Connection
+    auto ctrl = prefs.controller_url();
+    auto auth = prefs.authkey();
+    auto tls = prefs.tls();
+
+    std::cout << "  controller-url: " << ctrl.value_or(client::DEFAULT_CONTROLLER_URL)
+              << (ctrl ? "" : " (default)") << "\n";
+    std::cout << "  authkey:        " << (auth ? (auth->substr(0, 8) + "...") : "(not set)") << "\n";
+    std::cout << "  tls:            " << (tls.value_or(client::DEFAULT_TLS) ? "true" : "false")
+              << (tls ? "" : " (default)") << "\n";
+
+    // Routing
+    auto exit = prefs.exit_node();
+    bool adv_exit = prefs.advertise_exit_node();
+    auto routes = prefs.advertise_routes();
+    bool accept = prefs.accept_routes();
+
+    std::cout << "\n";
+    std::cout << "  exit-node:           " << (exit ? *exit : "(none)") << "\n";
+    std::cout << "  advertise-exit-node: " << (adv_exit ? "true" : "false") << "\n";
+    std::cout << "  advertise-routes:    ";
+    if (routes.empty()) {
+        std::cout << "(none)";
+    } else {
+        for (size_t i = 0; i < routes.size(); ++i) {
+            if (i > 0) std::cout << ",";
+            std::cout << routes[i];
+        }
+    }
+    std::cout << "\n";
+    std::cout << "  accept-routes:       " << (accept ? "true" : "false") << "\n";
+    std::cout << "\n";
+}
+
+int cmd_up(int argc, char* argv[]) {
+    // Parse options
+    bool install_service = false;
+    bool uninstall_service = false;
+    bool reset = false;
+    bool has_changes = false;
+
+    // Connection config
+    std::optional<std::string> controller_url;
+    std::optional<std::string> authkey;
+    std::optional<bool> tls;
+
+    // Routing config
+    std::optional<std::string> exit_node;
+    std::optional<bool> advertise_exit_node;
+    std::optional<std::vector<std::string>> advertise_routes;
+    std::optional<bool> accept_routes;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "-h" || arg == "--help") {
+            print_up_help();
+            return 0;
+        } else if (arg == "--install-service") {
+            install_service = true;
+        } else if (arg == "--uninstall-service") {
+            uninstall_service = true;
+        } else if (arg == "--reset") {
+            reset = true;
+        }
+        // Connection options
+        else if (arg == "--controller" && i + 1 < argc) {
+            controller_url = argv[++i];
+            has_changes = true;
+        } else if ((arg == "-a" || arg == "--authkey") && i + 1 < argc) {
+            authkey = argv[++i];
+            has_changes = true;
+        } else if (arg == "--tls") {
+            tls = true;
+            has_changes = true;
+        } else if (arg == "--no-tls") {
+            tls = false;
+            has_changes = true;
+        }
+        // Routing options
+        else if (starts_with(arg, "--exit-node=")) {
+            exit_node = arg.substr(12);
+            has_changes = true;
+        } else if (arg == "--advertise-exit-node") {
+            advertise_exit_node = true;
+            has_changes = true;
+        } else if (arg == "--no-advertise-exit-node") {
+            advertise_exit_node = false;
+            has_changes = true;
+        } else if (starts_with(arg, "--advertise-routes=")) {
+            std::string routes_str = arg.substr(19);
+            advertise_routes = split_string(routes_str, ',');
+            has_changes = true;
+        } else if (arg == "--accept-routes") {
+            accept_routes = true;
+            has_changes = true;
+        } else if (arg == "--no-accept-routes") {
+            accept_routes = false;
+            has_changes = true;
+        } else if (arg[0] == '-') {
+            std::cerr << "Unknown option: " << arg << "\n\n";
+            print_up_help();
+            return 1;
+        }
+    }
+
+    // Handle service uninstall first
+    if (uninstall_service) {
+        if (ServiceManager::is_running()) {
+            std::cout << "Stopping service...\n";
+            if (!ServiceManager::stop()) {
+                std::cerr << "Warning: Failed to stop service: " << ServiceManager::last_error() << "\n";
+            }
+        }
+        if (ServiceManager::is_installed()) {
+            std::cout << "Uninstalling service...\n";
+            if (ServiceManager::uninstall()) {
+                std::cout << "Service uninstalled successfully.\n";
+                return 0;
+            } else {
+                std::cerr << "Error: Failed to uninstall service: " << ServiceManager::last_error() << "\n";
+                return 1;
+            }
+        } else {
+            std::cout << "Service is not installed.\n";
+            return 0;
+        }
+    }
+
+    // Load existing prefs
+    auto state_dir = client::get_state_dir();
+    client::PrefsStore prefs(state_dir);
+    if (!reset) {
+        prefs.load();
+    }
+
+    // Apply connection config changes
+    if (controller_url) {
+        prefs.set_controller_url(*controller_url);
+    }
+    if (authkey) {
+        prefs.set_authkey(*authkey);
+    }
+    if (tls) {
+        prefs.set_tls(*tls);
+    }
+
+    // Apply routing config changes
+    if (exit_node) {
+        if (exit_node->empty()) {
+            prefs.clear_exit_node();
+        } else {
+            prefs.set_exit_node(*exit_node);
+        }
+    }
+    if (advertise_exit_node) {
+        prefs.set_advertise_exit_node(*advertise_exit_node);
+    }
+    if (advertise_routes) {
+        prefs.set_advertise_routes(*advertise_routes);
+    }
+    if (accept_routes) {
+        prefs.set_accept_routes(*accept_routes);
+    }
+
+    // Validate required config
+    if (!prefs.authkey()) {
+        std::cerr << "Error: AuthKey is required.\n";
+        std::cerr << "       Use: edgelink-client up --authkey <KEY>\n";
+        return 1;
+    }
+
+    // Save prefs
+    if (has_changes || reset) {
+        if (!prefs.save()) {
+            std::cerr << "Error: Failed to save prefs: " << prefs.last_error() << "\n";
+            return 1;
+        }
+    }
+
+    // Print current config (like tailscale up)
+    print_prefs_summary(prefs);
+    std::cout << "Prefs saved to: " << prefs.path().string() << "\n\n";
+
+    // Handle --install-service: just install and exit
+    if (install_service) {
+        std::filesystem::path exe_path;
+#ifdef _WIN32
+        wchar_t path_buf[MAX_PATH];
+        GetModuleFileNameW(nullptr, path_buf, MAX_PATH);
+        exe_path = path_buf;
+#else
+        exe_path = std::filesystem::canonical("/proc/self/exe");
+#endif
+        std::cout << "Installing service from: " << exe_path.string() << "\n";
+        if (ServiceManager::install(exe_path)) {
+            std::cout << "Service installed successfully.\n";
+            return 0;
+        } else {
+            std::cerr << "Error: Failed to install service: " << ServiceManager::last_error() << "\n";
+            return 1;
+        }
+    }
+
+    // Service mode: check if already running
+    auto svc_status = ServiceManager::status();
+
+    if (svc_status == ServiceStatus::RUNNING) {
+        // Service is running, notify it about config change
+        IpcClient ipc;
+        if (ipc.connect()) {
+            std::string response = ipc.send_request("PREFS_UPDATE");
+            try {
+                auto jv = boost::json::parse(response);
+                auto& obj = jv.as_object();
+                if (obj.at("status").as_string() == "ok") {
+                    std::cout << "Configuration applied to running daemon.\n";
+                } else {
+                    auto& msg = obj.at("message").as_string();
+                    std::cerr << "Warning: " << std::string(msg.data(), msg.size()) << "\n";
+                }
+            } catch (const std::exception&) {
+                std::cout << "Daemon notified.\n";
+            }
+        }
+        std::cout << "\n";
+        std::cout << "EdgeLink client is running.\n";
+        std::cout << "Use 'edgelink-client status' to view status.\n";
+        std::cout << "Use 'edgelink-client down' to stop.\n";
+        return 0;
+    }
+
+    // Get executable path
+    std::filesystem::path exe_path;
+#ifdef _WIN32
+    wchar_t path_buf[MAX_PATH];
+    GetModuleFileNameW(nullptr, path_buf, MAX_PATH);
+    exe_path = path_buf;
+#else
+    exe_path = std::filesystem::canonical("/proc/self/exe");
+#endif
+
+    // Install service if not installed
+    if (svc_status == ServiceStatus::NOT_INSTALLED) {
+        std::cout << "Installing EdgeLink client service...\n";
+        if (!ServiceManager::install(exe_path)) {
+            std::cerr << "Error: Failed to install service: " << ServiceManager::last_error() << "\n";
+            std::cerr << "Try running with administrator/root privileges.\n";
+            return 1;
+        }
+        std::cout << "Service installed successfully.\n";
+    }
+
+    // Start the service
+    std::cout << "Starting EdgeLink client service...\n";
+    if (!ServiceManager::start()) {
+        std::cerr << "Error: Failed to start service: " << ServiceManager::last_error() << "\n";
+        return 1;
+    }
+
+    std::cout << "EdgeLink client service started.\n";
+    std::cout << "Use 'edgelink-client status' to view status.\n";
+    std::cout << "Use 'edgelink-client down' to stop.\n";
     return 0;
 }
 
@@ -1456,10 +1626,14 @@ int main(int argc, char* argv[]) {
         return cmd_version();
     }
 
-    // Handle 'up' command (also 'daemon' for backward compatibility with systemd)
-    if (command == "up" || command == "daemon") {
-        // Pass remaining arguments (skip program name and command)
+    // Handle 'up' command (configure and start service)
+    if (command == "up") {
         return cmd_up(argc - 2, argv + 2);
+    }
+
+    // Handle 'daemon' command (run foreground daemon, called by systemd/launchd)
+    if (command == "daemon") {
+        return cmd_daemon(argc - 2, argv + 2);
     }
 
     // Handle 'down' command

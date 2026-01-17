@@ -56,6 +56,23 @@ bool PrefsStore::load() {
     try {
         auto table = toml::parse_file(prefs_path_.string());
 
+        // [connection] section
+        if (auto conn = table["connection"].as_table()) {
+            if (auto val = (*conn)["controller_url"].value<std::string>()) {
+                if (!val->empty()) {
+                    controller_url_ = *val;
+                }
+            }
+            if (auto val = (*conn)["authkey"].value<std::string>()) {
+                if (!val->empty()) {
+                    authkey_ = *val;
+                }
+            }
+            if (auto val = (*conn)["tls"].value<bool>()) {
+                tls_ = *val;
+            }
+        }
+
         // [routing] section
         if (auto routing = table["routing"].as_table()) {
             // exit_node
@@ -104,9 +121,29 @@ bool PrefsStore::load() {
 std::string PrefsStore::generate_toml() const {
     std::ostringstream oss;
 
-    oss << "# EdgeLink 动态配置（由 edgelink set 命令管理）\n";
+    oss << "# EdgeLink 动态配置（由 edgelink up/set 命令管理）\n";
     oss << "# 手动编辑可能会被覆盖\n";
     oss << "\n";
+
+    // [connection] section
+    oss << "[connection]\n";
+    if (controller_url_) {
+        oss << "controller_url = \"" << *controller_url_ << "\"\n";
+    } else {
+        oss << "# controller_url = \"" << DEFAULT_CONTROLLER_URL << "\"  # default\n";
+    }
+    if (authkey_) {
+        oss << "authkey = \"" << *authkey_ << "\"\n";
+    } else {
+        oss << "# authkey = \"\"\n";
+    }
+    if (tls_) {
+        oss << "tls = " << (*tls_ ? "true" : "false") << "\n";
+    } else {
+        oss << "# tls = " << (DEFAULT_TLS ? "true" : "false") << "  # default\n";
+    }
+    oss << "\n";
+
     oss << "[routing]\n";
 
     // exit_node
@@ -171,6 +208,46 @@ bool PrefsStore::save() {
         log.error("{}", last_error_);
         return false;
     }
+}
+
+// ========== 连接配置访问器 ==========
+
+std::optional<std::string> PrefsStore::controller_url() const {
+    std::lock_guard lock(mutex_);
+    return controller_url_;
+}
+
+void PrefsStore::set_controller_url(const std::string& url) {
+    std::lock_guard lock(mutex_);
+    if (url.empty()) {
+        controller_url_.reset();
+    } else {
+        controller_url_ = url;
+    }
+}
+
+std::optional<std::string> PrefsStore::authkey() const {
+    std::lock_guard lock(mutex_);
+    return authkey_;
+}
+
+void PrefsStore::set_authkey(const std::string& key) {
+    std::lock_guard lock(mutex_);
+    if (key.empty()) {
+        authkey_.reset();
+    } else {
+        authkey_ = key;
+    }
+}
+
+std::optional<bool> PrefsStore::tls() const {
+    std::lock_guard lock(mutex_);
+    return tls_;
+}
+
+void PrefsStore::set_tls(bool value) {
+    std::lock_guard lock(mutex_);
+    tls_ = value;
 }
 
 // ========== Routing 配置访问器 ==========
@@ -245,6 +322,13 @@ void PrefsStore::set_accept_routes(bool value) {
 
 void PrefsStore::apply_to(client::ClientConfig& config) const {
     std::lock_guard lock(mutex_);
+
+    // 连接配置（使用默认值）
+    config.controller_url = controller_url_.value_or(DEFAULT_CONTROLLER_URL);
+    if (authkey_) {
+        config.authkey = *authkey_;
+    }
+    config.tls = tls_.value_or(DEFAULT_TLS);
 
     // exit_node -> use_exit_node
     if (exit_node_) {

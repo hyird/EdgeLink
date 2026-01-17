@@ -12,6 +12,10 @@ namespace client {
 // Forward declaration
 struct ClientConfig;
 
+// 默认配置值
+constexpr const char* DEFAULT_CONTROLLER_URL = "edge.a-z.xin";
+constexpr bool DEFAULT_TLS = true;
+
 /// 动态配置存储（prefs.toml）
 /// 用于存储由 `edgelink set` 命令设置的运行时配置
 /// 与静态配置文件 config.toml 分离
@@ -40,6 +44,26 @@ public:
 
     /// 获取最后的错误信息
     const std::string& last_error() const { return last_error_; }
+
+    // ========== 连接配置 ==========
+
+    /// 获取 Controller URL
+    std::optional<std::string> controller_url() const;
+
+    /// 设置 Controller URL
+    void set_controller_url(const std::string& url);
+
+    /// 获取 AuthKey
+    std::optional<std::string> authkey() const;
+
+    /// 设置 AuthKey
+    void set_authkey(const std::string& key);
+
+    /// 是否启用 TLS
+    std::optional<bool> tls() const;
+
+    /// 设置是否启用 TLS
+    void set_tls(bool value);
 
     // ========== Routing 配置 ==========
 
@@ -90,7 +114,12 @@ private:
     std::string last_error_;
     mutable std::mutex mutex_;
 
-    // 配置值存储
+    // 配置值存储 - 连接
+    std::optional<std::string> controller_url_;
+    std::optional<std::string> authkey_;
+    std::optional<bool> tls_;
+
+    // 配置值存储 - 路由
     std::optional<std::string> exit_node_;
     bool advertise_exit_node_ = false;
     std::vector<std::string> advertise_routes_;
