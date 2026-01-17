@@ -1030,7 +1030,20 @@ int cmd_daemon(int argc, char* argv[]) {
     auto prefs_state_dir = cfg.state_dir.empty() ? client::get_state_dir() : std::filesystem::path(cfg.state_dir);
     client::PrefsStore prefs(prefs_state_dir);
     if (prefs.load()) {
-        prefs.apply_to(reinterpret_cast<client::ClientConfig&>(cfg));
+        // Apply prefs to edgelink::ClientConfig (different type from client::ClientConfig)
+        cfg.controller_url = prefs.controller_url().value_or(client::DEFAULT_CONTROLLER_URL);
+        if (auto auth = prefs.authkey()) {
+            cfg.authkey = *auth;
+        }
+        cfg.tls = prefs.tls().value_or(client::DEFAULT_TLS);
+
+        // Routing config
+        if (auto exit = prefs.exit_node()) {
+            cfg.use_exit_node = *exit;
+        }
+        cfg.exit_node = prefs.advertise_exit_node();
+        cfg.advertise_routes = prefs.advertise_routes();
+        cfg.accept_routes = prefs.accept_routes();
     }
 
     // Second pass: command line overrides
