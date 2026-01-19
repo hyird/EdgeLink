@@ -898,7 +898,7 @@ int cmd_set(int argc, char* argv[]) {
     IpcClient ipc;
     if (ipc.connect()) {
         // Send prefs update request
-        std::string response = ipc.send_request("PREFS_UPDATE");
+        std::string response = ipc.prefs_update();
         try {
             auto jv = boost::json::parse(response);
             auto& obj = jv.as_object();
@@ -1560,7 +1560,7 @@ int cmd_up(int argc, char* argv[]) {
         // Service is running, notify it about config change
         IpcClient ipc;
         if (ipc.connect()) {
-            std::string response = ipc.send_request("PREFS_UPDATE");
+            std::string response = ipc.prefs_update();
             try {
                 auto jv = boost::json::parse(response);
                 auto& obj = jv.as_object();
