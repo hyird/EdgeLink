@@ -828,6 +828,52 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
     if (!pb_resp->success()) {
         log().error("Authentication failed: {} (code {})",
                     pb_resp->error_msg(), pb_resp->error_code());
+
+        // Error code 1007: Unknown machine key - controller database was reset
+        // Fallback to authkey authentication if available
+        if (pb_resp->error_code() == 1007 && !authkey_.empty()) {
+            log().info("Machine key unknown, falling back to authkey re-registration...");
+
+            // Reset node_id to allow fresh registration
+            node_id_ = 0;
+
+            // Build AUTH_REQUEST with AUTHKEY type
+            pb::AuthRequest req;
+            req.set_auth_type(pb::AUTH_TYPE_AUTHKEY);
+            req.set_machine_key(crypto_.machine_key().public_key.data(),
+                               crypto_.machine_key().public_key.size());
+            req.set_node_key(crypto_.node_key().public_key.data(),
+                            crypto_.node_key().public_key.size());
+            req.set_hostname(get_hostname());
+            req.set_os(get_os_name());
+            req.set_arch(get_arch());
+            req.set_version("1.0.0");
+            req.set_timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+            req.set_connection_id(0);
+            req.set_exit_node(exit_node_);
+            req.set_auth_data(authkey_);
+
+            // Sign the request
+            auto sign_data = get_auth_sign_data(req);
+            auto sig = crypto_.sign(sign_data);
+            if (!sig) {
+                log().error("Failed to sign AUTH_REQUEST for re-registration");
+                co_return;
+            }
+            req.set_signature(sig->data(), sig->size());
+
+            // Send AUTH_REQUEST
+            auto result = FrameCodec::encode_protobuf(FrameType::AUTH_REQUEST, req);
+            if (!result) {
+                log().error("Failed to encode AUTH_REQUEST for re-registration");
+                co_return;
+            }
+            co_await send_raw(*result);
+            log().info("Re-registration request sent with authkey");
+            co_return;
+        }
+
         if (channels_.error) {
             bool sent = channels_.error->try_send(boost::system::error_code{},
                 static_cast<uint16_t>(pb_resp->error_code()), pb_resp->error_msg());
