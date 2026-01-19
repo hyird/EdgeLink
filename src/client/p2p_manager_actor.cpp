@@ -418,15 +418,7 @@ void P2PManagerActor::handle_udp_packet(const asio::ip::udp::endpoint& from,
             if (pb_keepalive) {
                 P2PKeepalive keepalive;
                 from_proto(*pb_keepalive, &keepalive);
-                // 从 keepalive 中没有 peer_id，使用 frame 前 4 字节
-                NodeId peer_id = 0;
-                if (frame.payload.size() >= 4) {
-                    peer_id = (static_cast<uint32_t>(frame.payload[0]) << 24) |
-                              (static_cast<uint32_t>(frame.payload[1]) << 16) |
-                              (static_cast<uint32_t>(frame.payload[2]) << 8) |
-                              static_cast<uint32_t>(frame.payload[3]);
-                }
-                handle_p2p_keepalive(from, peer_id, keepalive);
+                handle_p2p_keepalive(from, keepalive.src_node, keepalive);
             }
             break;
         }
@@ -736,14 +728,22 @@ asio::awaitable<void> P2PManagerActor::send_p2p_keepalive(NodeId peer_id) {
 
     auto& ctx = it->second;
 
-    // 构造 KEEPALIVE 帧（简化：只包含 NodeId）
-    std::vector<uint8_t> payload(4);
-    payload[0] = (crypto_.node_id() >> 24) & 0xFF;
-    payload[1] = (crypto_.node_id() >> 16) & 0xFF;
-    payload[2] = (crypto_.node_id() >> 8) & 0xFF;
-    payload[3] = crypto_.node_id() & 0xFF;
+    // 构造 KEEPALIVE 消息（使用 protobuf）
+    P2PKeepalive keepalive;
+    keepalive.src_node = crypto_.node_id();
+    keepalive.timestamp = now_us();
+    keepalive.seq_num = ++ctx.keepalive_seq;
+    keepalive.flags = 0;
+    // MAC 暂时留空，可以后续添加认证
 
-    auto frame = FrameCodec::encode(FrameType::P2P_KEEPALIVE, payload);
+    pb::P2PKeepalive pb_keepalive;
+    to_proto(keepalive, &pb_keepalive);
+    auto frame_result = FrameCodec::encode_protobuf(FrameType::P2P_KEEPALIVE, pb_keepalive);
+    if (!frame_result) {
+        log().error("[{}] Failed to encode P2P_KEEPALIVE frame", name_);
+        co_return;
+    }
+    auto& frame = *frame_result;
 
     // 发送
     try {

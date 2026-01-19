@@ -306,6 +306,7 @@ using P2PPong = P2PPing;  // 结构相同
 
 // P2P_KEEPALIVE (0x44) - P2P 连接保活
 struct P2PKeepalive {
+    NodeId src_node = 0;            // 发送者节点 ID
     uint64_t timestamp = 0;         // 时间戳
     uint32_t seq_num = 0;           // 序列号
     uint8_t flags = 0;              // 0x01 = 请求响应, 0x02 = 响应

@@ -707,6 +707,7 @@ inline void from_proto_pong(const pb::P2PPong& src, P2PPing* dst) {
 // ============================================================================
 
 inline void to_proto(const P2PKeepalive& src, pb::P2PKeepalive* dst) {
+    dst->set_src_node(src.src_node);
     dst->set_timestamp(src.timestamp);
     dst->set_seq_num(src.seq_num);
     dst->set_flags(src.flags);
@@ -714,6 +715,7 @@ inline void to_proto(const P2PKeepalive& src, pb::P2PKeepalive* dst) {
 }
 
 inline void from_proto(const pb::P2PKeepalive& src, P2PKeepalive* dst) {
+    dst->src_node = src.src_node();
     dst->timestamp = src.timestamp();
     dst->seq_num = src.seq_num();
     dst->flags = static_cast<uint8_t>(src.flags());

@@ -467,10 +467,11 @@ message P2PPong {
 
 // P2P_KEEPALIVE (0x44) - P2P connection keepalive
 message P2PKeepalive {
-  uint64 timestamp = 1;
-  uint32 seq_num = 2;
-  uint32 flags = 3;         // 0x01 = request response, 0x02 = response
-  bytes mac = 4;            // Poly1305 MAC (16 bytes)
+  uint32 src_node = 1;      // Sender node ID
+  uint64 timestamp = 2;
+  uint32 seq_num = 3;
+  uint32 flags = 4;         // 0x01 = request response, 0x02 = response
+  bytes mac = 5;            // Poly1305 MAC (16 bytes)
 }
 
 // P2P_STATUS (0x45) - Report P2P status to controller

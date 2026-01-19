@@ -76,6 +76,7 @@ struct PeerP2PContext {
     uint64_t last_recv_time = 0;    // 最后收到数据的时间（微秒）
     uint64_t last_send_time = 0;    // 最后发送数据的时间（微秒）
     uint32_t ping_seq = 0;          // Ping 序列号
+    uint32_t keepalive_seq = 0;     // Keepalive 序列号
 
     // 是否已连接
     bool connected = false;
