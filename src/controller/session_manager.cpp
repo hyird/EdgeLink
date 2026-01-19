@@ -153,17 +153,24 @@ std::shared_ptr<ISession> SessionManager::get_relay_session(NodeId node_id) {
 asio::awaitable<void> SessionManager::broadcast_config_update(NetworkId network_id, NodeId except_node) {
     auto sessions = get_network_control_sessions(network_id);
 
+    log().info("broadcast_config_update: network={}, except_node={}, active_sessions={}",
+               network_id, except_node, sessions.size());
+
     // Get all nodes in the network
     auto nodes = db_.get_nodes_by_network(network_id);
     if (!nodes) {
+        log().warn("broadcast_config_update: failed to get nodes for network {}", network_id);
         co_return;
     }
+
+    log().info("broadcast_config_update: found {} nodes in network", nodes->size());
 
     auto version = next_config_version();
     int sent_count = 0;
 
     for (const auto& session : sessions) {
         if (session->node_id() == except_node) {
+            log().debug("broadcast_config_update: skipping node {} (except_node)", session->node_id());
             continue;
         }
 
@@ -185,18 +192,23 @@ asio::awaitable<void> SessionManager::broadcast_config_update(NetworkId network_
             update.add_peers.push_back(peer);
         }
 
+        log().info("broadcast_config_update: sending to node {} with {} peers",
+                   session->node_id(), update.add_peers.size());
+
         // Convert to protobuf and send
         pb::ConfigUpdate pb_update;
         to_proto(update, &pb_update);
         auto result = FrameCodec::encode_protobuf(FrameType::CONFIG_UPDATE, pb_update);
         if (result) {
             co_await session->send_raw(*result);
+            ++sent_count;
+        } else {
+            log().error("broadcast_config_update: failed to encode for node {}", session->node_id());
         }
-        ++sent_count;
     }
 
-    log().debug("Broadcast CONFIG_UPDATE to {} sessions in network {}",
-                  sent_count, network_id);
+    log().info("Broadcast CONFIG_UPDATE to {} sessions in network {}",
+               sent_count, network_id);
 }
 
 asio::awaitable<void> SessionManager::notify_peer_status(NodeId target_node, NodeId peer_node, bool online) {

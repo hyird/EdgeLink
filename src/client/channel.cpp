@@ -928,7 +928,12 @@ asio::awaitable<void> ControlChannel::handle_config_update(const Frame& frame) {
     ConfigUpdate update;
     from_proto(*pb_update, &update);
 
-    log().debug("Received CONFIG_UPDATE v{}", update.version);
+    log().info("Received CONFIG_UPDATE v{}: {} added peers, {} removed peers",
+               update.version, update.add_peers.size(), update.del_peer_ids.size());
+    for (const auto& peer : update.add_peers) {
+        log().info("  + Peer: {} ({}) - {}", peer.node_id, peer.virtual_ip.to_string(),
+                   peer.online ? "online" : "offline");
+    }
 
     // Update relay token if present
     if (has_flag(update.update_flags, ConfigUpdateFlags::TOKEN_REFRESH)) {
