@@ -24,7 +24,7 @@ jobs:
     - name: Install Dependencies
       run: |
         apk add --no-cache \
-          build-base cmake ninja git curl zip unzip tar \
+          build-base cmake samurai git curl zip unzip tar \
           pkgconfig linux-headers musl-dev perl bash python3 \
           autoconf automake libtool
 
@@ -119,7 +119,7 @@ jobs:
     - name: Install Dependencies
       run: |
         apk add --no-cache \
-          build-base cmake ninja git curl zip unzip tar \
+          build-base cmake samurai git curl zip unzip tar \
           pkgconfig linux-headers musl-dev perl bash python3 \
           autoconf automake libtool
 
