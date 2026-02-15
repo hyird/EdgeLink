@@ -306,7 +306,7 @@ void P2PManager::handle_p2p_endpoint(const P2PEndpointMsg& msg) {
         passive_punch ? " (被动打洞)" : "");
 
     for (const auto& ep : msg.endpoints) {
-        log().debug("  - {}.{}.{}.{}:{} (type={})",
+        log().trace("  - {}.{}.{}.{}:{} (type={})",
             ep.address[0], ep.address[1], ep.address[2], ep.address[3],
             ep.port, static_cast<int>(ep.type));
     }
@@ -451,9 +451,6 @@ cobalt::task<void> P2PManager::recv_loop() {
         }
     }
 
-    log().debug("recv_loop 已结束");
-
-    log().debug("recv_loop exited");
     if (loops_done_ch_) {
         co_await cobalt::as_tuple(loops_done_ch_->write());
     }
@@ -526,7 +523,6 @@ cobalt::task<void> P2PManager::keepalive_loop() {
         }
     }
 
-    log().debug("keepalive_loop exited");
     if (loops_done_ch_) {
         co_await cobalt::as_tuple(loops_done_ch_->write());
     }
@@ -609,7 +605,6 @@ cobalt::task<void> P2PManager::punch_timeout_loop() {
         }
     }
 
-    log().debug("punch_timeout_loop exited");
     if (loops_done_ch_) {
         co_await cobalt::as_tuple(loops_done_ch_->write());
     }
@@ -681,7 +676,7 @@ cobalt::task<void> P2PManager::do_punch_batches(NodeId peer_id) {
             }
         }
 
-        log().debug("发送打洞批次 {}/{} 到 peer {} ({} 端点)",
+        log().trace("发送打洞批次 {}/{} 到 peer {} ({} 端点)",
                     batch + 1, config_.punch_batch_count, peer_id, udp_endpoints.size());
 
         // 批次间隔
@@ -749,7 +744,6 @@ cobalt::task<void> P2PManager::retry_loop() {
         }
     }
 
-    log().debug("retry_loop exited");
     if (loops_done_ch_) {
         co_await cobalt::as_tuple(loops_done_ch_->write());
     }
@@ -778,7 +772,6 @@ cobalt::task<void> P2PManager::endpoint_refresh_loop() {
         }
     }
 
-    log().debug("endpoint_refresh_loop exited");
     if (loops_done_ch_) {
         co_await cobalt::as_tuple(loops_done_ch_->write());
     }
@@ -790,12 +783,12 @@ cobalt::task<void> P2PManager::refresh_endpoints() {
         co_return;
     }
 
-    log().debug("刷新端点（定期广播）");
+    log().trace("刷新端点（定期广播）");
 
     auto stun_result = co_await endpoints_.query_stun_endpoint();
     if (stun_result.success) {
         auto& addr = stun_result.mapped_endpoint.address;
-        log().debug("STUN 刷新: {}.{}.{}.{}:{}",
+        log().trace("STUN 刷新: {}.{}.{}.{}:{}",
             addr[0], addr[1], addr[2], addr[3],
             stun_result.mapped_endpoint.port);
     }
@@ -882,7 +875,7 @@ void P2PManager::handle_udp_packet(const asio::ip::udp::endpoint& from,
 
 void P2PManager::handle_p2p_ping(const asio::ip::udp::endpoint& from,
                                   const P2PPing& ping) {
-    log().debug("收到 P2P_PING 来自 {} (node {})",
+    log().trace("收到 P2P_PING 来自 {} (node {})",
         from.address().to_string(), ping.src_node);
 
     // 验证是否有该节点信息
@@ -936,7 +929,7 @@ void P2PManager::handle_p2p_ping(const asio::ip::udp::endpoint& from,
 
 void P2PManager::handle_p2p_pong(const asio::ip::udp::endpoint& from,
                                   const P2PPing& pong) {
-    log().debug("收到 P2P_PONG 来自 {} (node {})",
+    log().trace("收到 P2P_PONG 来自 {} (node {})",
         from.address().to_string(), pong.src_node);
 
     // 计算 RTT
@@ -1092,7 +1085,7 @@ cobalt::task<void> P2PManager::send_p2p_ping(NodeId peer_id,
         co_await endpoints_.socket().async_send_to(
             asio::buffer(frame), to, cobalt::use_op);
 
-        log().debug("发送 P2P_PING 到 {} (peer {})",
+        log().trace("发送 P2P_PING 到 {} (peer {})",
             to.address().to_string(), peer_id);
     } catch (const std::exception& e) {
         log().debug("发送 P2P_PING 失败: {}", e.what());
@@ -1142,7 +1135,7 @@ void P2PManager::send_p2p_pong(const P2PPing& ping,
     endpoints_.socket().send_to(asio::buffer(frame), to, 0, ec);
 
     if (!ec) {
-        log().debug("发送 P2P_PONG 到 {} (peer {})",
+        log().trace("发送 P2P_PONG 到 {} (peer {})",
             to.address().to_string(), ping.src_node);
     }
 }

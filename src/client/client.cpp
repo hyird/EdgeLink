@@ -482,7 +482,7 @@ cobalt::task<void> Client::ctrl_event_loop() {
                             updated_routes.end());
 
                         for (const auto& route : update.del_routes) {
-                            log().debug("  - route /{} via node {}", route.prefix_len, route.gateway_node);
+                            log().trace("  - route /{} via node {}", route.prefix_len, route.gateway_node);
                         }
                     }
 
@@ -500,7 +500,7 @@ cobalt::task<void> Client::ctrl_event_loop() {
                         } else {
                             updated_routes.push_back(route);
                         }
-                        log().debug("  + route /{} via node {}", route.prefix_len, route.gateway_node);
+                        log().trace("  + route /{} via node {}", route.prefix_len, route.gateway_node);
                     }
 
                     {
@@ -558,7 +558,6 @@ cobalt::task<void> Client::ctrl_event_loop() {
         });
 
     // Notify handler completion
-    log().debug("ctrl_event_loop stopped");
     if (handlers_done_ch_) {
         co_await cobalt::as_tuple(handlers_done_ch_->write());
     }
@@ -639,7 +638,7 @@ cobalt::task<void> Client::relay_event_loop() {
 
                 [this](events::relay::DataReceived& e) -> cobalt::task<void> {
                     auto src_peer_ip = peers_.get_peer_ip_str(e.src_node);
-                    log().debug("Received {} bytes from {}", e.plaintext.size(), src_peer_ip);
+                    log().trace("Received {} bytes from {}", e.plaintext.size(), src_peer_ip);
 
                     // Check for internal ping/pong messages
                     if (e.plaintext.size() >= 13 && (e.plaintext[0] == 0xEE || e.plaintext[0] == 0xEF)) {
@@ -651,7 +650,7 @@ cobalt::task<void> Client::relay_event_loop() {
                     if (is_tun_enabled() && ip_packet::version(e.plaintext) == 4) {
                         auto src_ip = ip_packet::src_ipv4(e.plaintext);
                         auto dst_ip = ip_packet::dst_ipv4(e.plaintext);
-                        log().debug("Writing to TUN: {} -> {} ({} bytes)",
+                        log().trace("Writing to TUN: {} -> {} ({} bytes)",
                                       src_ip.to_string(), dst_ip.to_string(), e.plaintext.size());
 
                         auto result = tun_->write(e.plaintext);
@@ -670,14 +669,13 @@ cobalt::task<void> Client::relay_event_loop() {
 
                 [this](events::relay::Pong& e) -> cobalt::task<void> {
                     // Relay pong - RTT already calculated by RelayChannel
-                    log().debug("Relay pong: RTT={}ms", e.rtt_ms);
+                    log().trace("Relay pong: RTT={}ms", e.rtt_ms);
                     co_return;
                 },
             }, event);
         });
 
     // Notify handler completion
-    log().debug("relay_event_loop stopped");
     if (handlers_done_ch_) {
         co_await cobalt::as_tuple(handlers_done_ch_->write());
     }
@@ -721,7 +719,7 @@ cobalt::task<void> Client::p2p_event_loop() {
                 },
 
                 [this](events::p2p::DataReceived& e) -> cobalt::task<void> {
-                    log().debug("P2P data received: {} bytes from {}",
+                    log().trace("P2P data received: {} bytes from {}",
                                 e.plaintext.size(), peers_.get_peer_ip_str(e.peer_id));
 
                     // Check for internal ping/pong messages
@@ -749,7 +747,6 @@ cobalt::task<void> Client::p2p_event_loop() {
         });
 
     // Notify handler completion
-    log().debug("p2p_event_loop stopped");
     if (handlers_done_ch_) {
         co_await cobalt::as_tuple(handlers_done_ch_->write());
     }
@@ -847,8 +844,6 @@ cobalt::task<void> Client::tun_packet_handler() {
         on_tun_packet(std::span<const uint8_t>(*packet));
     }
 
-    log().debug("TUN packet handler exited");
-
     // Notify teardown_tun() that handler has exited
     if (tun_handler_done_ch_) {
         co_await cobalt::as_tuple(tun_handler_done_ch_->write());
@@ -884,7 +879,7 @@ void Client::on_tun_packet(std::span<const uint8_t> packet) {
         }
     }
 
-    log().debug("TUN packet: {} -> {} ({} bytes)",
+    log().trace("TUN packet: {} -> {} ({} bytes)",
                   src_ip.to_string(), dst_ip.to_string(), packet.size());
 
     // Find peer by destination IP
@@ -895,7 +890,7 @@ void Client::on_tun_packet(std::span<const uint8_t> packet) {
         return;
     }
 
-    log().debug("Forwarding to {} ({})", peer->info.virtual_ip.to_string(),
+    log().trace("Forwarding to {} ({})", peer->info.virtual_ip.to_string(),
                   peer->info.online ? "online" : "offline");
 
     // Send via relay - 使用 shared_from_this 保证生命周期安全（多线程环境）
@@ -1108,7 +1103,6 @@ cobalt::task<void> Client::stop() {
     state_ = ClientState::STOPPED;
     log().debug("State set to STOPPED, handlers will exit their loops");
 
-    log().debug("Cancelling timers...");
     keepalive_timer_.cancel();
     reconnect_timer_.cancel();
     dns_refresh_timer_.cancel();
@@ -1129,7 +1123,6 @@ cobalt::task<void> Client::stop() {
 
     // Stop config watcher (has background watch loop)
     if (config_watcher_) {
-        log().debug("Stopping config watcher...");
         config_watcher_->stop();
         config_watcher_.reset();
         log().debug("Config watcher stopped");
@@ -1137,7 +1130,6 @@ cobalt::task<void> Client::stop() {
 
     // Stop latency measurer first (depends on multi_relay_mgr_)
     if (latency_measurer_) {
-        log().debug("Stopping latency measurer...");
         co_await latency_measurer_->stop();
         latency_measurer_.reset();
         log().debug("Latency measurer stopped");
@@ -1145,7 +1137,6 @@ cobalt::task<void> Client::stop() {
 
     // Stop relay latency reporter (depends on multi_relay_mgr_)
     if (relay_latency_reporter_) {
-        log().debug("Stopping relay latency reporter...");
         co_await relay_latency_reporter_->stop();
         relay_latency_reporter_.reset();
         log().debug("Relay latency reporter stopped");
@@ -1153,7 +1144,6 @@ cobalt::task<void> Client::stop() {
 
     // Stop multi-relay manager (has background RTT measurement loop)
     if (multi_relay_mgr_) {
-        log().debug("Stopping multi-relay manager...");
         co_await multi_relay_mgr_->stop();
         multi_relay_mgr_.reset();
         log().debug("Multi-relay manager stopped");
@@ -1192,14 +1182,12 @@ cobalt::task<void> Client::stop() {
 
     // Stop route manager first (removes routes from system)
     if (route_mgr_) {
-        log().debug("Stopping route manager...");
         route_mgr_->stop();
         route_mgr_.reset();
         log().debug("Route manager stopped");
     }
 
     // Teardown TUN (with timeout to avoid hanging)
-    log().debug("Tearing down TUN device...");
     // Wait for TUN packet handler to exit before tearing down
     if (tun_packet_ch_ && tun_handler_done_ch_) {
         tun_packet_ch_->close();
@@ -1222,7 +1210,6 @@ cobalt::task<void> Client::stop() {
     log().debug("TUN device torn down");
 
     // Close all event channels to wake up waiting handlers
-    log().debug("Closing event channels to wake up handlers...");
     if (ctrl_events_) ctrl_events_->close();
     if (relay_events_) relay_events_->close();
     if (p2p_events_) p2p_events_->close();
@@ -1251,7 +1238,6 @@ cobalt::task<void> Client::stop() {
 
     // Close relay channel (with timeout)
     if (relay_) {
-        log().debug("Closing relay channel...");
         try {
             // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
             bool close_completed = false;
@@ -1282,7 +1268,6 @@ cobalt::task<void> Client::stop() {
 
     // Close control channel (with timeout)
     if (control_) {
-        log().debug("Closing control channel...");
         try {
             // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
             bool close_completed = false;
@@ -1447,7 +1432,6 @@ cobalt::task<void> Client::keepalive_loop() {
         }
     }
 
-    log().debug("Keepalive loop exited");
 }
 
 cobalt::task<void> Client::reconnect() {
@@ -1672,7 +1656,6 @@ cobalt::task<void> Client::dns_refresh_loop() {
         }
     }
 
-    log().debug("DNS refresh loop exited");
 }
 
 cobalt::task<void> Client::latency_measure_loop() {
@@ -1712,6 +1695,7 @@ cobalt::task<void> Client::latency_measure_loop() {
                     std::chrono::system_clock::now().time_since_epoch()).count());
 
             // Ping each online peer (with small delay between pings to avoid burst)
+            uint32_t responded = 0, timed_out = 0;
             for (const auto& peer : online_peers) {
                 if (state_ != ClientState::RUNNING) {
                     break;
@@ -1733,9 +1717,9 @@ cobalt::task<void> Client::latency_measure_loop() {
                 report.entries.push_back(entry);
 
                 if (latency > 0) {
-                    log().debug("Latency to {}: {}ms", peer.info.virtual_ip.to_string(), latency);
+                    responded++;
                 } else {
-                    log().debug("Latency to {}: timeout", peer.info.virtual_ip.to_string());
+                    timed_out++;
                 }
 
                 // Small delay between pings (100ms)
@@ -1743,6 +1727,8 @@ cobalt::task<void> Client::latency_measure_loop() {
                 delay_timer.expires_after(std::chrono::milliseconds(100));
                 co_await delay_timer.async_wait(cobalt::use_op);
             }
+            log().debug("Latency: {}/{} peers responded, {} timeouts",
+                        responded, online_peers.size(), timed_out);
 
             // 上报延迟数据到 Controller
             if (!report.entries.empty() && control_ && control_->is_connected()) {
@@ -1758,7 +1744,6 @@ cobalt::task<void> Client::latency_measure_loop() {
         }
     }
 
-    log().debug("Latency measurement loop stopped");
 }
 
 cobalt::task<void> Client::route_announce_loop() {
@@ -1782,7 +1767,7 @@ cobalt::task<void> Client::route_announce_loop() {
         try {
             // 重新公告路由
             if (control_ && control_->is_connected()) {
-                log().debug("Re-announcing routes (periodic broadcast)");
+                log().trace("Re-announcing routes (periodic broadcast)");
                 co_await announce_configured_routes();
             }
 
@@ -1802,7 +1787,6 @@ cobalt::task<void> Client::route_announce_loop() {
         }
     }
 
-    log().debug("Route announcement loop stopped");
 }
 
 // ============================================================================

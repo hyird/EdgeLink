@@ -106,7 +106,7 @@ bool is_ipv6_available() {
         ::close(sock);
 #endif
         result = true;
-        log().debug("IPv6 is available on this system");
+        log().trace("IPv6 is available on this system");
     });
 
     return result;
@@ -139,7 +139,7 @@ cobalt::task<std::optional<tcp::endpoint>> async_connect_happy_eyeballs(
         }
 
         try {
-            log().debug("尝试连接 {} (超时{}ms)",
+            log().trace("尝试连接 {} (超时{}ms)",
                        endpoint.address().to_string(),
                        per_endpoint_timeout.count());
 
@@ -457,7 +457,7 @@ cobalt::task<bool> ControlChannel::reconnect() {
         // 生成此连接的唯一标识符
         ConnectionId connection_id = static_cast<ConnectionId>(
             std::chrono::steady_clock::now().time_since_epoch().count() & 0xFFFFFFFF);
-        log().debug("Assigned connection_id: 0x{:08x}", connection_id);
+        log().trace("Assigned connection_id: 0x{:08x}", connection_id);
 
         if (use_tls_) {
             // Create TLS stream
@@ -698,7 +698,7 @@ cobalt::task<void> ControlChannel::send_latency_report(const LatencyReport& repo
     if (result) {
         send_raw(*result);
     }
-    log().debug("Sent latency report with {} entries", report.entries.size());
+    log().trace("Sent latency report with {} entries", report.entries.size());
     co_return;
 }
 
