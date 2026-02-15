@@ -25,8 +25,9 @@ jobs:
       run: |
         apk add --no-cache \
           build-base cmake samurai git curl zip unzip tar \
-          pkgconfig linux-headers musl-dev perl bash python3 \
+          pkgconf linux-headers musl-dev perl bash python3 \
           autoconf automake libtool
+        ln -sf /usr/bin/samu /usr/bin/ninja
 
     - uses: actions/checkout@v4
 
@@ -37,6 +38,8 @@ jobs:
         key: vcpkg-alpine-v1
 
     - name: Setup vcpkg
+      env:
+        VCPKG_FORCE_SYSTEM_BINARIES: 1
       run: |
         if [ ! -f "/opt/vcpkg/vcpkg" ]; then
           git clone https://github.com/microsoft/vcpkg.git /opt/vcpkg
@@ -54,6 +57,7 @@ jobs:
     - name: Configure CMake
       env:
         VCPKG_ROOT: /opt/vcpkg
+        VCPKG_FORCE_SYSTEM_BINARIES: 1
       run: |
         cmake -B build-release -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
@@ -120,8 +124,9 @@ jobs:
       run: |
         apk add --no-cache \
           build-base cmake samurai git curl zip unzip tar \
-          pkgconfig linux-headers musl-dev perl bash python3 \
+          pkgconf linux-headers musl-dev perl bash python3 \
           autoconf automake libtool
+        ln -sf /usr/bin/samu /usr/bin/ninja
 
     - uses: actions/checkout@v4
 
@@ -132,6 +137,8 @@ jobs:
         key: vcpkg-alpine-v1
 
     - name: Setup vcpkg
+      env:
+        VCPKG_FORCE_SYSTEM_BINARIES: 1
       run: |
         if [ ! -f "/opt/vcpkg/vcpkg" ]; then
           git clone https://github.com/microsoft/vcpkg.git /opt/vcpkg
@@ -149,6 +156,7 @@ jobs:
     - name: Configure CMake
       env:
         VCPKG_ROOT: /opt/vcpkg
+        VCPKG_FORCE_SYSTEM_BINARIES: 1
       run: |
         cmake -B build-debug -G Ninja \
           -DCMAKE_BUILD_TYPE=Debug \
