@@ -46,13 +46,13 @@ jobs:
           /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
         fi
 
-    - name: Cache build
-      uses: actions/cache@v4
+    - name: Restore build cache
+      uses: actions/cache/restore@v4
       with:
         path: build-release
-        key: build-linux-release-v4-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+        key: build-linux-release-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
         restore-keys: |
-          build-linux-release-v4-
+          build-linux-release-v5-
 
     - name: Configure CMake
       env:
@@ -70,6 +70,13 @@ jobs:
 
     - name: Build
       run: cmake --build build-release --config Release -j $(nproc)
+
+    - name: Save build cache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: build-release
+        key: build-linux-release-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
 
     - name: Verify Static Linking
       run: |
@@ -145,13 +152,13 @@ jobs:
           /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
         fi
 
-    - name: Cache build
-      uses: actions/cache@v4
+    - name: Restore build cache
+      uses: actions/cache/restore@v4
       with:
         path: build-debug
-        key: build-linux-debug-v4-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+        key: build-linux-debug-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
         restore-keys: |
-          build-linux-debug-v4-
+          build-linux-debug-v5-
 
     - name: Configure CMake
       env:
@@ -169,6 +176,13 @@ jobs:
 
     - name: Build
       run: cmake --build build-debug --config Debug -j $(nproc)
+
+    - name: Save build cache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: build-debug
+        key: build-linux-debug-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
 
     - name: Verify Static Linking
       run: |
@@ -255,13 +269,13 @@ jobs:
           /c/vcpkg/bootstrap-vcpkg.sh -disableMetrics
         fi
 
-    - name: Cache build
-      uses: actions/cache@v4
+    - name: Restore build cache
+      uses: actions/cache/restore@v4
       with:
         path: build-release
-        key: build-windows-release-v4-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+        key: build-windows-release-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
         restore-keys: |
-          build-windows-release-v4-
+          build-windows-release-v5-
 
     - name: Cache wintun
       uses: actions/cache@v4
@@ -292,6 +306,13 @@ jobs:
 
     - name: Build
       run: cmake --build build-release --config Release -j $(nproc)
+
+    - name: Save build cache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: build-release
+        key: build-windows-release-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
 
     - name: Package Artifacts
       shell: powershell
@@ -364,13 +385,13 @@ jobs:
           /c/vcpkg/bootstrap-vcpkg.sh -disableMetrics
         fi
 
-    - name: Cache build
-      uses: actions/cache@v4
+    - name: Restore build cache
+      uses: actions/cache/restore@v4
       with:
         path: build-debug
-        key: build-windows-debug-v4-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+        key: build-windows-debug-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
         restore-keys: |
-          build-windows-debug-v4-
+          build-windows-debug-v5-
 
     - name: Cache wintun
       uses: actions/cache@v4
@@ -401,6 +422,13 @@ jobs:
 
     - name: Build
       run: cmake --build build-debug --config Debug -j $(nproc)
+
+    - name: Save build cache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: build-debug
+        key: build-windows-debug-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
 
     - name: Package Artifacts
       shell: powershell
