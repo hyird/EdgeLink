@@ -482,7 +482,7 @@ std::string IpcServer::handle_config_set(const std::string& key, const std::stri
     // 写入配置文件
     const auto& config_path = client_.config_path();
     if (!config_path.empty()) {
-        edgelink::TomlConfigWriter writer(config_path);
+        edgelink::JsonConfigWriter writer(config_path);
         if (writer.load()) {
             writer.set_value(key, value);
             if (writer.save()) {
@@ -535,34 +535,14 @@ std::string IpcServer::handle_config_reload() {
             return encode_error(IpcStatus::ERROR, "Config path not set");
         }
 
-        auto result = edgelink::ClientConfig::load(config_path);
+        auto result = ClientConfig::load(config_path);
         if (!result.has_value()) {
             return encode_error(IpcStatus::ERROR, "Failed to load config: " +
-                edgelink::config_error_message(result.error()));
+                config_error_message(result.error()));
         }
 
-        // 转换并应用配置
-        ClientConfig new_config;
-        new_config.controller_url = result->controller_url;
-        new_config.authkey = result->authkey;
-        new_config.tls = result->tls;
-        new_config.auto_reconnect = result->auto_reconnect;
-        new_config.reconnect_interval = result->reconnect_interval;
-        new_config.ping_interval = result->ping_interval;
-        new_config.dns_refresh_interval = result->dns_refresh_interval;
-        new_config.latency_measure_interval = result->latency_measure_interval;
-        new_config.ssl_verify = result->ssl_verify;
-        new_config.ssl_ca_file = result->ssl_ca_file;
-        new_config.ssl_allow_self_signed = result->ssl_allow_self_signed;
-        new_config.state_dir = result->state_dir;
-        new_config.enable_tun = result->enable_tun;
-        new_config.tun_name = result->tun_name;
-        new_config.tun_mtu = result->tun_mtu;
-        new_config.advertise_routes = result->advertise_routes;
-        new_config.exit_node = result->exit_node;
-        new_config.accept_routes = result->accept_routes;
-        new_config.log_level = result->log_level;
-        new_config.log_file = result->log_file;
+        // Unified ClientConfig — no manual copying needed
+        auto& new_config = *result;
 
         if (client_.config_applier()) {
             auto applied_changes = client_.config_applier()->apply(client_.config(), new_config);
@@ -588,7 +568,7 @@ std::string IpcServer::handle_prefs_update() {
     log().info("Prefs update requested via IPC");
 
     try {
-        // 加载最新的 prefs.toml
+        // 加载最新的 prefs.json
         auto state_dir = get_state_dir();
         PrefsStore prefs(state_dir);
 
@@ -620,6 +600,7 @@ std::string IpcServer::handle_prefs_update() {
 std::string IpcServer::encode_config_response(IpcStatus status, const IpcConfigItem& item) {
     json::object obj;
     obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+    obj["ipc_version"] = IPC_PROTOCOL_VERSION;
     obj["key"] = item.key;
     obj["value"] = item.value;
     obj["type"] = item.type;
@@ -632,6 +613,7 @@ std::string IpcServer::encode_config_response(IpcStatus status, const IpcConfigI
 std::string IpcServer::encode_config_list_response(IpcStatus status, const std::vector<IpcConfigItem>& items) {
     json::object obj;
     obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+    obj["ipc_version"] = IPC_PROTOCOL_VERSION;
 
     json::array arr;
     for (const auto& item : items) {
@@ -661,6 +643,7 @@ std::string IpcServer::encode_config_list_response(IpcStatus status, const std::
 std::string IpcServer::encode_config_change_response(IpcStatus status, const IpcConfigChange& change) {
     json::object obj;
     obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+    obj["ipc_version"] = IPC_PROTOCOL_VERSION;
     obj["key"] = change.key;
     obj["old_value"] = change.old_value;
     obj["new_value"] = change.new_value;
@@ -675,6 +658,7 @@ std::string IpcServer::encode_config_change_response(IpcStatus status, const Ipc
 std::string IpcServer::encode_config_reload_response(IpcStatus status, const std::vector<IpcConfigChange>& changes) {
     json::object obj;
     obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+    obj["ipc_version"] = IPC_PROTOCOL_VERSION;
 
     json::array arr;
     for (const auto& c : changes) {
@@ -695,6 +679,7 @@ std::string IpcServer::encode_config_reload_response(IpcStatus status, const std
 std::string IpcServer::encode_status_response(IpcStatus status, const IpcStatusResponse& data) {
     json::object obj;
     obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+    obj["ipc_version"] = IPC_PROTOCOL_VERSION;
     obj["data"] = {
         {"state", data.state},
         {"node_id", data.node_id},
@@ -711,6 +696,7 @@ std::string IpcServer::encode_status_response(IpcStatus status, const IpcStatusR
 std::string IpcServer::encode_peers_response(IpcStatus status, const std::vector<IpcPeerInfo>& peers) {
     json::object obj;
     obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+    obj["ipc_version"] = IPC_PROTOCOL_VERSION;
 
     json::array arr;
     for (const auto& p : peers) {
@@ -731,6 +717,7 @@ std::string IpcServer::encode_peers_response(IpcStatus status, const std::vector
 std::string IpcServer::encode_routes_response(IpcStatus status, const std::vector<IpcRouteInfo>& routes) {
     json::object obj;
     obj["status"] = status == IpcStatus::OK ? "ok" : "error";
+    obj["ipc_version"] = IPC_PROTOCOL_VERSION;
 
     json::array arr;
     for (const auto& r : routes) {
@@ -751,6 +738,7 @@ std::string IpcServer::encode_routes_response(IpcStatus status, const std::vecto
 std::string IpcServer::encode_error(IpcStatus status, const std::string& message) {
     json::object obj;
     obj["status"] = "error";
+    obj["ipc_version"] = IPC_PROTOCOL_VERSION;
     obj["code"] = static_cast<int>(status);
     obj["message"] = message;
     return json::serialize(obj);
@@ -759,6 +747,7 @@ std::string IpcServer::encode_error(IpcStatus status, const std::string& message
 std::string IpcServer::encode_ok(const std::string& message) {
     json::object obj;
     obj["status"] = "ok";
+    obj["ipc_version"] = IPC_PROTOCOL_VERSION;
     if (!message.empty()) {
         obj["message"] = message;
     }

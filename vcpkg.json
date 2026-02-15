@@ -19,8 +19,7 @@
     },
     "zlib",
     "argon2",
-    "sqlite3",
-    "tomlplusplus"
+    "sqlite3"
   ],
   "builtin-baseline": "6a10a7d27f507bbdf11c834cd3abd4eac904ed0c"
 }

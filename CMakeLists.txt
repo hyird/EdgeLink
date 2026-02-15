@@ -141,9 +141,6 @@ endif()
 # 系统线程库
 find_package(Threads REQUIRED)
 
-# toml++ (用于 PrefsStore)
-find_package(tomlplusplus CONFIG REQUIRED)
-
 # =============================================================================
 # Protocol Buffers Code Generation
 # =============================================================================
@@ -350,6 +347,16 @@ if(BUILD_CLIENT)
         src/client/peer_latency_measurer.cpp
         src/client/relay_latency_reporter.cpp
         src/client/prefs_store.cpp
+        src/client/cli/cmd_version.cpp
+        src/client/cli/cmd_status.cpp
+        src/client/cli/cmd_peers.cpp
+        src/client/cli/cmd_ping.cpp
+        src/client/cli/cmd_routes.cpp
+        src/client/cli/cmd_config.cpp
+        src/client/cli/cmd_set.cpp
+        src/client/cli/cmd_up.cpp
+        src/client/cli/cmd_down.cpp
+        src/client/cli/cmd_daemon.cpp
     )
 
     # Platform-specific TUN and service manager source
@@ -398,7 +405,6 @@ if(BUILD_CLIENT)
 
     target_link_libraries(edgelink-client PRIVATE
         edgelink-common
-        tomlplusplus::tomlplusplus
     )
     target_precompile_headers(edgelink-client REUSE_FROM edgelink-common)
 

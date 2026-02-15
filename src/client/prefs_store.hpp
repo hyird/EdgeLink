@@ -16,9 +16,9 @@ struct ClientConfig;
 constexpr const char* DEFAULT_CONTROLLER_URL = "edge.a-z.xin";
 constexpr bool DEFAULT_TLS = true;
 
-/// 动态配置存储（prefs.toml）
+/// 动态配置存储（prefs.json）
 /// 用于存储由 `edgelink set` 命令设置的运行时配置
-/// 与静态配置文件 config.toml 分离
+/// 与静态配置文件 config.json 分离
 class PrefsStore {
 public:
     explicit PrefsStore(const std::filesystem::path& state_dir);
@@ -128,8 +128,8 @@ private:
     /// 确保目录存在
     bool ensure_directory();
 
-    /// 生成 TOML 内容
-    std::string generate_toml() const;
+    /// 生成 JSON 内容
+    std::string generate_json() const;
 };
 
 /// 获取平台特定的状态目录
@@ -138,7 +138,7 @@ private:
 /// - macOS: ~/Library/Application Support/EdgeLink/
 std::filesystem::path get_state_dir();
 
-/// 获取默认的 prefs.toml 路径
+/// 获取默认的 prefs.json 路径
 std::filesystem::path get_default_prefs_path();
 
 } // namespace client

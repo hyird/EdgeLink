@@ -18,6 +18,9 @@ namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
+// IPC protocol version — incremented when the wire format changes
+constexpr int IPC_PROTOCOL_VERSION = 1;
+
 // Forward declarations
 class Client;
 

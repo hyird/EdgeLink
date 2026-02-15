@@ -94,7 +94,7 @@ void print_serve_help() {
     std::cout << "EdgeLink Controller - Start server\n\n"
               << "Usage: edgelink-controller serve [options]\n\n"
               << "Options:\n"
-              << "  -c, --config FILE    Load configuration from TOML file\n"
+              << "  -c, --config FILE    Load configuration from JSON file\n"
               << "  -p, --port PORT      Listen port (default: 8080)\n"
               << "  -b, --bind ADDR      Bind address (default: 0.0.0.0)\n"
               << "  -t, --threads N      Number of IO threads (default: auto)\n"

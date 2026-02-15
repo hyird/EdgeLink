@@ -55,9 +55,9 @@ bool ConfigWatcher::reload() {
         return false;
     }
 
-    auto result = edgelink::ClientConfig::load(config_path_);
+    auto result = ClientConfig::load(config_path_);
     if (!result.has_value()) {
-        LOG_ERROR("client.config", "配置重载失败: {}", edgelink::config_error_message(result.error()));
+        LOG_ERROR("client.config", "配置重载失败: {}", config_error_message(result.error()));
         return false;
     }
 
@@ -71,31 +71,8 @@ bool ConfigWatcher::reload() {
         LOG_DEBUG("client.config", "Failed to update file status: unknown error");
     }
 
-    // 转换为 client::ClientConfig
-    ClientConfig cfg;
-    cfg.controller_url = result->controller_url;
-    cfg.authkey = result->authkey;
-    cfg.tls = result->tls;
-    cfg.auto_reconnect = result->auto_reconnect;
-    cfg.reconnect_interval = result->reconnect_interval;
-    cfg.ping_interval = result->ping_interval;
-    cfg.dns_refresh_interval = result->dns_refresh_interval;
-    cfg.latency_measure_interval = result->latency_measure_interval;
-    cfg.ssl_verify = result->ssl_verify;
-    cfg.ssl_ca_file = result->ssl_ca_file;
-    cfg.ssl_allow_self_signed = result->ssl_allow_self_signed;
-    cfg.state_dir = result->state_dir;
-    cfg.enable_tun = result->enable_tun;
-    cfg.tun_name = result->tun_name;
-    cfg.tun_mtu = result->tun_mtu;
-    cfg.advertise_routes = result->advertise_routes;
-    cfg.exit_node = result->exit_node;
-    cfg.accept_routes = result->accept_routes;
-    cfg.log_level = result->log_level;
-    cfg.log_file = result->log_file;
-
-    // 通过 channel 发送配置变更
-    channel_->try_send(std::move(cfg));
+    // Unified ClientConfig — no manual copying needed
+    channel_->try_send(std::move(*result));
 
     LOG_INFO("client.config", "配置已重新加载");
     return true;

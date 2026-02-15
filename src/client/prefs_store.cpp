@@ -2,7 +2,7 @@
 #include "client/client.hpp"
 #include "common/logger.hpp"
 
-#include <toml++/toml.hpp>
+#include <boost/json.hpp>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -15,6 +15,8 @@
 #include <pwd.h>
 #endif
 
+namespace json = boost::json;
+
 namespace edgelink::client {
 
 namespace {
@@ -22,7 +24,7 @@ auto& log = Logger::get("prefs");
 }
 
 PrefsStore::PrefsStore(const std::filesystem::path& state_dir)
-    : prefs_path_(state_dir / "prefs.toml") {
+    : prefs_path_(state_dir / "prefs.json") {
 }
 
 bool PrefsStore::exists() const {
@@ -48,67 +50,80 @@ bool PrefsStore::load() {
     std::lock_guard lock(mutex_);
 
     if (!exists()) {
-        // 文件不存在，使用默认值
+        // 向后兼容：如果 prefs.json 不存在但 prefs.toml 存在，提示迁移
+        auto toml_path = prefs_path_.parent_path() / "prefs.toml";
+        if (std::filesystem::exists(toml_path)) {
+            log.warn("Found legacy prefs.toml but not prefs.json. "
+                      "Please re-run 'edgelink-client up' or 'edgelink-client set' to migrate.");
+        }
         log.debug("Prefs file not found, using defaults: {}", prefs_path_.string());
         return true;
     }
 
     try {
-        auto table = toml::parse_file(prefs_path_.string());
+        std::ifstream ifs(prefs_path_);
+        if (!ifs) {
+            last_error_ = "Failed to open prefs file";
+            log.error("{}: {}", last_error_, prefs_path_.string());
+            return false;
+        }
 
-        // [connection] section
-        if (auto conn = table["connection"].as_table()) {
-            if (auto val = (*conn)["controller_url"].value<std::string>()) {
-                if (!val->empty()) {
-                    controller_url_ = *val;
-                }
+        std::stringstream buffer;
+        buffer << ifs.rdbuf();
+        auto jv = json::parse(buffer.str());
+        auto& root = jv.as_object();
+
+        // connection section
+        if (auto it = root.find("connection"); it != root.end() && it->value().is_object()) {
+            auto& conn = it->value().as_object();
+            if (auto ci = conn.find("controller_url"); ci != conn.end() && ci->value().is_string()) {
+                auto val = std::string(ci->value().as_string());
+                if (!val.empty()) controller_url_ = val;
             }
-            if (auto val = (*conn)["authkey"].value<std::string>()) {
-                if (!val->empty()) {
-                    authkey_ = *val;
-                }
+            if (auto ci = conn.find("authkey"); ci != conn.end() && ci->value().is_string()) {
+                auto val = std::string(ci->value().as_string());
+                if (!val.empty()) authkey_ = val;
             }
-            if (auto val = (*conn)["tls"].value<bool>()) {
-                tls_ = *val;
+            if (auto ci = conn.find("tls"); ci != conn.end() && ci->value().is_bool()) {
+                tls_ = ci->value().as_bool();
             }
         }
 
-        // [routing] section
-        if (auto routing = table["routing"].as_table()) {
+        // routing section
+        if (auto it = root.find("routing"); it != root.end() && it->value().is_object()) {
+            auto& routing = it->value().as_object();
+
             // exit_node
-            if (auto val = (*routing)["exit_node"].value<std::string>()) {
-                if (!val->empty()) {
-                    exit_node_ = *val;
-                } else {
-                    exit_node_.reset();
-                }
+            if (auto ci = routing.find("exit_node"); ci != routing.end() && ci->value().is_string()) {
+                auto val = std::string(ci->value().as_string());
+                if (!val.empty()) exit_node_ = val;
+                else exit_node_.reset();
             }
 
             // advertise_exit_node
-            if (auto val = (*routing)["advertise_exit_node"].value<bool>()) {
-                advertise_exit_node_ = *val;
+            if (auto ci = routing.find("advertise_exit_node"); ci != routing.end() && ci->value().is_bool()) {
+                advertise_exit_node_ = ci->value().as_bool();
             }
 
             // advertise_routes
-            if (auto arr = (*routing)["advertise_routes"].as_array()) {
+            if (auto ci = routing.find("advertise_routes"); ci != routing.end() && ci->value().is_array()) {
                 advertise_routes_.clear();
-                for (const auto& elem : *arr) {
-                    if (auto str = elem.value<std::string>()) {
-                        advertise_routes_.push_back(*str);
-                    }
+                for (const auto& elem : ci->value().as_array()) {
+                    if (elem.is_string())
+                        advertise_routes_.emplace_back(elem.as_string());
                 }
             }
 
             // accept_routes
-            if (auto val = (*routing)["accept_routes"].value<bool>()) {
-                accept_routes_ = *val;
+            if (auto ci = routing.find("accept_routes"); ci != routing.end() && ci->value().is_bool()) {
+                accept_routes_ = ci->value().as_bool();
             }
         }
 
         log.info("Loaded prefs from: {}", prefs_path_.string());
         return true;
-    } catch (const toml::parse_error& e) {
-        last_error_ = std::string("TOML parse error: ") + e.what();
+    } catch (const boost::system::system_error& e) {
+        last_error_ = std::string("JSON parse error: ") + e.what();
         log.error("{}", last_error_);
         return false;
     } catch (const std::exception& e) {
@@ -118,62 +133,35 @@ bool PrefsStore::load() {
     }
 }
 
-std::string PrefsStore::generate_toml() const {
-    std::ostringstream oss;
+std::string PrefsStore::generate_json() const {
+    json::object root;
 
-    oss << "# EdgeLink 动态配置（由 edgelink up/set 命令管理）\n";
-    oss << "# 手动编辑可能会被覆盖\n";
-    oss << "\n";
+    // connection section
+    json::object conn;
+    if (controller_url_)
+        conn["controller_url"] = *controller_url_;
+    if (authkey_)
+        conn["authkey"] = *authkey_;
+    if (tls_)
+        conn["tls"] = *tls_;
+    if (!conn.empty())
+        root["connection"] = std::move(conn);
 
-    // [connection] section
-    oss << "[connection]\n";
-    if (controller_url_) {
-        oss << "controller_url = \"" << *controller_url_ << "\"\n";
-    } else {
-        oss << "# controller_url = \"" << DEFAULT_CONTROLLER_URL << "\"  # default\n";
-    }
-    if (authkey_) {
-        oss << "authkey = \"" << *authkey_ << "\"\n";
-    } else {
-        oss << "# authkey = \"\"\n";
-    }
-    if (tls_) {
-        oss << "tls = " << (*tls_ ? "true" : "false") << "\n";
-    } else {
-        oss << "# tls = " << (DEFAULT_TLS ? "true" : "false") << "  # default\n";
-    }
-    oss << "\n";
-
-    oss << "[routing]\n";
-
-    // exit_node
-    if (exit_node_) {
-        oss << "exit_node = \"" << *exit_node_ << "\"\n";
-    } else {
-        oss << "# exit_node = \"\"\n";
-    }
-
-    // advertise_exit_node
-    oss << "advertise_exit_node = " << (advertise_exit_node_ ? "true" : "false") << "\n";
-
-    // advertise_routes
-    oss << "advertise_routes = [";
+    // routing section
+    json::object routing;
+    if (exit_node_)
+        routing["exit_node"] = *exit_node_;
+    routing["advertise_exit_node"] = advertise_exit_node_;
     if (!advertise_routes_.empty()) {
-        for (size_t i = 0; i < advertise_routes_.size(); ++i) {
-            if (i > 0) oss << ", ";
-            oss << "\"" << advertise_routes_[i] << "\"";
-        }
+        json::array arr;
+        for (const auto& r : advertise_routes_)
+            arr.emplace_back(r);
+        routing["advertise_routes"] = std::move(arr);
     }
-    oss << "]\n";
+    routing["accept_routes"] = accept_routes_;
+    root["routing"] = std::move(routing);
 
-    // accept_routes
-    oss << "accept_routes = " << (accept_routes_ ? "true" : "false") << "\n";
-
-    oss << "\n";
-    oss << "[network]\n";
-    oss << "# 保留用于未来扩展\n";
-
-    return oss.str();
+    return json::serialize(root);
 }
 
 bool PrefsStore::save() {
@@ -195,7 +183,7 @@ bool PrefsStore::save() {
                 log.error("{}: {}", last_error_, temp_path.string());
                 return false;
             }
-            ofs << generate_toml();
+            ofs << generate_json();
         }
 
         // 原子重命名
@@ -410,7 +398,7 @@ std::filesystem::path get_state_dir() {
 }
 
 std::filesystem::path get_default_prefs_path() {
-    return get_state_dir() / "prefs.toml";
+    return get_state_dir() / "prefs.json";
 }
 
 } // namespace edgelink::client
