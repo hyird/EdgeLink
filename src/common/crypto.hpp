@@ -3,11 +3,32 @@
 #include "common/types.hpp"
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
 
+// Forward declarations for OpenSSL types
+typedef struct evp_pkey_st EVP_PKEY;
+typedef struct evp_pkey_ctx_st EVP_PKEY_CTX;
+typedef struct evp_md_ctx_st EVP_MD_CTX;
+typedef struct evp_cipher_ctx_st EVP_CIPHER_CTX;
+
 namespace edgelink::crypto {
+
+// ============================================================================
+// OpenSSL RAII Wrappers — 自动释放 OpenSSL 资源，消除手动 free
+// ============================================================================
+
+struct EvpPkeyDeleter { void operator()(EVP_PKEY* p) const; };
+struct EvpPkeyCtxDeleter { void operator()(EVP_PKEY_CTX* p) const; };
+struct EvpMdCtxDeleter { void operator()(EVP_MD_CTX* p) const; };
+struct EvpCipherCtxDeleter { void operator()(EVP_CIPHER_CTX* p) const; };
+
+using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, EvpPkeyDeleter>;
+using EvpPkeyCtxPtr = std::unique_ptr<EVP_PKEY_CTX, EvpPkeyCtxDeleter>;
+using EvpMdCtxPtr = std::unique_ptr<EVP_MD_CTX, EvpMdCtxDeleter>;
+using EvpCipherCtxPtr = std::unique_ptr<EVP_CIPHER_CTX, EvpCipherCtxDeleter>;
 
 // Error types
 enum class CryptoError {
@@ -26,7 +47,7 @@ enum class CryptoError {
 
 std::string crypto_error_message(CryptoError error);
 
-// Initialize libsodium (call once at startup)
+// Initialize crypto library (call once at startup)
 bool init();
 
 // ============================================================================

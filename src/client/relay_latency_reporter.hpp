@@ -7,7 +7,10 @@
 #include <chrono>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/asio/experimental/channel.hpp>
+#include <boost/cobalt.hpp>
+#include <boost/cobalt/channel.hpp>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -27,10 +30,10 @@ public:
                          const RelayLatencyReporterConfig& config = {});
 
     // 启动上报循环
-    asio::awaitable<void> start();
+    cobalt::task<void> start();
 
     // 停止上报循环
-    asio::awaitable<void> stop();
+    cobalt::task<void> stop();
 
     // 设置上报回调（用于发送 RELAY_LATENCY_REPORT）
     void set_report_callback(ReportCallback callback);
@@ -42,7 +45,7 @@ public:
     void report_now();
 
 private:
-    asio::awaitable<void> report_loop();
+    cobalt::task<void> report_loop();
 
     asio::io_context& ioc_;
     MultiRelayManager& relay_mgr_;
@@ -53,7 +56,7 @@ private:
     std::unique_ptr<asio::steady_timer> report_timer_;
 
     // 停止同步
-    using CompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    using CompletionChannel = cobalt::channel<void>;
     std::unique_ptr<CompletionChannel> report_done_ch_;
 };
 

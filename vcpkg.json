@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "edgelink",
+  "version": "0.1.0",
+  "dependencies": [
+    "boost-asio",
+    "boost-beast",
+    "boost-json",
+    "boost-url",
+    "boost-coroutine",
+    "boost-context",
+    "boost-cobalt",
+    "boost-log",
+    "boost-iostreams",
+    "openssl",
+    {
+      "name": "protobuf",
+      "features": ["zlib"]
+    },
+    "zlib",
+    "argon2",
+    "sqlite3",
+    "tomlplusplus"
+  ],
+  "builtin-baseline": "6a10a7d27f507bbdf11c834cd3abd4eac904ed0c"
+}

@@ -2,8 +2,6 @@
 #include "client/client.hpp"
 #include "common/config_metadata.hpp"
 #include "common/logger.hpp"
-#include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
 
 namespace edgelink::client {
 
@@ -230,10 +228,16 @@ std::vector<ConfigChange> ConfigApplier::apply(const ClientConfig& old_cfg, cons
         ConfigChange change;
         change.key = "routing.advertise_routes";
         // 序列化路由列表
-        nlohmann::json old_routes = old_cfg.advertise_routes;
-        nlohmann::json new_routes = new_cfg.advertise_routes;
-        change.old_value = old_routes.dump();
-        change.new_value = new_routes.dump();
+        boost::json::array old_routes;
+        for (const auto& route : old_cfg.advertise_routes) {
+            old_routes.push_back(boost::json::value(route));
+        }
+        boost::json::array new_routes;
+        for (const auto& route : new_cfg.advertise_routes) {
+            new_routes.push_back(boost::json::value(route));
+        }
+        change.old_value = boost::json::serialize(old_routes);
+        change.new_value = boost::json::serialize(new_routes);
         change.applied = apply_advertise_routes(new_cfg.advertise_routes);
         change.restart_required = false;
         change.message = "将重新公告路由";
@@ -463,7 +467,15 @@ ConfigChange ConfigApplier::apply_single(const std::string& key, const std::stri
     } else if (key == "routing.advertise_routes") {
         // 解析 JSON 数组
         try {
-            auto routes = nlohmann::json::parse(value).get<std::vector<std::string>>();
+            auto parsed = boost::json::parse(value);
+            std::vector<std::string> routes;
+            if (parsed.is_array()) {
+                for (const auto& item : parsed.as_array()) {
+                    if (item.is_string()) {
+                        routes.push_back(std::string(item.as_string()));
+                    }
+                }
+            }
             change.applied = apply_advertise_routes(routes);
             change.message = "将重新公告路由";
         } catch (...) {
@@ -525,74 +537,75 @@ std::string ConfigApplier::get_value(const std::string& key) const {
 
 std::string ConfigApplier::get_all_config_json() const {
     const auto& cfg = client_.config();
-    nlohmann::json config;
+    boost::json::object config;
 
     // Controller 配置
-    config["controller"]["url"] = cfg.current_controller_url();
-    config["controller"]["tls"] = cfg.tls;
-    config["controller"]["authkey"] = "***";  // 不暴露实际密钥
+    boost::json::object controller;
+    controller["url"] = cfg.current_controller_url();
+    controller["tls"] = cfg.tls;
+    controller["authkey"] = "***";  // 不暴露实际密钥
+    config["controller"] = controller;
 
     // 连接配置
-    config["connection"]["auto_reconnect"] = cfg.auto_reconnect;
-    config["connection"]["reconnect_interval"] = cfg.reconnect_interval.count();
-    config["connection"]["ping_interval"] = cfg.ping_interval.count();
-    config["connection"]["dns_refresh_interval"] = cfg.dns_refresh_interval.count();
-    config["connection"]["latency_measure_interval"] = cfg.latency_measure_interval.count();
+    boost::json::object connection;
+    connection["auto_reconnect"] = cfg.auto_reconnect;
+    connection["reconnect_interval"] = cfg.reconnect_interval.count();
+    connection["ping_interval"] = cfg.ping_interval.count();
+    connection["dns_refresh_interval"] = cfg.dns_refresh_interval.count();
+    connection["latency_measure_interval"] = cfg.latency_measure_interval.count();
+    config["connection"] = connection;
 
     // SSL 配置
-    config["ssl"]["verify"] = cfg.ssl_verify;
-    config["ssl"]["ca_file"] = cfg.ssl_ca_file;
-    config["ssl"]["allow_self_signed"] = cfg.ssl_allow_self_signed;
+    boost::json::object ssl;
+    ssl["verify"] = cfg.ssl_verify;
+    ssl["ca_file"] = cfg.ssl_ca_file;
+    ssl["allow_self_signed"] = cfg.ssl_allow_self_signed;
+    config["ssl"] = ssl;
 
     // 存储配置
-    config["storage"]["state_dir"] = cfg.state_dir;
+    boost::json::object storage;
+    storage["state_dir"] = cfg.state_dir;
+    config["storage"] = storage;
 
     // TUN 配置
-    config["tun"]["enable"] = cfg.enable_tun;
-    config["tun"]["name"] = cfg.tun_name;
-    config["tun"]["mtu"] = cfg.tun_mtu;
+    boost::json::object tun;
+    tun["enable"] = cfg.enable_tun;
+    tun["name"] = cfg.tun_name;
+    tun["mtu"] = cfg.tun_mtu;
+    config["tun"] = tun;
 
     // IPC 配置
-    config["ipc"]["enable"] = cfg.enable_ipc;
-    config["ipc"]["socket_path"] = cfg.ipc_socket_path;
+    boost::json::object ipc;
+    ipc["enable"] = cfg.enable_ipc;
+    ipc["socket_path"] = cfg.ipc_socket_path;
+    config["ipc"] = ipc;
 
     // 路由配置
-    config["routing"]["accept_routes"] = cfg.accept_routes;
-    config["routing"]["advertise_routes"] = cfg.advertise_routes;
-    config["routing"]["exit_node"] = cfg.exit_node;
+    boost::json::object routing;
+    routing["accept_routes"] = cfg.accept_routes;
+    boost::json::array advertise_routes_arr;
+    for (const auto& route : cfg.advertise_routes) {
+        advertise_routes_arr.push_back(boost::json::value(route));
+    }
+    routing["advertise_routes"] = advertise_routes_arr;
+    routing["exit_node"] = cfg.exit_node;
+    config["routing"] = routing;
 
     // 日志配置
-    config["log"]["level"] = cfg.log_level;
-    config["log"]["file"] = cfg.log_file;
+    boost::json::object log;
+    log["level"] = cfg.log_level;
+    log["file"] = cfg.log_file;
+    config["log"] = log;
 
-    return config.dump();
+    return boost::json::serialize(config);
 }
 
 // ===== 日志配置 =====
 
 bool ConfigApplier::apply_log_level(const std::string& level) {
     try {
-        spdlog::level::level_enum log_level;
-        if (level == "trace") {
-            log_level = spdlog::level::trace;
-        } else if (level == "debug") {
-            log_level = spdlog::level::debug;
-        } else if (level == "info") {
-            log_level = spdlog::level::info;
-        } else if (level == "warn" || level == "warning") {
-            log_level = spdlog::level::warn;
-        } else if (level == "error") {
-            log_level = spdlog::level::err;
-        } else if (level == "critical") {
-            log_level = spdlog::level::critical;
-        } else if (level == "off") {
-            log_level = spdlog::level::off;
-        } else {
-            LOG_WARN("client.config", "未知日志级别: {}", level);
-            return false;
-        }
-
-        spdlog::set_level(log_level);
+        auto log_level = log_level_from_string(level);
+        LogManager::instance().set_global_level(log_level);
         LOG_INFO("client.config", "日志级别已更改为: {}", level);
         return true;
     } catch (const std::exception& e) {

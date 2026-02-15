@@ -3,11 +3,13 @@
 #include "common/types.hpp"
 #include "common/frame.hpp"
 #include "common/message.hpp"
+#include "common/events.hpp"
 #include "client/crypto_engine.hpp"
 #include "client/peer_manager.hpp"
 
 #include <boost/asio.hpp>
-#include <boost/asio/experimental/channel.hpp>
+#include <boost/cobalt.hpp>
+#include <boost/cobalt/channel.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
@@ -21,6 +23,7 @@
 #include <variant>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
 namespace ssl = asio::ssl;
@@ -30,70 +33,27 @@ using tcp = asio::ip::tcp;
 namespace edgelink::client {
 
 // ============================================================================
-// Channel 类型定义（替代回调）
+// Channel 类型定义
 // ============================================================================
-namespace channels {
 
-// Control Channel 事件通道
-using AuthResponseChannel = asio::experimental::channel<
-    void(boost::system::error_code, AuthResponse)>;
-using ConfigChannel = asio::experimental::channel<
-    void(boost::system::error_code, Config)>;
-using ConfigUpdateChannel = asio::experimental::channel<
-    void(boost::system::error_code, ConfigUpdate)>;
-using RouteUpdateChannel = asio::experimental::channel<
-    void(boost::system::error_code, RouteUpdate)>;
-using PeerRoutingUpdateChannel = asio::experimental::channel<
-    void(boost::system::error_code, PeerRoutingUpdate)>;
-using P2PEndpointMsgChannel = asio::experimental::channel<
-    void(boost::system::error_code, P2PEndpointMsg)>;
-using ControlErrorChannel = asio::experimental::channel<
-    void(boost::system::error_code, uint16_t, std::string)>;
-using ControlConnectedChannel = asio::experimental::channel<
-    void(boost::system::error_code)>;
-using ControlDisconnectedChannel = asio::experimental::channel<
-    void(boost::system::error_code)>;
-
-// Relay Channel 事件通道
-using RelayDataChannel = asio::experimental::channel<
-    void(boost::system::error_code, NodeId, std::vector<uint8_t>)>;
-using RelayConnectedChannel = asio::experimental::channel<
-    void(boost::system::error_code)>;
-using RelayDisconnectedChannel = asio::experimental::channel<
-    void(boost::system::error_code)>;
-
-}  // namespace channels
-
-// Control Channel 事件结构体（替代 ControlChannelCallbacks）
-struct ControlChannelEvents {
-    channels::AuthResponseChannel* auth_response = nullptr;
-    channels::ConfigChannel* config = nullptr;
-    channels::ConfigUpdateChannel* config_update = nullptr;
-    channels::RouteUpdateChannel* route_update = nullptr;
-    channels::PeerRoutingUpdateChannel* peer_routing_update = nullptr;
-    channels::P2PEndpointMsgChannel* p2p_endpoint = nullptr;
-    channels::ControlErrorChannel* error = nullptr;
-    channels::ControlConnectedChannel* connected = nullptr;
-    channels::ControlDisconnectedChannel* disconnected = nullptr;
+// 多参数 channel 包装结构体
+struct ClientDataEvent {
+    NodeId src_node;
+    std::vector<uint8_t> data;
 };
 
-// Relay Channel 事件结构体（替代 RelayChannelCallbacks）
-struct RelayChannelEvents {
-    channels::RelayDataChannel* data = nullptr;
-    channels::RelayConnectedChannel* connected = nullptr;
-    channels::RelayDisconnectedChannel* disconnected = nullptr;
-    std::function<void(uint16_t rtt_ms)> on_pong = nullptr;
+struct ClientErrorEvent {
+    uint16_t code;
+    std::string message;
 };
 
 // Client 对外事件通道（替代 ClientCallbacks）
 namespace channels {
-using ClientConnectedChannel = asio::experimental::channel<void(boost::system::error_code)>;
-using ClientDisconnectedChannel = asio::experimental::channel<void(boost::system::error_code)>;
-using ClientDataChannel = asio::experimental::channel<
-    void(boost::system::error_code, NodeId, std::vector<uint8_t>)>;
-using ClientErrorChannel = asio::experimental::channel<
-    void(boost::system::error_code, uint16_t, std::string)>;
-using ShutdownRequestChannel = asio::experimental::channel<void(boost::system::error_code)>;
+using ClientConnectedChannel = cobalt::channel<void>;
+using ClientDisconnectedChannel = cobalt::channel<void>;
+using ClientDataChannel = cobalt::channel<ClientDataEvent>;
+using ClientErrorChannel = cobalt::channel<ClientErrorEvent>;
+using ShutdownRequestChannel = cobalt::channel<void>;
 }  // namespace channels
 
 // Client 事件结构体（替代 ClientCallbacks）
@@ -136,45 +96,45 @@ public:
                    CryptoEngine& crypto, const std::string& url, bool use_tls);
 
     // Connect and authenticate
-    asio::awaitable<bool> connect(const std::string& authkey);
+    cobalt::task<bool> connect(const std::string& authkey);
 
     // Reconnect with existing credentials
-    asio::awaitable<bool> reconnect();
+    cobalt::task<bool> reconnect();
 
     // Disconnect
-    asio::awaitable<void> close();
+    cobalt::task<void> close();
 
     // Send CONFIG_ACK
-    asio::awaitable<void> send_config_ack(uint64_t version, ConfigAckStatus status);
+    cobalt::task<void> send_config_ack(uint64_t version, ConfigAckStatus status);
 
     // Send PING
-    asio::awaitable<void> send_ping();
+    cobalt::task<void> send_ping();
 
     // Send LATENCY_REPORT
-    asio::awaitable<void> send_latency_report(const LatencyReport& report);
+    cobalt::task<void> send_latency_report(const LatencyReport& report);
 
     // Send RELAY_LATENCY_REPORT (report latency to each relay)
-    asio::awaitable<void> send_relay_latency_report(const RelayLatencyReport& report);
+    cobalt::task<void> send_relay_latency_report(const RelayLatencyReport& report);
 
     // Send ROUTE_ANNOUNCE (announce subnets this node can route)
-    asio::awaitable<void> send_route_announce(const std::vector<RouteInfo>& routes);
+    cobalt::task<void> send_route_announce(const std::vector<RouteInfo>& routes);
 
     // Send ROUTE_WITHDRAW (withdraw previously announced routes)
-    asio::awaitable<void> send_route_withdraw(const std::vector<RouteInfo>& routes);
+    cobalt::task<void> send_route_withdraw(const std::vector<RouteInfo>& routes);
 
     // Send P2P_INIT (request peer endpoints from Controller)
-    asio::awaitable<void> send_p2p_init(const P2PInit& init);
+    cobalt::task<void> send_p2p_init(const P2PInit& init);
 
     // Send P2P_STATUS (report P2P connection status to Controller)
-    asio::awaitable<void> send_p2p_status(const P2PStatusMsg& status);
+    cobalt::task<void> send_p2p_status(const P2PStatusMsg& status);
 
     // Send ENDPOINT_UPDATE (report our endpoints to Controller)
     // Returns request_id for tracking acknowledgement
-    asio::awaitable<uint32_t> send_endpoint_update(const std::vector<Endpoint>& endpoints);
+    cobalt::task<uint32_t> send_endpoint_update(const std::vector<Endpoint>& endpoints);
 
     // Send ENDPOINT_UPDATE and wait for ACK (with timeout)
     // Returns true if ACK received, false on timeout
-    asio::awaitable<bool> send_endpoint_update_and_wait_ack(
+    cobalt::task<bool> send_endpoint_update_and_wait_ack(
         const std::vector<Endpoint>& endpoints,
         uint32_t timeout_ms = 5000);
 
@@ -185,10 +145,10 @@ public:
     const std::vector<Endpoint>& pending_endpoints() const { return pending_endpoints_; }
 
     // Resend pending endpoints (called after reconnect)
-    asio::awaitable<void> resend_pending_endpoints();
+    cobalt::task<void> resend_pending_endpoints();
 
-    // Set event channels
-    void set_channels(ControlChannelEvents channels);
+    // Set event channel (unified variant channel)
+    void set_event_channel(events::CtrlEventChannel* ch);
 
     // State
     ChannelState state() const { return state_; }
@@ -206,22 +166,22 @@ public:
     const std::vector<uint8_t>& relay_token() const { return relay_token_; }
 
 private:
-    asio::awaitable<void> read_loop();
-    asio::awaitable<void> write_loop();
-    asio::awaitable<void> handle_frame(const Frame& frame);
-    asio::awaitable<void> handle_auth_response(const Frame& frame);
-    asio::awaitable<void> handle_config(const Frame& frame);
-    asio::awaitable<void> handle_config_update(const Frame& frame);
-    asio::awaitable<void> handle_route_update(const Frame& frame);
-    asio::awaitable<void> handle_route_ack(const Frame& frame);
-    asio::awaitable<void> handle_peer_routing_update(const Frame& frame);
-    asio::awaitable<void> handle_p2p_endpoint(const Frame& frame);
-    asio::awaitable<void> handle_endpoint_ack(const Frame& frame);
-    asio::awaitable<void> handle_pong(const Frame& frame);
-    asio::awaitable<void> handle_error(const Frame& frame);
+    cobalt::task<void> read_loop();
+    cobalt::task<void> write_loop();
+    cobalt::task<void> handle_frame(const Frame& frame);
+    cobalt::task<void> handle_auth_response(const Frame& frame);
+    cobalt::task<void> handle_config(const Frame& frame);
+    cobalt::task<void> handle_config_update(const Frame& frame);
+    cobalt::task<void> handle_route_update(const Frame& frame);
+    cobalt::task<void> handle_route_ack(const Frame& frame);
+    cobalt::task<void> handle_peer_routing_update(const Frame& frame);
+    cobalt::task<void> handle_p2p_endpoint(const Frame& frame);
+    cobalt::task<void> handle_endpoint_ack(const Frame& frame);
+    cobalt::task<void> handle_pong(const Frame& frame);
+    cobalt::task<void> handle_error(const Frame& frame);
 
-    asio::awaitable<void> send_frame(FrameType type, std::span<const uint8_t> payload);
-    asio::awaitable<void> send_raw(std::span<const uint8_t> data);
+    void send_frame(FrameType type, std::span<const uint8_t> payload);
+    void send_raw(std::span<const uint8_t> data);
 
     // Helper to check if stream is open
     bool is_ws_open() const;
@@ -239,7 +199,7 @@ private:
     std::unique_ptr<PlainWsStream> plain_ws_;
     ChannelState state_ = ChannelState::DISCONNECTED;
 
-    // Write queue
+    // Write queue (仅在 io_context 线程内访问 —— send_raw 和 write_loop 均在同一线程，无需 mutex)
     std::queue<std::vector<uint8_t>> write_queue_;
     bool writing_ = false;
     asio::steady_timer write_timer_;
@@ -254,7 +214,8 @@ private:
 
     // Ping tracking
     uint32_t ping_seq_ = 0;
-    uint64_t last_ping_time_ = 0;
+    uint64_t last_ping_time_ = 0;  // system_clock ms (发送给对端的时间戳)
+    std::chrono::steady_clock::time_point last_ping_steady_;  // 本地 RTT 计算用
 
     // Route request tracking
     uint32_t route_request_id_ = 0;
@@ -266,7 +227,7 @@ private:
     std::vector<Endpoint> pending_endpoints_;        // 最后上报的端点（用于重发）
     std::unique_ptr<asio::steady_timer> endpoint_ack_timer_;  // ACK 等待通知定时器
 
-    ControlChannelEvents channels_;
+    events::CtrlEventChannel* event_ch_ = nullptr;
 };
 
 // ============================================================================
@@ -281,19 +242,22 @@ public:
                  const std::string& host_override = "");
 
     // Connect and authenticate with relay token
-    asio::awaitable<bool> connect(const std::vector<uint8_t>& relay_token);
+    cobalt::task<bool> connect(const std::vector<uint8_t>& relay_token);
 
     // Disconnect
-    asio::awaitable<void> close();
+    cobalt::task<void> close();
 
     // Send encrypted DATA to peer
-    asio::awaitable<bool> send_data(NodeId peer_id, std::span<const uint8_t> plaintext);
+    cobalt::task<bool> send_data(NodeId peer_id, std::span<const uint8_t> plaintext);
 
     // Send PING to measure RTT
-    asio::awaitable<void> send_ping();
+    cobalt::task<void> send_ping();
 
-    // Set event channels
-    void set_channels(RelayChannelEvents channels);
+    // Set event channel (unified variant channel)
+    void set_event_channel(events::RelayEventChannel* ch);
+
+    // Set optional per-connection RTT callback (for relay pool RTT tracking)
+    void set_pong_callback(std::function<void(uint16_t rtt_ms)> cb) { on_pong_ = std::move(cb); }
 
     // State
     ChannelState state() const { return state_; }
@@ -301,15 +265,15 @@ public:
     const std::string& url() const { return url_; }
 
 private:
-    asio::awaitable<void> read_loop();
-    asio::awaitable<void> write_loop();
-    asio::awaitable<void> handle_frame(const Frame& frame);
-    asio::awaitable<void> handle_relay_auth_resp(const Frame& frame);
-    asio::awaitable<void> handle_data(const Frame& frame);
-    asio::awaitable<void> handle_pong(const Frame& frame);
+    cobalt::task<void> read_loop();
+    cobalt::task<void> write_loop();
+    cobalt::task<void> handle_frame(const Frame& frame);
+    cobalt::task<void> handle_relay_auth_resp(const Frame& frame);
+    cobalt::task<void> handle_data(const Frame& frame);
+    cobalt::task<void> handle_pong(const Frame& frame);
 
-    asio::awaitable<void> send_frame(FrameType type, std::span<const uint8_t> payload);
-    asio::awaitable<void> send_raw(std::span<const uint8_t> data);
+    void send_frame(FrameType type, std::span<const uint8_t> payload);
+    void send_raw(std::span<const uint8_t> data);
 
     // Helper to check if stream is open
     bool is_ws_open() const;
@@ -327,16 +291,18 @@ private:
     std::unique_ptr<PlainWsStream> plain_ws_;
     ChannelState state_ = ChannelState::DISCONNECTED;
 
-    // Write queue
+    // Write queue (仅在 io_context 线程内访问 —— send_raw 和 write_loop 均在同一线程，无需 mutex)
     std::queue<std::vector<uint8_t>> write_queue_;
     bool writing_ = false;
     asio::steady_timer write_timer_;
 
     // Ping tracking
     uint32_t ping_seq_ = 0;
-    uint64_t last_ping_time_ = 0;
+    uint64_t last_ping_time_ = 0;  // system_clock ms (发送给对端的时间戳)
+    std::chrono::steady_clock::time_point last_ping_steady_;  // 本地 RTT 计算用
 
-    RelayChannelEvents channels_;
+    events::RelayEventChannel* event_ch_ = nullptr;
+    std::function<void(uint16_t rtt_ms)> on_pong_;
 };
 
 } // namespace edgelink::client

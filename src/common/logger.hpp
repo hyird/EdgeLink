@@ -5,11 +5,6 @@
 #undef ERROR
 #endif
 
-#include <spdlog/spdlog.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/sinks/rotating_file_sink.h>
-
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -18,10 +13,11 @@
 #include <unordered_map>
 #include <optional>
 #include <random>
+#include <sstream>
 
 namespace edgelink {
 
-// Log levels matching spdlog
+// Log levels
 enum class LogLevel {
     TRACE = 0,
     DEBUG = 1,
@@ -34,7 +30,6 @@ enum class LogLevel {
 
 LogLevel log_level_from_string(std::string_view str);
 std::string_view log_level_to_string(LogLevel level);
-spdlog::level::level_enum to_spdlog_level(LogLevel level);
 
 // Distributed tracing context (thread-local)
 class TraceContext {
@@ -109,33 +104,33 @@ public:
 
     // Logging methods with trace ID support
     template<typename... Args>
-    void trace(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        log_impl(LogLevel::TRACE, fmt, std::forward<Args>(args)...);
+    void trace(std::format_string<Args...> fmt_str, Args&&... args) {
+        log_impl(LogLevel::TRACE, fmt_str, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    void debug(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        log_impl(LogLevel::DEBUG, fmt, std::forward<Args>(args)...);
+    void debug(std::format_string<Args...> fmt_str, Args&&... args) {
+        log_impl(LogLevel::DEBUG, fmt_str, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    void info(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        log_impl(LogLevel::INFO, fmt, std::forward<Args>(args)...);
+    void info(std::format_string<Args...> fmt_str, Args&&... args) {
+        log_impl(LogLevel::INFO, fmt_str, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    void warn(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        log_impl(LogLevel::WARN, fmt, std::forward<Args>(args)...);
+    void warn(std::format_string<Args...> fmt_str, Args&&... args) {
+        log_impl(LogLevel::WARN, fmt_str, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    void error(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        log_impl(LogLevel::ERROR, fmt, std::forward<Args>(args)...);
+    void error(std::format_string<Args...> fmt_str, Args&&... args) {
+        log_impl(LogLevel::ERROR, fmt_str, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    void fatal(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        log_impl(LogLevel::FATAL, fmt, std::forward<Args>(args)...);
+    void fatal(std::format_string<Args...> fmt_str, Args&&... args) {
+        log_impl(LogLevel::FATAL, fmt_str, std::forward<Args>(args)...);
     }
 
     // Set/get level for this logger
@@ -147,27 +142,28 @@ public:
 
 private:
     friend class LogManager;
-    Logger(const std::string& module, std::shared_ptr<spdlog::logger> logger);
+    Logger(const std::string& module);
 
     template<typename... Args>
-    void log_impl(LogLevel level, spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        if (!logger_) return;
+    void log_impl(LogLevel level, std::format_string<Args...> fmt_str, Args&&... args) {
+        if (!should_log(level)) return;
 
-        auto spdlog_level = to_spdlog_level(level);
-        if (!logger_->should_log(spdlog_level)) return;
+        std::string msg = std::format(fmt_str, std::forward<Args>(args)...);
 
         // Add trace ID prefix if present
         const auto& trace_id = TraceContext::get_trace_id();
         if (!trace_id.empty()) {
-            std::string msg = fmt::format(fmt, std::forward<Args>(args)...);
-            logger_->log(spdlog_level, "[trace:{}] {}", trace_id.substr(0, 8), msg);
-        } else {
-            logger_->log(spdlog_level, fmt, std::forward<Args>(args)...);
+            msg = std::format("[trace:{}] {}", trace_id.substr(0, 8), msg);
         }
+
+        write_log(level, msg);
     }
 
+    bool should_log(LogLevel level) const;
+    void write_log(LogLevel level, const std::string& message);
+
     std::string module_;
-    std::shared_ptr<spdlog::logger> logger_;
+    LogLevel current_level_;
 };
 
 // Global log manager
@@ -206,21 +202,21 @@ public:
     // Check if initialized
     bool is_initialized() const { return initialized_; }
 
+    // Resolve effective log level for a module
+    LogLevel resolve_module_level(const std::string& module) const;
+
 private:
-    LogManager() = default;
+    LogManager();
     ~LogManager();
 
     LogManager(const LogManager&) = delete;
     LogManager& operator=(const LogManager&) = delete;
-
-    std::shared_ptr<spdlog::logger> create_logger(const std::string& name);
-    void update_logger_level(const std::string& module, std::shared_ptr<spdlog::logger> logger);
+    void init_boost_log();
 
     mutable std::shared_mutex mutex_;
     bool initialized_ = false;
     LogConfig config_;
 
-    std::vector<spdlog::sink_ptr> sinks_;
     std::unordered_map<std::string, std::unique_ptr<Logger>> loggers_;
 };
 

@@ -4,10 +4,19 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
 namespace edgelink {
+
+// 安全内存擦除（防止编译器优化掉 memset）
+namespace detail {
+inline void secure_wipe_bytes(void* ptr, size_t len) {
+    volatile unsigned char* p = static_cast<volatile unsigned char*>(ptr);
+    while (len--) *p++ = 0;
+}
+} // namespace detail
 
 // ============================================================================
 // 保留旧名称的兼容别名（逐步迁移后删除）
@@ -31,21 +40,46 @@ inline constexpr size_t SESSION_KEY_SIZE = crypto::SESSION_KEY_SIZE;
 inline constexpr size_t CHACHA20_NONCE_SIZE = crypto::CHACHA20_NONCE_SIZE;
 inline constexpr size_t POLY1305_TAG_SIZE = crypto::POLY1305_TAG_SIZE;
 
-// Key structures
+// Key structures — 析构时自动安全擦除私钥/密钥材料
 struct MachineKey {
     std::array<uint8_t, ED25519_PUBLIC_KEY_SIZE> public_key{};
     std::array<uint8_t, ED25519_PRIVATE_KEY_SIZE> private_key{};
+
+    MachineKey() = default;
+    MachineKey(const MachineKey&) = default;
+    MachineKey(MachineKey&&) = default;
+    MachineKey& operator=(const MachineKey&) = default;
+    MachineKey& operator=(MachineKey&&) = default;
+    ~MachineKey() { detail::secure_wipe_bytes(private_key.data(), private_key.size()); }
 };
 
 struct NodeKey {
     std::array<uint8_t, X25519_KEY_SIZE> public_key{};
     std::array<uint8_t, X25519_KEY_SIZE> private_key{};
+
+    NodeKey() = default;
+    NodeKey(const NodeKey&) = default;
+    NodeKey(NodeKey&&) = default;
+    NodeKey& operator=(const NodeKey&) = default;
+    NodeKey& operator=(NodeKey&&) = default;
+    ~NodeKey() { detail::secure_wipe_bytes(private_key.data(), private_key.size()); }
 };
 
 struct SessionKey {
     std::array<uint8_t, SESSION_KEY_SIZE> key{};
     std::array<uint8_t, CHACHA20_NONCE_SIZE> send_nonce_base{};
     std::array<uint8_t, CHACHA20_NONCE_SIZE> recv_nonce_base{};
+
+    SessionKey() = default;
+    SessionKey(const SessionKey&) = default;
+    SessionKey(SessionKey&&) = default;
+    SessionKey& operator=(const SessionKey&) = default;
+    SessionKey& operator=(SessionKey&&) = default;
+    ~SessionKey() {
+        detail::secure_wipe_bytes(key.data(), key.size());
+        detail::secure_wipe_bytes(send_nonce_base.data(), send_nonce_base.size());
+        detail::secure_wipe_bytes(recv_nonce_base.data(), recv_nonce_base.size());
+    }
 };
 
 // Frame types (0x01-0xFF)

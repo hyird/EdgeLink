@@ -8,6 +8,9 @@
 #include <unordered_map>
 #include <shared_mutex>
 #include <chrono>
+#include <boost/cobalt.hpp>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -43,10 +46,10 @@ public:
                         const RelayInfo& relay_info, bool use_tls);
 
     // 并发连接所有 IP（从 relay_info 的 endpoints 或 DNS 解析）
-    asio::awaitable<bool> connect_all(const std::vector<uint8_t>& relay_token);
+    cobalt::task<bool> connect_all(const std::vector<uint8_t>& relay_token);
 
     // 关闭所有连接
-    asio::awaitable<void> close_all();
+    cobalt::task<void> close_all();
 
     // 获取活跃连接（RTT 最优）
     std::shared_ptr<RelayChannel> active_connection();
@@ -61,7 +64,7 @@ public:
     size_t connection_count() const;
 
     // 测量所有连接的 RTT
-    asio::awaitable<void> measure_rtt_all();
+    cobalt::task<void> measure_rtt_all();
 
     // 选择最优连接（根据 RTT）
     void select_best_connection();
@@ -80,16 +83,16 @@ public:
     ConnectionId active_connection_id() const;
 
     // 设置事件通道（转发给所有连接）
-    void set_channels(RelayChannelEvents channels);
+    void set_event_channel(events::RelayEventChannel* ch);
 
 private:
     // 连接单个 endpoint
-    asio::awaitable<bool> connect_single(
+    cobalt::task<bool> connect_single(
         const tcp::endpoint& endpoint,
         const std::vector<uint8_t>& relay_token);
 
     // DNS 解析获取 endpoints
-    asio::awaitable<std::vector<tcp::endpoint>> resolve_endpoints();
+    cobalt::task<std::vector<tcp::endpoint>> resolve_endpoints();
 
     // 生成连接 ID
     ConnectionId generate_connection_id();
@@ -110,7 +113,7 @@ private:
     ConnectionId active_connection_id_ = 0;
 
     // 事件通道
-    RelayChannelEvents channels_;
+    events::RelayEventChannel* event_ch_ = nullptr;
 };
 
 } // namespace edgelink::client

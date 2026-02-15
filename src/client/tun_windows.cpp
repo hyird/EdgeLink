@@ -3,6 +3,9 @@
 
 #include "client/tun_device.hpp"
 #include "common/logger.hpp"
+#include "common/cobalt_utils.hpp"
+
+namespace cobalt = boost::cobalt;
 
 #ifdef _WIN32
 
@@ -226,11 +229,11 @@ public:
         return {};
     }
 
-    asio::awaitable<std::expected<void, TunError>> async_write(
+    cobalt::task<std::expected<void, TunError>> async_write(
         std::span<const uint8_t> packet) override {
 
         // WinTun write is synchronous, wrap in post
-        co_await asio::post(ioc_, asio::use_awaitable);
+        co_await asio::post(ioc_, cobalt::use_op);
         co_return write(packet);
     }
 
@@ -308,7 +311,7 @@ private:
                             auto* win_tun = static_cast<WinTunDevice*>(self.get());
                             // 检查设备仍在运行
                             if (win_tun->packet_channel_ && win_tun->reading_.load()) {
-                                win_tun->packet_channel_->try_send(boost::system::error_code{}, std::move(data));
+                                win_tun->packet_channel_->try_send(std::move(data));
                             }
                         });
                     }

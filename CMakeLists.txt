@@ -1,9 +1,32 @@
 cmake_minimum_required(VERSION 3.20...3.31)
+
+# =============================================================================
+# vcpkg 工具链文件集成（必须在 project() 之前）
+# =============================================================================
+if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        CACHE STRING "vcpkg toolchain file")
+endif()
+
+# 指定 triplet (静态链接，Windows)
+if(WIN32 AND NOT DEFINED VCPKG_TARGET_TRIPLET)
+    set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
+endif()
+
+# Match vcpkg x64-windows-static triplet: use static runtime (/MT, /MTd)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 project(edgelink VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Fix MSVC UTF-8 encoding (prevents garbled Chinese output)
+if(MSVC)
+    add_compile_options(/utf-8)
+    add_compile_options(/bigobj)  # Fix "too many sections" error
+endif()
 
 # Default build type: Release (optimized, stripped)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -32,6 +55,8 @@ if(WIN32)
     add_definitions(-D_WIN32_WINNT=0x0A00)  # Windows 10+
     add_definitions(-DNOMINMAX)
     add_definitions(-DWIN32_LEAN_AND_MEAN)
+    add_definitions(-DBOOST_USE_WINDOWS_H)  # Use Windows headers directly
+    add_definitions(-DBOOST_ATOMIC_NO_WAIT_OPS)  # Disable wait ops (compatibility fix)
 
     # MinGW settings
     if(MINGW)
@@ -81,9 +106,43 @@ else()
 endif()
 
 # =============================================================================
-# Third-Party Dependencies via FetchContent
+# vcpkg 依赖包查找
 # =============================================================================
-include(third_party/CMakeLists.txt)
+
+# Boost 组件
+find_package(Boost REQUIRED COMPONENTS
+    asio
+    beast
+    json
+    url
+    coroutine
+    context
+    cobalt
+    log
+    log_setup
+    iostreams
+)
+
+# OpenSSL (替代 BoringSSL)
+find_package(OpenSSL REQUIRED)
+
+# Protobuf (包含 protoc)
+find_package(Protobuf CONFIG REQUIRED)
+
+# 其他依赖
+find_package(ZLIB REQUIRED)
+find_package(unofficial-argon2 CONFIG REQUIRED)
+
+# SQLite3 (仅 Controller 需要)
+if(BUILD_CONTROLLER)
+    find_package(unofficial-sqlite3 CONFIG REQUIRED)
+endif()
+
+# 系统线程库
+find_package(Threads REQUIRED)
+
+# toml++ (用于 PrefsStore)
+find_package(tomlplusplus CONFIG REQUIRED)
 
 # =============================================================================
 # Protocol Buffers Code Generation
@@ -102,11 +161,11 @@ set(PROTO_HDRS ${PROTO_OUTPUT_DIR}/edgelink.pb.h)
 
 add_custom_command(
     OUTPUT ${PROTO_SRCS} ${PROTO_HDRS}
-    COMMAND protoc
+    COMMAND protobuf::protoc
         --cpp_out=${PROTO_OUTPUT_DIR}
         --proto_path=${CMAKE_SOURCE_DIR}/proto
         ${PROTO_FILES}
-    DEPENDS ${PROTO_FILES} protoc
+    DEPENDS ${PROTO_FILES} protobuf::protoc
     COMMENT "Generating Protocol Buffer sources"
     VERBATIM
 )
@@ -152,14 +211,14 @@ target_link_libraries(edgelink-common PUBLIC
     Boost::url
     Boost::coroutine
     Boost::context
+    Boost::cobalt
+    Boost::log
+    Boost::log_setup
+    Boost::iostreams
     OpenSSL::SSL
     OpenSSL::Crypto
-    spdlog::spdlog
-    nlohmann_json::nlohmann_json
-    unofficial-sodium::sodium
-    jwt-cpp::jwt-cpp
-    lz4::lz4
-    tomlplusplus::tomlplusplus
+    unofficial::argon2::libargon2
+    ZLIB::ZLIB
     Threads::Threads
 )
 
@@ -187,7 +246,6 @@ if(BUILD_CONTROLLER)
         src/controller/jwt_util.cpp
         src/controller/session.cpp
         src/controller/session_manager.cpp
-        src/controller/session_manager_actor.cpp
         src/controller/server.cpp
         src/controller/stun_server.cpp
         src/controller/path_decision.cpp
@@ -195,7 +253,7 @@ if(BUILD_CONTROLLER)
 
     target_link_libraries(edgelink-controller PRIVATE
         edgelink-common
-        SQLite::SQLite3
+        unofficial::sqlite3::sqlite3
     )
     target_precompile_headers(edgelink-controller REUSE_FROM edgelink-common)
 endif()
@@ -280,12 +338,6 @@ if(BUILD_CLIENT)
         src/client/crypto_engine.cpp
         src/client/peer_manager.cpp
         src/client/channel.cpp
-        src/client/control_channel_actor.cpp
-        src/client/relay_channel_actor.cpp
-        src/client/data_plane_actor.cpp
-        src/client/tun_device_actor.cpp
-        src/client/p2p_manager_actor.cpp
-        src/client/client_actor.cpp
         src/client/ipc_server.cpp
         src/client/route_manager.cpp
         src/client/config_watcher.cpp
@@ -346,6 +398,7 @@ if(BUILD_CLIENT)
 
     target_link_libraries(edgelink-client PRIVATE
         edgelink-common
+        tomlplusplus::tomlplusplus
     )
     target_precompile_headers(edgelink-client REUSE_FROM edgelink-common)
 
@@ -365,44 +418,52 @@ if(BUILD_CLIENT)
             target_compile_definitions(edgelink-client PRIVATE EDGELINK_WINTUN_EMBEDDED=1)
         endif()
 
-        # 添加 Windows UAC 管理员权限清单
-        if(MINGW)
-            # MinGW: 使用 windres 编译资源文件
-            set(CLIENT_RC_FILE "${CMAKE_CURRENT_BINARY_DIR}/client.rc")
-            file(WRITE ${CLIENT_RC_FILE} "1 24 \"${CMAKE_CURRENT_SOURCE_DIR}/src/client/client.manifest\"")
-            target_sources(edgelink-client PRIVATE ${CLIENT_RC_FILE})
-        elseif(MSVC)
-            # MSVC: 直接链接 manifest
-            target_sources(edgelink-client PRIVATE src/client/client.manifest)
+        # 添加 Windows UAC 管理员权限清单（通过 RC 资源文件嵌入，兼容 MSVC/clang-cl/MinGW）
+        set(CLIENT_RC_FILE "${CMAKE_CURRENT_BINARY_DIR}/client_manifest.rc")
+        file(WRITE ${CLIENT_RC_FILE} "1 24 \"${CMAKE_CURRENT_SOURCE_DIR}/src/client/client.manifest\"")
+        target_sources(edgelink-client PRIVATE ${CLIENT_RC_FILE})
+        # 禁用链接器自动生成的 manifest（避免冲突）
+        if(MSVC)
+            target_link_options(edgelink-client PRIVATE "/MANIFEST:NO")
         endif()
     endif()
 endif()
 
 # =============================================================================
-# Install
+# Custom 'all' target to build all available components
 # =============================================================================
+add_custom_target(all-edgelink
+    COMMENT "Building all EdgeLink components"
+)
+
 if(BUILD_CONTROLLER)
-    install(TARGETS edgelink-controller
-        RUNTIME DESTINATION bin
-    )
+    add_dependencies(all-edgelink edgelink-controller)
 endif()
 
 if(BUILD_SERVER)
-    install(TARGETS edgelink-server
-        RUNTIME DESTINATION bin
-    )
+    add_dependencies(all-edgelink edgelink-server)
 endif()
 
 if(BUILD_CLIENT)
-    install(TARGETS edgelink-client
-        RUNTIME DESTINATION bin
-    )
+    add_dependencies(all-edgelink edgelink-client)
 endif()
 
-install(DIRECTORY config/
-    DESTINATION etc/edgelink
-    FILES_MATCHING PATTERN "*.example.json"
-)
+# =============================================================================
+# Tests
+# =============================================================================
+option(BUILD_TESTS "Build test executables" OFF)
+
+if(BUILD_TESTS)
+    enable_testing()
+
+    # Cobalt smoke test
+    add_executable(cobalt_smoke_test tests/cobalt_smoke_test.cpp)
+    target_link_libraries(cobalt_smoke_test PRIVATE edgelink-common)
+
+    add_test(NAME cobalt_smoke_test COMMAND cobalt_smoke_test)
+
+    message(STATUS "  Tests:         enabled")
+endif()
 
 # =============================================================================
 # Summary
@@ -424,5 +485,6 @@ message(STATUS "  Client:        ${BUILD_CLIENT}")
 if(MINGW)
 message(STATUS "  Compiler:      MinGW")
 endif()
-message(STATUS "  Dependencies:  FetchContent")
+message(STATUS "  Dependencies:  vcpkg")
+message(STATUS "  Custom Target: all-edgelink (builds all enabled components)")
 message(STATUS "")

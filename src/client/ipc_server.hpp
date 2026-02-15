@@ -7,12 +7,14 @@
 
 #include "common/types.hpp"
 #include <boost/asio.hpp>
+#include <boost/cobalt.hpp>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -130,19 +132,19 @@ public:
 
 private:
     // Accept connections
-    asio::awaitable<void> accept_loop();
+    cobalt::task<void> accept_loop();
 
     // Handle a single client connection
-    asio::awaitable<void> handle_client(asio::local::stream_protocol::socket socket);
+    cobalt::task<void> handle_client(asio::local::stream_protocol::socket socket);
 
-    // Process a single request line
-    std::string process_request(const std::string& request);
+    // Process a single request line (coroutine - ping 等命令需要 co_await)
+    cobalt::task<std::string> process_request(const std::string& request);
 
     // Request handlers
     std::string handle_status();
     std::string handle_peers(bool online_only);
     std::string handle_routes();
-    std::string handle_ping(const std::string& target);
+    cobalt::task<std::string> handle_ping(const std::string& target);
     std::string handle_log_level(const std::string& module, const std::string& level);
     std::string handle_shutdown();
     std::string handle_config_get(const std::string& key);

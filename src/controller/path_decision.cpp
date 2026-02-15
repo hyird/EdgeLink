@@ -2,6 +2,7 @@
 #include "common/logger.hpp"
 #include "common/math_utils.hpp"
 #include <algorithm>
+#include <format>
 #include <set>
 
 namespace edgelink::controller {
@@ -127,7 +128,7 @@ std::optional<PathDecision> PathDecisionEngine::select_best_path(
         if (latency < best.estimated_latency) {
             best.relay_id = relay_id;
             best.estimated_latency = latency;
-            best.reason = fmt::format("A+B RTT via relay {} ({}ms)", relay_id, latency);
+            best.reason = std::format("A+B RTT via relay {} ({}ms)", relay_id, latency);
         }
     }
 
@@ -141,7 +142,7 @@ std::optional<PathDecision> PathDecisionEngine::select_best_path(
                 if (latency < best.estimated_latency) {
                     best.relay_id = relay_id;
                     best.estimated_latency = latency;
-                    best.reason = fmt::format("e2e latency via relay {} ({}ms)", relay_id, latency);
+                    best.reason = std::format("e2e latency via relay {} ({}ms)", relay_id, latency);
                 }
             }
         }

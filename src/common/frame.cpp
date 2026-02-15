@@ -1,6 +1,11 @@
 #include "common/frame.hpp"
-#include <lz4.h>
+#include <boost/iostreams/filtering_stream.hpp>
+#include <boost/iostreams/filter/zlib.hpp>
+#include <boost/iostreams/copy.hpp>
+#include <boost/iostreams/device/back_inserter.hpp>
+#include <boost/iostreams/device/array.hpp>
 #include <algorithm>
+#include <cstring>
 
 namespace edgelink {
 
@@ -97,6 +102,10 @@ void BinaryWriter::write_bytes(std::span<const uint8_t> data) {
 }
 
 void BinaryWriter::write_string(std::string_view str) {
+    if (str.size() > 65535) {
+        // 截断并记录——长度字段只有 16 位，无法容纳更大的字符串
+        str = str.substr(0, 65535);
+    }
     write_u16_be(static_cast<uint16_t>(str.size()));
     buffer_.insert(buffer_.end(), str.begin(), str.end());
 }
@@ -291,47 +300,68 @@ std::vector<std::vector<uint8_t>> FrameCodec::fragment(
 
 namespace compression {
 
+namespace io = boost::iostreams;
+
 std::vector<uint8_t> compress(std::span<const uint8_t> data) {
     if (data.empty()) return {};
 
-    int max_compressed_size = LZ4_compressBound(static_cast<int>(data.size()));
-    std::vector<uint8_t> compressed(max_compressed_size);
+    try {
+        std::vector<char> compressed_buf;
+        compressed_buf.reserve(data.size());  // 预分配，避免多次扩容
 
-    int compressed_size = LZ4_compress_default(
-        reinterpret_cast<const char*>(data.data()),
-        reinterpret_cast<char*>(compressed.data()),
-        static_cast<int>(data.size()),
-        max_compressed_size);
+        io::filtering_ostream out;
+        out.push(io::zlib_compressor(io::zlib::best_speed));
+        out.push(io::back_inserter(compressed_buf));
 
-    if (compressed_size <= 0) {
-        return {};
+        out.write(reinterpret_cast<const char*>(data.data()), data.size());
+        // 必须显式关闭流以 flush zlib 内部缓冲区（flush() 不够，zlib 需要 Z_FINISH）
+        boost::iostreams::close(out);
+
+        // char → uint8_t: 使用 memcpy 避免逐元素拷贝
+        std::vector<uint8_t> result(compressed_buf.size());
+        std::memcpy(result.data(), compressed_buf.data(), compressed_buf.size());
+        return result;
+    } catch (...) {
+        return {};  // Compression failed
     }
-
-    compressed.resize(compressed_size);
-    return compressed;
 }
 
 std::expected<std::vector<uint8_t>, FrameError> decompress(
     std::span<const uint8_t> compressed_data, uint32_t original_length) {
 
     if (compressed_data.empty() || original_length == 0) {
-        return std::vector<uint8_t>{};
-    }
-
-    std::vector<uint8_t> decompressed(original_length);
-
-    int decompressed_size = LZ4_decompress_safe(
-        reinterpret_cast<const char*>(compressed_data.data()),
-        reinterpret_cast<char*>(decompressed.data()),
-        static_cast<int>(compressed_data.size()),
-        static_cast<int>(original_length));
-
-    if (decompressed_size < 0 ||
-        static_cast<uint32_t>(decompressed_size) != original_length) {
         return std::unexpected(FrameError::DECOMPRESSION_FAILED);
     }
 
-    return decompressed;
+    try {
+        // 直接解压到目标 vector，避免 string → vector 拷贝
+        std::vector<uint8_t> decompressed;
+        decompressed.reserve(original_length);
+
+        io::filtering_istream in;
+        in.push(io::zlib_decompressor());
+
+        // 使用 array_source 避免构造临时 std::string
+        io::array_source src(reinterpret_cast<const char*>(compressed_data.data()),
+                             compressed_data.size());
+        in.push(src);
+
+        char buffer[4096];
+        while (in.read(buffer, sizeof(buffer)) || in.gcount() > 0) {
+            auto count = static_cast<size_t>(in.gcount());
+            decompressed.insert(decompressed.end(),
+                                reinterpret_cast<const uint8_t*>(buffer),
+                                reinterpret_cast<const uint8_t*>(buffer) + count);
+        }
+
+        if (decompressed.size() != original_length) {
+            return std::unexpected(FrameError::DECOMPRESSION_FAILED);
+        }
+
+        return decompressed;
+    } catch (...) {
+        return std::unexpected(FrameError::DECOMPRESSION_FAILED);
+    }
 }
 
 } // namespace compression

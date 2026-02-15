@@ -1,8 +1,8 @@
 #include "client/relay_latency_reporter.hpp"
 #include "common/logger.hpp"
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/use_awaitable.hpp>
+#include "common/cobalt_utils.hpp"
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -22,22 +22,22 @@ RelayLatencyReporter::RelayLatencyReporter(
     , config_(config) {
 }
 
-asio::awaitable<void> RelayLatencyReporter::start() {
+cobalt::task<void> RelayLatencyReporter::start() {
     if (running_) {
         co_return;
     }
 
     running_ = true;
     report_timer_ = std::make_unique<asio::steady_timer>(ioc_);
-    report_done_ch_ = std::make_unique<CompletionChannel>(ioc_, 1);
+    report_done_ch_ = std::make_unique<CompletionChannel>(1, ioc_.get_executor());
 
     log().info("Starting relay latency reporter (interval: {}s, initial_delay: {}s)",
                config_.report_interval.count(), config_.initial_delay.count());
 
-    asio::co_spawn(ioc_, report_loop(), asio::detached);
+    cobalt_utils::spawn_task(ioc_.get_executor(), report_loop());
 }
 
-asio::awaitable<void> RelayLatencyReporter::stop() {
+cobalt::task<void> RelayLatencyReporter::stop() {
     if (!running_) {
         co_return;
     }
@@ -49,28 +49,13 @@ asio::awaitable<void> RelayLatencyReporter::stop() {
 
         if (report_done_ch_) {
             try {
-                asio::steady_timer timeout_timer(ioc_);
-                auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-                bool loop_stopped = false;
-
-                while (!loop_stopped && std::chrono::steady_clock::now() < deadline) {
-                    report_done_ch_->try_receive([&](boost::system::error_code) {
-                        loop_stopped = true;
-                    });
-
-                    if (loop_stopped) {
-                        break;
-                    }
-
-                    timeout_timer.expires_after(std::chrono::milliseconds(50));
-                    co_await timeout_timer.async_wait(asio::use_awaitable);
-                }
-
-                if (loop_stopped) {
-                    log().debug("Report loop confirmed stopped");
-                } else {
-                    log().warn("Report loop stop timeout (2s), forcing shutdown");
-                }
+                auto read_report_done = [this]() -> cobalt::task<void> {
+                    auto [ec] = co_await cobalt::as_tuple(report_done_ch_->read());
+                    (void)ec;
+                };
+                asio::steady_timer report_timeout_timer(co_await cobalt::this_coro::executor, std::chrono::seconds(2));
+                co_await cobalt::race(read_report_done(), report_timeout_timer.async_wait(cobalt::use_op));
+                log().debug("Report loop confirmed stopped");
             } catch (...) {
                 log().debug("Failed to wait for report loop completion");
             }
@@ -129,11 +114,11 @@ void RelayLatencyReporter::report_now() {
     }
 }
 
-asio::awaitable<void> RelayLatencyReporter::report_loop() {
+cobalt::task<void> RelayLatencyReporter::report_loop() {
     // 首次上报延迟
     report_timer_->expires_after(config_.initial_delay);
     try {
-        co_await report_timer_->async_wait(asio::use_awaitable);
+        co_await report_timer_->async_wait(cobalt::use_op);
     } catch (const boost::system::system_error& e) {
         if (e.code() == asio::error::operation_aborted) {
             goto cleanup;
@@ -159,7 +144,7 @@ asio::awaitable<void> RelayLatencyReporter::report_loop() {
             }
 
             report_timer_->expires_after(config_.report_interval);
-            co_await report_timer_->async_wait(asio::use_awaitable);
+            co_await report_timer_->async_wait(cobalt::use_op);
 
         } catch (const boost::system::system_error& e) {
             if (e.code() == asio::error::operation_aborted) {
@@ -173,7 +158,7 @@ cleanup:
     log().debug("Report loop stopped");
 
     if (report_done_ch_) {
-        report_done_ch_->try_send(boost::system::error_code{});
+        co_await cobalt::as_tuple(report_done_ch_->write());
     }
 }
 

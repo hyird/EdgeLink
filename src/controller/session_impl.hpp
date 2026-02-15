@@ -6,6 +6,10 @@
 #include "common/logger.hpp"
 #include "common/proto_convert.hpp"  // Proto conversion helpers (includes edgelink.pb.h)
 #include "common/auth_proto_helpers.hpp"  // Auth protobuf helpers
+#include "common/cobalt_utils.hpp"
+#include <boost/cobalt.hpp>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::controller {
 
@@ -21,11 +25,11 @@ template<typename StreamType>
 SessionBase<StreamType>::SessionBase(StreamType&& ws, SessionManager& manager)
     : ws_(std::move(ws))
     , manager_(manager)
-    , write_channel_(ws_.get_executor(), 2048) {  // Buffer up to 2048 messages (优化)
+    , write_channel_(2048, ws_.get_executor()) {  // Buffer up to 2048 messages (优化)
 }
 
 template<typename StreamType>
-asio::awaitable<void> SessionBase<StreamType>::send_frame(FrameType type,
+cobalt::task<void> SessionBase<StreamType>::send_frame(FrameType type,
                                                            std::span<const uint8_t> payload,
                                                            FrameFlags flags) {
     auto data = FrameCodec::encode(type, payload, flags);
@@ -33,11 +37,11 @@ asio::awaitable<void> SessionBase<StreamType>::send_frame(FrameType type,
 }
 
 template<typename StreamType>
-asio::awaitable<void> SessionBase<StreamType>::send_raw(std::span<const uint8_t> data) {
+cobalt::task<void> SessionBase<StreamType>::send_raw(std::span<const uint8_t> data) {
     std::vector<uint8_t> copy(data.begin(), data.end());
 
     // Try non-blocking send first (fast path)
-    if (!write_channel_.try_send(boost::system::error_code{}, std::move(copy))) {
+    if (!write_channel_.try_send(std::move(copy))) {
         // Channel full, this shouldn't happen often with 1024 buffer
         log().warn("Write channel full for node {}", node_id_);
     }
@@ -45,9 +49,9 @@ asio::awaitable<void> SessionBase<StreamType>::send_raw(std::span<const uint8_t>
 }
 
 template<typename StreamType>
-asio::awaitable<void> SessionBase<StreamType>::close() {
+cobalt::task<void> SessionBase<StreamType>::close() {
     try {
-        co_await ws_.async_close(websocket::close_code::normal, asio::use_awaitable);
+        co_await ws_.async_close(websocket::close_code::normal, cobalt::use_op);
     } catch (const std::exception& e) {
         LOG_DEBUG("controller.session", "Failed to close session WebSocket: {}", e.what());
     } catch (...) {
@@ -56,11 +60,11 @@ asio::awaitable<void> SessionBase<StreamType>::close() {
 }
 
 template<typename StreamType>
-asio::awaitable<void> SessionBase<StreamType>::read_loop() {
+cobalt::task<void> SessionBase<StreamType>::read_loop() {
     try {
         while (true) {
             read_buffer_.clear();
-            auto bytes = co_await ws_.async_read(read_buffer_, asio::use_awaitable);
+            auto bytes = co_await ws_.async_read(read_buffer_, cobalt::use_op);
             (void)bytes;
 
             auto data = read_buffer_.data();
@@ -84,22 +88,15 @@ asio::awaitable<void> SessionBase<StreamType>::read_loop() {
 }
 
 template<typename StreamType>
-asio::awaitable<void> SessionBase<StreamType>::write_loop() {
+cobalt::task<void> SessionBase<StreamType>::write_loop() {
     try {
         while (ws_.is_open()) {
-            // Wait for data from channel (thread-safe, lock-free)
-            auto [ec, data] = co_await write_channel_.async_receive(asio::as_tuple(asio::use_awaitable));
-            if (ec) {
-                if (ec == asio::experimental::channel_errc::channel_closed) {
-                    break;  // Normal shutdown
-                }
-                log().debug("Write channel error: {}", ec.message());
-                break;
-            }
+            auto data = co_await write_channel_.read();
+            if (!data) break;  // Channel closed, normal shutdown
 
-            log().debug("Session write_loop: sending {} bytes to node {}", data.size(), node_id_);
-            co_await ws_.async_write(asio::buffer(data), asio::use_awaitable);
-            log().debug("Session write_loop: sent {} bytes to node {}", data.size(), node_id_);
+            log().debug("Session write_loop: sending {} bytes to node {}", data->size(), node_id_);
+            co_await ws_.async_write(asio::buffer(*data), cobalt::use_op);
+            log().debug("Session write_loop: sent {} bytes to node {}", data->size(), node_id_);
         }
     } catch (const boost::system::system_error& e) {
         if (e.code() != asio::error::operation_aborted &&
@@ -113,7 +110,7 @@ asio::awaitable<void> SessionBase<StreamType>::write_loop() {
 }
 
 template<typename StreamType>
-asio::awaitable<void> SessionBase<StreamType>::send_error(uint16_t code,
+cobalt::task<void> SessionBase<StreamType>::send_error(uint16_t code,
                                                            const std::string& message,
                                                            FrameType request_type,
                                                            uint32_t request_id) {
@@ -140,36 +137,35 @@ ControlSessionImpl<StreamType>::ControlSessionImpl(StreamType&& ws, SessionManag
     : SessionBase<StreamType>(std::move(ws), manager) {}
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::start(StreamType ws, SessionManager& manager) {
+cobalt::task<void> ControlSessionImpl<StreamType>::start(StreamType ws, SessionManager& manager) {
     auto session = std::make_shared<ControlSessionImpl<StreamType>>(std::move(ws), manager);
     co_await session->run();
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::run() {
+cobalt::task<void> ControlSessionImpl<StreamType>::run() {
     log().info("Control session started");
 
     try {
         // 避免 parallel_group 导致的 TLS allocator 崩溃
         // 使用 completion channel 等待任意循环结束
-        using CompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
-        CompletionChannel completion_ch(co_await asio::this_coro::executor, 2);
+        cobalt::channel<void> completion_ch(2, co_await cobalt::this_coro::executor);
 
         // 启动 read_loop 和 write_loop
-        asio::co_spawn(co_await asio::this_coro::executor,
-            [this, &completion_ch]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(co_await cobalt::this_coro::executor,
+            [this, &completion_ch]() -> cobalt::task<void> {
                 co_await this->read_loop();
-                completion_ch.try_send(boost::system::error_code{});
-            }, asio::detached);
+                co_await cobalt::as_tuple(completion_ch.write());
+            }());
 
-        asio::co_spawn(co_await asio::this_coro::executor,
-            [this, &completion_ch]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(co_await cobalt::this_coro::executor,
+            [this, &completion_ch]() -> cobalt::task<void> {
                 co_await this->write_loop();
-                completion_ch.try_send(boost::system::error_code{});
-            }, asio::detached);
+                co_await cobalt::as_tuple(completion_ch.write());
+            }());
 
         // 等待任意一个循环结束（通常是连接断开）
-        co_await completion_ch.async_receive(asio::use_awaitable);
+        auto [ec] = co_await cobalt::as_tuple(completion_ch.read());
 
         // 关闭 write channel 以终止 write_loop
         this->write_channel_.close();
@@ -182,13 +178,13 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::run() {
     if (this->authenticated_ && this->node_id_ != 0) {
         this->manager_.unregister_control_session(this->node_id_);
         this->manager_.clear_node_endpoints(this->node_id_);
-        this->manager_.database().update_node_online(this->node_id_, false);
+        (void)this->manager_.database().update_node_online(this->node_id_, false);
 
         // Get node's routes before deleting them (for broadcasting withdrawal)
         auto node_routes = this->manager_.database().get_node_routes(this->node_id_);
 
         // Delete node's announced routes from database
-        this->manager_.database().delete_node_routes(this->node_id_);
+        (void)this->manager_.database().delete_node_routes(this->node_id_);
 
         // Notify other nodes about peer status change
         co_await this->manager_.broadcast_config_update(this->network_id_, this->node_id_);
@@ -206,7 +202,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::run() {
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& frame) {
     switch (frame.header.type) {
         case FrameType::AUTH_REQUEST:
             co_await handle_auth_request(frame);
@@ -260,7 +256,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_frame(const Frame& 
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_auth_request(const Frame& frame) {
     // Parse protobuf AuthRequest
     auto pb_request = FrameCodec::decode_protobuf<pb::AuthRequest>(frame.data());
     if (!pb_request) {
@@ -319,7 +315,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
         }
 
         network_id = key_record->network_id;
-        this->manager_.database().increment_authkey_use(authkey);
+        (void)this->manager_.database().increment_authkey_use(authkey);
 
     } else if (auth_type == AuthType::MACHINE) {
         // Reconnection - find existing node
@@ -350,7 +346,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
     this->network_id_ = node->network_id;
 
     // Update node online status
-    this->manager_.database().update_node_online(this->node_id_, true);
+    (void)this->manager_.database().update_node_online(this->node_id_, true);
 
     // Store exit_node capability (per-session, in memory)
     this->manager_.update_node_exit_node(this->node_id_, pb_request->exit_node());
@@ -401,7 +397,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_auth_request(const 
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::send_config() {
+cobalt::task<void> ControlSessionImpl<StreamType>::send_config() {
     // Get all nodes in network
     auto nodes = this->manager_.database().get_nodes_by_network(this->network_id_);
     if (!nodes) {
@@ -492,7 +488,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::send_config() {
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_config_ack(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_config_ack(const Frame& frame) {
     // Use protobuf ConfigAck message
     auto pb_ack = FrameCodec::decode_protobuf<pb::ConfigAck>(frame.data());
     if (!pb_ack) {
@@ -507,7 +503,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_config_ack(const Fr
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_ping(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_ping(const Frame& frame) {
     // Use protobuf Ping message
     auto ping = FrameCodec::decode_protobuf<pb::Ping>(frame.data());
     if (!ping) {
@@ -527,12 +523,12 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_ping(const Frame& f
 
     // Update last seen
     if (this->authenticated_) {
-        this->manager_.database().update_node_last_seen(this->node_id_, Database::now_ms());
+        (void)this->manager_.database().update_node_last_seen(this->node_id_, Database::now_ms());
     }
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_latency_report(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_latency_report(const Frame& frame) {
     if (!this->authenticated_) {
         co_await this->send_error(1001, "Not authenticated", FrameType::LATENCY_REPORT);
         co_return;
@@ -583,7 +579,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_latency_report(cons
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_peer_path_report(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_peer_path_report(const Frame& frame) {
     if (!this->authenticated_) {
         co_await this->send_error(1001, "Not authenticated", FrameType::PEER_PATH_REPORT);
         co_return;
@@ -625,7 +621,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_peer_path_report(co
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_relay_latency_report(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_relay_latency_report(const Frame& frame) {
     if (!this->authenticated_) {
         co_await this->send_error(1001, "Not authenticated", FrameType::RELAY_LATENCY_REPORT);
         co_return;
@@ -654,7 +650,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_relay_latency_repor
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_announce(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_route_announce(const Frame& frame) {
     if (!this->authenticated_) {
         co_await this->send_error(1001, "Not authenticated", FrameType::ROUTE_ANNOUNCE);
         co_return;
@@ -690,7 +686,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_announce(cons
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_withdraw(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_route_withdraw(const Frame& frame) {
     if (!this->authenticated_) {
         co_await this->send_error(1001, "Not authenticated", FrameType::ROUTE_WITHDRAW);
         co_return;
@@ -725,7 +721,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_route_withdraw(cons
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Frame& frame) {
     if (!this->authenticated_) {
         co_await this->send_error(1001, "Not authenticated", FrameType::P2P_INIT);
         co_return;
@@ -817,7 +813,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_p2p_init(const Fram
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::handle_endpoint_update(const Frame& frame) {
+cobalt::task<void> ControlSessionImpl<StreamType>::handle_endpoint_update(const Frame& frame) {
     if (!this->authenticated_) {
         co_await this->send_error(1001, "Not authenticated", FrameType::ENDPOINT_UPDATE);
         co_return;
@@ -856,7 +852,7 @@ asio::awaitable<void> ControlSessionImpl<StreamType>::handle_endpoint_update(con
 }
 
 template<typename StreamType>
-asio::awaitable<void> ControlSessionImpl<StreamType>::send_route_ack(
+cobalt::task<void> ControlSessionImpl<StreamType>::send_route_ack(
     uint32_t request_id, bool success, uint16_t error_code, const std::string& error_msg) {
 
     RouteAck ack;
@@ -882,36 +878,35 @@ RelaySessionImpl<StreamType>::RelaySessionImpl(StreamType&& ws, SessionManager& 
     : SessionBase<StreamType>(std::move(ws), manager) {}
 
 template<typename StreamType>
-asio::awaitable<void> RelaySessionImpl<StreamType>::start(StreamType ws, SessionManager& manager) {
+cobalt::task<void> RelaySessionImpl<StreamType>::start(StreamType ws, SessionManager& manager) {
     auto session = std::make_shared<RelaySessionImpl<StreamType>>(std::move(ws), manager);
     co_await session->run();
 }
 
 template<typename StreamType>
-asio::awaitable<void> RelaySessionImpl<StreamType>::run() {
+cobalt::task<void> RelaySessionImpl<StreamType>::run() {
     log().info("Relay session started");
 
     try {
         // 避免 parallel_group 导致的 TLS allocator 崩溃
         // 使用 completion channel 等待任意循环结束
-        using CompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
-        CompletionChannel completion_ch(co_await asio::this_coro::executor, 2);
+        cobalt::channel<void> completion_ch(2, co_await cobalt::this_coro::executor);
 
         // 启动 read_loop 和 write_loop
-        asio::co_spawn(co_await asio::this_coro::executor,
-            [this, &completion_ch]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(co_await cobalt::this_coro::executor,
+            [this, &completion_ch]() -> cobalt::task<void> {
                 co_await this->read_loop();
-                completion_ch.try_send(boost::system::error_code{});
-            }, asio::detached);
+                co_await cobalt::as_tuple(completion_ch.write());
+            }());
 
-        asio::co_spawn(co_await asio::this_coro::executor,
-            [this, &completion_ch]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(co_await cobalt::this_coro::executor,
+            [this, &completion_ch]() -> cobalt::task<void> {
                 co_await this->write_loop();
-                completion_ch.try_send(boost::system::error_code{});
-            }, asio::detached);
+                co_await cobalt::as_tuple(completion_ch.write());
+            }());
 
         // 等待任意一个循环结束（通常是连接断开）
-        co_await completion_ch.async_receive(asio::use_awaitable);
+        auto [ec] = co_await cobalt::as_tuple(completion_ch.read());
 
         // 关闭 write channel 以终止 write_loop
         this->write_channel_.close();
@@ -928,7 +923,7 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::run() {
 }
 
 template<typename StreamType>
-asio::awaitable<void> RelaySessionImpl<StreamType>::handle_frame(const Frame& frame) {
+cobalt::task<void> RelaySessionImpl<StreamType>::handle_frame(const Frame& frame) {
     switch (frame.header.type) {
         case FrameType::RELAY_AUTH:
             co_await handle_relay_auth(frame);
@@ -954,7 +949,7 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_frame(const Frame& fr
 }
 
 template<typename StreamType>
-asio::awaitable<void> RelaySessionImpl<StreamType>::handle_relay_auth(const Frame& frame) {
+cobalt::task<void> RelaySessionImpl<StreamType>::handle_relay_auth(const Frame& frame) {
     auto pb_auth = FrameCodec::decode_protobuf<pb::RelayAuth>(frame.data());
     if (!pb_auth) {
         co_await this->send_error(1002, "Invalid RELAY_AUTH format", FrameType::RELAY_AUTH);
@@ -1003,7 +998,7 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_relay_auth(const Fram
 }
 
 template<typename StreamType>
-asio::awaitable<void> RelaySessionImpl<StreamType>::handle_data(const Frame& frame) {
+cobalt::task<void> RelaySessionImpl<StreamType>::handle_data(const Frame& frame) {
     if (!this->authenticated_) {
         co_await this->send_error(1001, "Not authenticated", FrameType::DATA);
         co_return;
@@ -1041,7 +1036,7 @@ asio::awaitable<void> RelaySessionImpl<StreamType>::handle_data(const Frame& fra
 }
 
 template<typename StreamType>
-asio::awaitable<void> RelaySessionImpl<StreamType>::handle_ping(const Frame& frame) {
+cobalt::task<void> RelaySessionImpl<StreamType>::handle_ping(const Frame& frame) {
     // Use protobuf Ping message
     auto ping = FrameCodec::decode_protobuf<pb::Ping>(frame.data());
     if (!ping) {

@@ -2,9 +2,12 @@
 #include "client/client.hpp"
 #include "common/config.hpp"
 #include "common/logger.hpp"
+#include "common/cobalt_utils.hpp"
 #include <fstream>
 #include <sstream>
 #include <openssl/sha.h>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -37,7 +40,7 @@ void ConfigWatcher::start() {
     }
 
     // 启动监控协程
-    boost::asio::co_spawn(ioc_, watch_loop(), boost::asio::detached);
+    cobalt_utils::spawn_task(ioc_.get_executor(), watch_loop());
 
     LOG_INFO("client.config", "配置文件监控已启动: {}", config_path_);
 }
@@ -92,20 +95,20 @@ bool ConfigWatcher::reload() {
     cfg.log_file = result->log_file;
 
     // 通过 channel 发送配置变更
-    channel_->try_send(boost::system::error_code{}, std::move(cfg));
+    channel_->try_send(std::move(cfg));
 
     LOG_INFO("client.config", "配置已重新加载");
     return true;
 }
 
-boost::asio::awaitable<void> ConfigWatcher::watch_loop() {
+cobalt::task<void> ConfigWatcher::watch_loop() {
     boost::asio::steady_timer timer(ioc_);
 
     while (running_) {
         timer.expires_after(interval_);
 
         try {
-            co_await timer.async_wait(boost::asio::use_awaitable);
+            co_await timer.async_wait(cobalt::use_op);
         } catch (const boost::system::system_error& e) {
             if (e.code() == boost::asio::error::operation_aborted) {
                 break;

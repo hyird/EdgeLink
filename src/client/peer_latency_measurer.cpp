@@ -1,9 +1,9 @@
 #include "client/peer_latency_measurer.hpp"
 #include "common/logger.hpp"
 #include "common/math_utils.hpp"
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/use_awaitable.hpp>
+#include "common/cobalt_utils.hpp"
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -25,7 +25,7 @@ PeerLatencyMeasurer::PeerLatencyMeasurer(
     , config_(config) {
 }
 
-asio::awaitable<void> PeerLatencyMeasurer::start() {
+cobalt::task<void> PeerLatencyMeasurer::start() {
     if (running_) {
         co_return;
     }
@@ -33,18 +33,18 @@ asio::awaitable<void> PeerLatencyMeasurer::start() {
     running_ = true;
     measure_timer_ = std::make_unique<asio::steady_timer>(ioc_);
     report_timer_ = std::make_unique<asio::steady_timer>(ioc_);
-    measure_done_ch_ = std::make_unique<CompletionChannel>(ioc_, 1);
-    report_done_ch_ = std::make_unique<CompletionChannel>(ioc_, 1);
+    measure_done_ch_ = std::make_unique<CompletionChannel>(1, ioc_.get_executor());
+    report_done_ch_ = std::make_unique<CompletionChannel>(1, ioc_.get_executor());
 
     log().info("Starting peer latency measurer (measure interval: {}s, report interval: {}s)",
                config_.measure_interval.count(), config_.report_interval.count());
 
     // 启动测量和上报循环
-    asio::co_spawn(ioc_, measure_loop(), asio::detached);
-    asio::co_spawn(ioc_, report_loop(), asio::detached);
+    cobalt_utils::spawn_task(ioc_.get_executor(), measure_loop());
+    cobalt_utils::spawn_task(ioc_.get_executor(), report_loop());
 }
 
-asio::awaitable<void> PeerLatencyMeasurer::stop() {
+cobalt::task<void> PeerLatencyMeasurer::stop() {
     if (!running_) {
         co_return;
     }
@@ -56,29 +56,13 @@ asio::awaitable<void> PeerLatencyMeasurer::stop() {
         measure_timer_->cancel();
         if (measure_done_ch_) {
             try {
-                // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
-                asio::steady_timer timeout_timer(ioc_);
-                auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-                bool loop_stopped = false;
-
-                while (!loop_stopped && std::chrono::steady_clock::now() < deadline) {
-                    measure_done_ch_->try_receive([&](boost::system::error_code) {
-                        loop_stopped = true;
-                    });
-
-                    if (loop_stopped) {
-                        break;
-                    }
-
-                    timeout_timer.expires_after(std::chrono::milliseconds(50));
-                    co_await timeout_timer.async_wait(asio::use_awaitable);
-                }
-
-                if (loop_stopped) {
-                    log().debug("Measure loop confirmed stopped");
-                } else {
-                    log().warn("Measure loop stop timeout (2s), forcing shutdown");
-                }
+                auto read_measure_done = [this]() -> cobalt::task<void> {
+                    auto [ec] = co_await cobalt::as_tuple(measure_done_ch_->read());
+                    (void)ec;
+                };
+                asio::steady_timer measure_timeout_timer(co_await cobalt::this_coro::executor, std::chrono::seconds(2));
+                co_await cobalt::race(read_measure_done(), measure_timeout_timer.async_wait(cobalt::use_op));
+                log().debug("Measure loop confirmed stopped");
             } catch (...) {
                 log().debug("Failed to wait for measure loop completion");
             }
@@ -89,29 +73,13 @@ asio::awaitable<void> PeerLatencyMeasurer::stop() {
         report_timer_->cancel();
         if (report_done_ch_) {
             try {
-                // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
-                asio::steady_timer timeout_timer(ioc_);
-                auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-                bool loop_stopped = false;
-
-                while (!loop_stopped && std::chrono::steady_clock::now() < deadline) {
-                    report_done_ch_->try_receive([&](boost::system::error_code) {
-                        loop_stopped = true;
-                    });
-
-                    if (loop_stopped) {
-                        break;
-                    }
-
-                    timeout_timer.expires_after(std::chrono::milliseconds(50));
-                    co_await timeout_timer.async_wait(asio::use_awaitable);
-                }
-
-                if (loop_stopped) {
-                    log().debug("Report loop confirmed stopped");
-                } else {
-                    log().warn("Report loop stop timeout (2s), forcing shutdown");
-                }
+                auto read_report_done = [this]() -> cobalt::task<void> {
+                    auto [ec] = co_await cobalt::as_tuple(report_done_ch_->read());
+                    (void)ec;
+                };
+                asio::steady_timer report_timeout_timer(co_await cobalt::this_coro::executor, std::chrono::seconds(2));
+                co_await cobalt::race(read_report_done(), report_timeout_timer.async_wait(cobalt::use_op));
+                log().debug("Report loop confirmed stopped");
             } catch (...) {
                 log().debug("Failed to wait for report loop completion");
             }
@@ -192,17 +160,17 @@ void PeerLatencyMeasurer::record_pong(
     pending_pings_.erase(it);
 }
 
-asio::awaitable<void> PeerLatencyMeasurer::measure_loop() {
+cobalt::task<void> PeerLatencyMeasurer::measure_loop() {
     // 首次启动延迟 5 秒
     measure_timer_->expires_after(std::chrono::seconds(5));
-    co_await measure_timer_->async_wait(asio::use_awaitable);
+    co_await measure_timer_->async_wait(cobalt::use_op);
 
     while (running_) {
         try {
             co_await measure_all_paths();
 
             measure_timer_->expires_after(config_.measure_interval);
-            co_await measure_timer_->async_wait(asio::use_awaitable);
+            co_await measure_timer_->async_wait(cobalt::use_op);
 
         } catch (const boost::system::system_error& e) {
             if (e.code() == asio::error::operation_aborted) {
@@ -216,14 +184,14 @@ asio::awaitable<void> PeerLatencyMeasurer::measure_loop() {
 
     // 通知 stop() 循环已完成
     if (measure_done_ch_) {
-        measure_done_ch_->try_send(boost::system::error_code{});
+        co_await cobalt::as_tuple(measure_done_ch_->write());
     }
 }
 
-asio::awaitable<void> PeerLatencyMeasurer::report_loop() {
+cobalt::task<void> PeerLatencyMeasurer::report_loop() {
     // 首次启动延迟 10 秒
     report_timer_->expires_after(std::chrono::seconds(10));
-    co_await report_timer_->async_wait(asio::use_awaitable);
+    co_await report_timer_->async_wait(cobalt::use_op);
 
     while (running_) {
         try {
@@ -237,7 +205,7 @@ asio::awaitable<void> PeerLatencyMeasurer::report_loop() {
             }
 
             report_timer_->expires_after(config_.report_interval);
-            co_await report_timer_->async_wait(asio::use_awaitable);
+            co_await report_timer_->async_wait(cobalt::use_op);
 
         } catch (const boost::system::system_error& e) {
             if (e.code() == asio::error::operation_aborted) {
@@ -251,11 +219,11 @@ asio::awaitable<void> PeerLatencyMeasurer::report_loop() {
 
     // 通知 stop() 循环已完成
     if (report_done_ch_) {
-        report_done_ch_->try_send(boost::system::error_code{});
+        co_await cobalt::as_tuple(report_done_ch_->write());
     }
 }
 
-asio::awaitable<void> PeerLatencyMeasurer::measure_all_paths() {
+cobalt::task<void> PeerLatencyMeasurer::measure_all_paths() {
     // 获取所有 Peer
     auto all_peers = peers_.get_all_peers();
     if (all_peers.empty()) {
@@ -290,7 +258,7 @@ asio::awaitable<void> PeerLatencyMeasurer::measure_all_paths() {
     }
 }
 
-asio::awaitable<uint16_t> PeerLatencyMeasurer::measure_single_path(
+cobalt::task<uint16_t> PeerLatencyMeasurer::measure_single_path(
     NodeId peer_id,
     std::shared_ptr<RelayConnectionPool> relay_pool) {
 
@@ -349,7 +317,7 @@ asio::awaitable<uint16_t> PeerLatencyMeasurer::measure_single_path(
     timer.expires_after(std::chrono::milliseconds(config_.ping_timeout_ms));
 
     try {
-        co_await timer.async_wait(asio::use_awaitable);
+        co_await timer.async_wait(cobalt::use_op);
     } catch (...) {
         // 超时，清理 pending ping
         std::lock_guard lock(ping_mutex_);

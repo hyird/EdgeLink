@@ -1,14 +1,43 @@
 #include "common/logger.hpp"
 
+#include <boost/log/core.hpp>
+#include <boost/log/trivial.hpp>
+#include <boost/log/expressions.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+#include <boost/log/sinks/text_file_backend.hpp>
+#include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/sources/record_ostream.hpp>
+#include <boost/log/utility/setup/common_attributes.hpp>
+#include <boost/log/utility/setup/console.hpp>
+#include <boost/log/utility/setup/file.hpp>
+#include <boost/log/attributes/scoped_attribute.hpp>
+#include <boost/log/support/date_time.hpp>
+#include <boost/shared_ptr.hpp>
+#include <boost/make_shared.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
+#include <iostream>
+#include <fstream>
 #include <sstream>
 
 namespace edgelink {
 
+namespace logging = boost::log;
+namespace src = boost::log::sources;
+namespace sinks = boost::log::sinks;
+namespace expr = boost::log::expressions;
+namespace attrs = boost::log::attributes;
+namespace keywords = boost::log::keywords;
+
 // Thread-local trace ID storage
 thread_local std::string TraceContext::current_trace_id_;
+
+// Global Boost.Log logger
+using boost_logger_t = src::severity_logger_mt<logging::trivial::severity_level>;
+static boost_logger_t global_boost_logger;
 
 // ============================================================================
 // Log Level Utilities
@@ -45,17 +74,29 @@ std::string_view log_level_to_string(LogLevel level) {
     return "info";
 }
 
-spdlog::level::level_enum to_spdlog_level(LogLevel level) {
+static logging::trivial::severity_level to_boost_severity(LogLevel level) {
     switch (level) {
-        case LogLevel::TRACE: return spdlog::level::trace;
-        case LogLevel::DEBUG: return spdlog::level::debug;
-        case LogLevel::INFO:  return spdlog::level::info;
-        case LogLevel::WARN:  return spdlog::level::warn;
-        case LogLevel::ERROR: return spdlog::level::err;
-        case LogLevel::FATAL: return spdlog::level::critical;
-        case LogLevel::OFF:   return spdlog::level::off;
+        case LogLevel::TRACE: return logging::trivial::trace;
+        case LogLevel::DEBUG: return logging::trivial::debug;
+        case LogLevel::INFO:  return logging::trivial::info;
+        case LogLevel::WARN:  return logging::trivial::warning;
+        case LogLevel::ERROR: return logging::trivial::error;
+        case LogLevel::FATAL: return logging::trivial::fatal;
+        case LogLevel::OFF:   return logging::trivial::fatal;  // Boost.Log doesn't have "off", use fatal
     }
-    return spdlog::level::info;
+    return logging::trivial::info;
+}
+
+static LogLevel from_boost_severity(logging::trivial::severity_level level) {
+    switch (level) {
+        case logging::trivial::trace: return LogLevel::TRACE;
+        case logging::trivial::debug: return LogLevel::DEBUG;
+        case logging::trivial::info:  return LogLevel::INFO;
+        case logging::trivial::warning: return LogLevel::WARN;
+        case logging::trivial::error: return LogLevel::ERROR;
+        case logging::trivial::fatal: return LogLevel::FATAL;
+    }
+    return LogLevel::INFO;
 }
 
 // ============================================================================
@@ -63,7 +104,6 @@ spdlog::level::level_enum to_spdlog_level(LogLevel level) {
 // ============================================================================
 
 std::string TraceContext::generate_trace_id() {
-    // Generate 16 random bytes, encode as base64-like string (22 chars)
     static thread_local std::random_device rd;
     static thread_local std::mt19937_64 gen(rd());
     std::uniform_int_distribution<uint64_t> dis;
@@ -71,14 +111,19 @@ std::string TraceContext::generate_trace_id() {
     uint64_t hi = dis(gen);
     uint64_t lo = dis(gen);
 
-    // Simple hex encoding (32 chars, but we'll use 16)
     static const char hex[] = "0123456789abcdef";
     std::string result;
-    result.reserve(16);
+    result.reserve(32);  // 128-bit = 32 hex chars
 
+    // 高 64 位
     for (int i = 0; i < 8; ++i) {
         result.push_back(hex[(hi >> (60 - i * 8)) & 0xF]);
         result.push_back(hex[(hi >> (56 - i * 8)) & 0xF]);
+    }
+    // 低 64 位
+    for (int i = 0; i < 8; ++i) {
+        result.push_back(hex[(lo >> (60 - i * 8)) & 0xF]);
+        result.push_back(hex[(lo >> (56 - i * 8)) & 0xF]);
     }
 
     return result;
@@ -114,33 +159,32 @@ TraceContext::Scope::~Scope() {
 // Logger
 // ============================================================================
 
-Logger::Logger(const std::string& module, std::shared_ptr<spdlog::logger> logger)
-    : module_(module), logger_(std::move(logger)) {}
+Logger::Logger(const std::string& module)
+    : module_(module),
+      current_level_(LogManager::instance().resolve_module_level(module)) {}
 
 Logger& Logger::get(const std::string& module) {
     return LogManager::instance().get_logger(module);
 }
 
 void Logger::set_level(LogLevel level) {
-    if (logger_) {
-        logger_->set_level(to_spdlog_level(level));
-    }
+    current_level_ = level;
 }
 
 LogLevel Logger::get_level() const {
-    if (!logger_) return LogLevel::OFF;
+    return current_level_;
+}
 
-    auto level = logger_->level();
-    switch (level) {
-        case spdlog::level::trace: return LogLevel::TRACE;
-        case spdlog::level::debug: return LogLevel::DEBUG;
-        case spdlog::level::info:  return LogLevel::INFO;
-        case spdlog::level::warn:  return LogLevel::WARN;
-        case spdlog::level::err:   return LogLevel::ERROR;
-        case spdlog::level::critical: return LogLevel::FATAL;
-        case spdlog::level::off:   return LogLevel::OFF;
-        default: return LogLevel::INFO;
-    }
+bool Logger::should_log(LogLevel level) const {
+    if (current_level_ == LogLevel::OFF) return false;
+    return static_cast<int>(level) >= static_cast<int>(current_level_);
+}
+
+void Logger::write_log(LogLevel level, const std::string& message) {
+    auto boost_level = to_boost_severity(level);
+
+    BOOST_LOG_SEV(global_boost_logger, boost_level)
+        << "[" << module_ << "] " << message;
 }
 
 // ============================================================================
@@ -152,6 +196,11 @@ LogManager& LogManager::instance() {
     return instance;
 }
 
+LogManager::LogManager() {
+    // Initialize with default console logging
+    logging::add_common_attributes();
+}
+
 LogManager::~LogManager() {
     shutdown();
 }
@@ -160,50 +209,56 @@ void LogManager::init(const LogConfig& config) {
     std::unique_lock lock(mutex_);
 
     if (initialized_) {
-        // Already initialized, use reload instead
         lock.unlock();
         reload_config(config);
         return;
     }
 
     config_ = config;
-    sinks_.clear();
+    init_boost_log();
+    initialized_ = true;
+}
+
+void LogManager::init_boost_log() {
+    auto core = logging::core::get();
+
+    // Remove all existing sinks
+    core->remove_all_sinks();
 
     // Console sink
     if (config_.console_enabled) {
-        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        if (!config_.console_color) {
-            console_sink->set_color_mode(spdlog::color_mode::never);
-        }
-        sinks_.push_back(console_sink);
+        auto console_sink = logging::add_console_log(
+            std::cout,
+            keywords::format = expr::stream
+                << expr::format_date_time<boost::posix_time::ptime>("TimeStamp", "%Y-%m-%d %H:%M:%S.%f")
+                << " [" << logging::trivial::severity << "] "
+                << expr::smessage
+        );
+
+        console_sink->set_filter(
+            logging::trivial::severity >= to_boost_severity(config_.global_level)
+        );
     }
 
     // File sink
     if (config_.file_enabled && !config_.file_path.empty()) {
         try {
-            auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-                config_.file_path,
-                config_.file_max_size,
-                config_.file_max_files
+            auto file_sink = logging::add_file_log(
+                keywords::file_name = config_.file_path,
+                keywords::rotation_size = config_.file_max_size,
+                keywords::format = expr::stream
+                    << expr::format_date_time<boost::posix_time::ptime>("TimeStamp", "%Y-%m-%d %H:%M:%S.%f")
+                    << " [" << logging::trivial::severity << "] "
+                    << expr::smessage
             );
-            sinks_.push_back(file_sink);
-        } catch (const spdlog::spdlog_ex& ex) {
-            // If file logging fails, continue with console only
-            if (config_.console_enabled) {
-                auto console = spdlog::get("console");
-                if (console) {
-                    console->error("Failed to open log file {}: {}", config_.file_path, ex.what());
-                }
-            }
+
+            file_sink->set_filter(
+                logging::trivial::severity >= to_boost_severity(config_.global_level)
+            );
+        } catch (const std::exception& ex) {
+            std::cerr << "Failed to open log file " << config_.file_path << ": " << ex.what() << std::endl;
         }
     }
-
-    // Set global pattern
-    for (auto& sink : sinks_) {
-        sink->set_pattern(config_.pattern);
-    }
-
-    initialized_ = true;
 }
 
 void LogManager::reload_config(const LogConfig& config) {
@@ -214,8 +269,14 @@ void LogManager::reload_config(const LogConfig& config) {
 
     // Update all existing loggers
     for (auto& [name, logger] : loggers_) {
-        update_logger_level(name, spdlog::get(name));
+        logger->set_level(resolve_module_level(name));
     }
+
+    // Update Boost.Log core filter
+    auto core = logging::core::get();
+    core->set_filter(
+        logging::trivial::severity >= to_boost_severity(config_.global_level)
+    );
 }
 
 void LogManager::set_global_level(LogLevel level) {
@@ -225,11 +286,15 @@ void LogManager::set_global_level(LogLevel level) {
     // Update all loggers without module-specific overrides
     for (auto& [name, logger] : loggers_) {
         if (config_.module_levels.find(name) == config_.module_levels.end()) {
-            if (auto spdlogger = spdlog::get(name)) {
-                spdlogger->set_level(to_spdlog_level(level));
-            }
+            logger->set_level(level);
         }
     }
+
+    // Update Boost.Log core filter
+    auto core = logging::core::get();
+    core->set_filter(
+        logging::trivial::severity >= to_boost_severity(level)
+    );
 }
 
 LogLevel LogManager::get_global_level() const {
@@ -241,8 +306,9 @@ void LogManager::set_module_level(const std::string& module, LogLevel level) {
     std::unique_lock lock(mutex_);
     config_.module_levels[module] = level;
 
-    if (auto spdlogger = spdlog::get(module)) {
-        spdlogger->set_level(to_spdlog_level(level));
+    auto it = loggers_.find(module);
+    if (it != loggers_.end()) {
+        it->second->set_level(level);
     }
 }
 
@@ -259,9 +325,9 @@ void LogManager::clear_module_level(const std::string& module) {
     std::unique_lock lock(mutex_);
     config_.module_levels.erase(module);
 
-    // Reset to global level
-    if (auto spdlogger = spdlog::get(module)) {
-        spdlogger->set_level(to_spdlog_level(config_.global_level));
+    auto it = loggers_.find(module);
+    if (it != loggers_.end()) {
+        it->second->set_level(resolve_module_level(module));
     }
 }
 
@@ -271,9 +337,7 @@ std::unordered_map<std::string, LogLevel> LogManager::get_all_module_levels() co
 }
 
 void LogManager::flush() {
-    spdlog::apply_all([](std::shared_ptr<spdlog::logger> logger) {
-        logger->flush();
-    });
+    logging::core::get()->flush();
 }
 
 void LogManager::shutdown() {
@@ -282,8 +346,7 @@ void LogManager::shutdown() {
 
     flush();
     loggers_.clear();
-    sinks_.clear();
-    spdlog::shutdown();
+    logging::core::get()->remove_all_sinks();
     initialized_ = false;
 }
 
@@ -306,48 +369,18 @@ Logger& LogManager::get_logger(const std::string& module) {
         return *it->second;
     }
 
-    auto spdlogger = create_logger(module);
-    auto logger = std::unique_ptr<Logger>(new Logger(module, spdlogger));
+    auto logger = std::unique_ptr<Logger>(new Logger(module));
     auto& ref = *logger;
     loggers_[module] = std::move(logger);
 
     return ref;
 }
 
-std::shared_ptr<spdlog::logger> LogManager::create_logger(const std::string& name) {
-    // Check if logger already exists in spdlog registry
-    if (auto existing = spdlog::get(name)) {
-        update_logger_level(name, existing);
-        return existing;
-    }
-
-    // Create new logger with shared sinks
-    std::shared_ptr<spdlog::logger> logger;
-
-    if (sinks_.empty()) {
-        // Not initialized yet, create with default console sink
-        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        console_sink->set_pattern(config_.pattern);
-        logger = std::make_shared<spdlog::logger>(name, console_sink);
-    } else {
-        logger = std::make_shared<spdlog::logger>(name, sinks_.begin(), sinks_.end());
-    }
-
-    update_logger_level(name, logger);
-    spdlog::register_logger(logger);
-
-    return logger;
-}
-
-void LogManager::update_logger_level(const std::string& module,
-                                      std::shared_ptr<spdlog::logger> logger) {
-    if (!logger) return;
-
+LogLevel LogManager::resolve_module_level(const std::string& module) const {
     // Check for module-specific level
     auto it = config_.module_levels.find(module);
     if (it != config_.module_levels.end()) {
-        logger->set_level(to_spdlog_level(it->second));
-        return;
+        return it->second;
     }
 
     // Check for parent module level (e.g., "client.p2p" inherits from "client")
@@ -356,14 +389,13 @@ void LogManager::update_logger_level(const std::string& module,
         std::string parent = module.substr(0, dot_pos);
         auto parent_it = config_.module_levels.find(parent);
         if (parent_it != config_.module_levels.end()) {
-            logger->set_level(to_spdlog_level(parent_it->second));
-            return;
+            return parent_it->second;
         }
         dot_pos = parent.rfind('.', dot_pos - 1);
     }
 
     // Use global level
-    logger->set_level(to_spdlog_level(config_.global_level));
+    return config_.global_level;
 }
 
 } // namespace edgelink

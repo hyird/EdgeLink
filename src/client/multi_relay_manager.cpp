@@ -1,8 +1,8 @@
 #include "client/multi_relay_manager.hpp"
 #include "common/logger.hpp"
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/use_awaitable.hpp>
+#include "common/cobalt_utils.hpp"
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -24,7 +24,7 @@ MultiRelayManager::MultiRelayManager(
     , config_(config) {
 }
 
-asio::awaitable<bool> MultiRelayManager::initialize(
+cobalt::task<bool> MultiRelayManager::initialize(
     const std::vector<RelayInfo>& relays,
     const std::vector<uint8_t>& relay_token,
     bool use_tls,
@@ -51,7 +51,7 @@ asio::awaitable<bool> MultiRelayManager::initialize(
             ioc_, ssl_ctx_, crypto_, peers_, actual_relay, use_tls);
 
         // 设置事件通道
-        pool->set_channels(channels_);
+        pool->set_event_channel(event_ch_);
 
         // 连接所有 IP
         bool connected = co_await pool->connect_all(relay_token);
@@ -73,8 +73,8 @@ asio::awaitable<bool> MultiRelayManager::initialize(
     // 启动 RTT 测量循环
     running_ = true;
     rtt_timer_ = std::make_unique<asio::steady_timer>(ioc_);
-    rtt_loop_done_ch_ = std::make_unique<CompletionChannel>(ioc_, 1);
-    asio::co_spawn(ioc_, rtt_measure_loop(), asio::detached);
+    rtt_loop_done_ch_ = std::make_unique<CompletionChannel>(1, ioc_.get_executor());
+    cobalt_utils::spawn_task(ioc_.get_executor(), rtt_measure_loop());
 
     log().info("Multi-relay manager initialized: {}/{} relays connected",
                success_count, relays.size());
@@ -82,7 +82,7 @@ asio::awaitable<bool> MultiRelayManager::initialize(
     co_return true;
 }
 
-asio::awaitable<void> MultiRelayManager::stop() {
+cobalt::task<void> MultiRelayManager::stop() {
     running_ = false;
 
     // 取消 RTT 定时器并等待循环退出
@@ -93,29 +93,13 @@ asio::awaitable<void> MultiRelayManager::stop() {
         // 添加超时保护避免卡住
         if (rtt_loop_done_ch_) {
             try {
-                // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
-                asio::steady_timer timeout_timer(ioc_);
-                auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-                bool loop_stopped = false;
-
-                while (!loop_stopped && std::chrono::steady_clock::now() < deadline) {
-                    rtt_loop_done_ch_->try_receive([&](boost::system::error_code) {
-                        loop_stopped = true;
-                    });
-
-                    if (loop_stopped) {
-                        break;
-                    }
-
-                    timeout_timer.expires_after(std::chrono::milliseconds(50));
-                    co_await timeout_timer.async_wait(asio::use_awaitable);
-                }
-
-                if (loop_stopped) {
-                    log().debug("RTT measure loop confirmed stopped");
-                } else {
-                    log().warn("RTT measure loop stop timeout (2s), forcing shutdown");
-                }
+                auto read_rtt_done = [this]() -> cobalt::task<void> {
+                    auto [ec] = co_await cobalt::as_tuple(rtt_loop_done_ch_->read());
+                    (void)ec;
+                };
+                asio::steady_timer rtt_timeout_timer(co_await cobalt::this_coro::executor, std::chrono::seconds(2));
+                co_await cobalt::race(read_rtt_done(), rtt_timeout_timer.async_wait(cobalt::use_op));
+                log().debug("RTT measure loop confirmed stopped");
             } catch (...) {
                 log().debug("Failed to wait for RTT loop completion");
             }
@@ -290,20 +274,20 @@ size_t MultiRelayManager::total_connection_count() const {
     return count;
 }
 
-void MultiRelayManager::set_channels(RelayChannelEvents channels) {
-    channels_ = channels;
+void MultiRelayManager::set_event_channel(events::RelayEventChannel* ch) {
+    event_ch_ = ch;
 
     std::shared_lock lock(mutex_);
     for (auto& [id, pool] : relay_pools_) {
-        pool->set_channels(channels);
+        pool->set_event_channel(ch);
     }
 }
 
-asio::awaitable<void> MultiRelayManager::rtt_measure_loop() {
+cobalt::task<void> MultiRelayManager::rtt_measure_loop() {
     while (running_) {
         try {
             rtt_timer_->expires_after(config_.rtt_measure_interval);
-            co_await rtt_timer_->async_wait(asio::use_awaitable);
+            co_await rtt_timer_->async_wait(cobalt::use_op);
 
             if (!running_) break;
 
@@ -335,7 +319,7 @@ asio::awaitable<void> MultiRelayManager::rtt_measure_loop() {
 
     // 通知 stop() 循环已完成
     if (rtt_loop_done_ch_) {
-        rtt_loop_done_ch_->try_send(boost::system::error_code{});
+        co_await cobalt::as_tuple(rtt_loop_done_ch_->write());
     }
 }
 

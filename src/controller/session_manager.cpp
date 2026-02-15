@@ -4,6 +4,10 @@
 #include "common/message.hpp"
 #include "common/frame.hpp"
 #include "common/proto_convert.hpp"
+#include "common/cobalt_utils.hpp"
+#include <boost/cobalt.hpp>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::controller {
 
@@ -14,10 +18,10 @@ auto& log() { return Logger::get("controller.session_manager"); }
 SessionManager::SessionManager(asio::io_context& ioc, Database& db, JwtUtil& jwt)
     : ioc_(ioc), db_(db), jwt_(jwt), state_machine_(ioc) {
     // 创建事件通道
-    client_online_channel_ = std::make_unique<channels::ClientOnlineChannel>(ioc, 64);
-    client_offline_channel_ = std::make_unique<channels::ClientOfflineChannel>(ioc, 64);
-    endpoint_update_channel_ = std::make_unique<channels::EndpointUpdateChannel>(ioc, 64);
-    route_change_channel_ = std::make_unique<channels::RouteChangeChannel>(ioc, 64);
+    client_online_channel_ = std::make_unique<channels::ClientOnlineChannel>(64, ioc.get_executor());
+    client_offline_channel_ = std::make_unique<channels::ClientOfflineChannel>(64, ioc.get_executor());
+    endpoint_update_channel_ = std::make_unique<channels::EndpointUpdateChannel>(64, ioc.get_executor());
+    route_change_channel_ = std::make_unique<channels::RouteChangeChannel>(64, ioc.get_executor());
 
     // 设置状态机的事件通道
     state_machine_.set_client_online_channel(client_online_channel_.get());
@@ -26,10 +30,10 @@ SessionManager::SessionManager(asio::io_context& ioc, Database& db, JwtUtil& jwt
     state_machine_.set_route_change_channel(route_change_channel_.get());
 
     // 启动事件处理协程
-    asio::co_spawn(ioc_, client_online_handler(), asio::detached);
-    asio::co_spawn(ioc_, client_offline_handler(), asio::detached);
-    asio::co_spawn(ioc_, endpoint_update_handler(), asio::detached);
-    asio::co_spawn(ioc_, route_change_handler(), asio::detached);
+    cobalt_utils::spawn_task(ioc_.get_executor(), client_online_handler());
+    cobalt_utils::spawn_task(ioc_.get_executor(), client_offline_handler());
+    cobalt_utils::spawn_task(ioc_.get_executor(), endpoint_update_handler());
+    cobalt_utils::spawn_task(ioc_.get_executor(), route_change_handler());
 }
 
 // ============================================================================
@@ -150,7 +154,7 @@ std::shared_ptr<ISession> SessionManager::get_relay_session(NodeId node_id) {
 // Broadcast/Notify
 // ============================================================================
 
-asio::awaitable<void> SessionManager::broadcast_config_update(NetworkId network_id, NodeId except_node) {
+cobalt::task<void> SessionManager::broadcast_config_update(NetworkId network_id, NodeId except_node) {
     auto sessions = get_network_control_sessions(network_id);
 
     log().info("broadcast_config_update: network={}, except_node={}, active_sessions={}",
@@ -211,7 +215,7 @@ asio::awaitable<void> SessionManager::broadcast_config_update(NetworkId network_
                sent_count, network_id);
 }
 
-asio::awaitable<void> SessionManager::notify_peer_status(NodeId target_node, NodeId peer_node, bool online) {
+cobalt::task<void> SessionManager::notify_peer_status(NodeId target_node, NodeId peer_node, bool online) {
     auto session = get_control_session(target_node);
     if (!session) {
         co_return;
@@ -244,7 +248,7 @@ asio::awaitable<void> SessionManager::notify_peer_status(NodeId target_node, Nod
     }
 }
 
-asio::awaitable<void> SessionManager::broadcast_route_update(
+cobalt::task<void> SessionManager::broadcast_route_update(
     NetworkId network_id, NodeId except_node,
     const std::vector<RouteInfo>& add_routes,
     const std::vector<RouteInfo>& del_routes) {
@@ -412,102 +416,85 @@ void SessionManager::check_timeouts() {
 // Channel 事件处理协程
 // ============================================================================
 
-asio::awaitable<void> SessionManager::client_online_handler() {
+cobalt::task<void> SessionManager::client_online_handler() {
     while (true) {
-        auto result = co_await client_online_channel_->async_receive(asio::as_tuple(asio::use_awaitable));
-        auto ec = std::get<0>(result);
+        auto [ec, event] = co_await cobalt::as_tuple(client_online_channel_->read());
         if (ec) {
-            if (ec == asio::experimental::channel_errc::channel_cancelled) {
+            if (ec == asio::error::operation_aborted) {
                 break;
             }
-            continue;
+            break;  // broken_pipe means channel closed
         }
 
-        auto node_id = std::get<1>(result);
-        auto network_id = std::get<2>(result);
-
-        log().info("Client {} online in network {}", node_id, network_id);
+        log().info("Client {} online in network {}", event.node_id, event.network_id);
 
         // 通知同网络的其他客户端
-        auto sessions = get_network_control_sessions(network_id);
+        auto sessions = get_network_control_sessions(event.network_id);
         for (const auto& session : sessions) {
-            if (session->node_id() != node_id) {
-                co_await notify_peer_status(session->node_id(), node_id, true);
+            if (session->node_id() != event.node_id) {
+                co_await notify_peer_status(session->node_id(), event.node_id, true);
             }
         }
 
         // 更新数据库
-        db_.update_node_online(node_id, true);
+        (void)db_.update_node_online(event.node_id, true);
     }
 }
 
-asio::awaitable<void> SessionManager::client_offline_handler() {
+cobalt::task<void> SessionManager::client_offline_handler() {
     while (true) {
-        auto result = co_await client_offline_channel_->async_receive(asio::as_tuple(asio::use_awaitable));
-        auto ec = std::get<0>(result);
+        auto [ec, event] = co_await cobalt::as_tuple(client_offline_channel_->read());
         if (ec) {
-            if (ec == asio::experimental::channel_errc::channel_cancelled) {
+            if (ec == asio::error::operation_aborted) {
                 break;
             }
-            continue;
+            break;  // broken_pipe means channel closed
         }
 
-        auto node_id = std::get<1>(result);
-        auto network_id = std::get<2>(result);
-
-        log().info("Client {} offline from network {}", node_id, network_id);
+        log().info("Client {} offline from network {}", event.node_id, event.network_id);
 
         // 通知同网络的其他客户端
-        auto sessions = get_network_control_sessions(network_id);
+        auto sessions = get_network_control_sessions(event.network_id);
         for (const auto& session : sessions) {
-            if (session->node_id() != node_id) {
-                co_await notify_peer_status(session->node_id(), node_id, false);
+            if (session->node_id() != event.node_id) {
+                co_await notify_peer_status(session->node_id(), event.node_id, false);
             }
         }
 
         // 更新数据库
-        db_.update_node_online(node_id, false);
+        (void)db_.update_node_online(event.node_id, false);
     }
 }
 
-asio::awaitable<void> SessionManager::endpoint_update_handler() {
+cobalt::task<void> SessionManager::endpoint_update_handler() {
     while (true) {
-        auto result = co_await endpoint_update_channel_->async_receive(asio::as_tuple(asio::use_awaitable));
-        auto ec = std::get<0>(result);
+        auto [ec, event] = co_await cobalt::as_tuple(endpoint_update_channel_->read());
         if (ec) {
-            if (ec == asio::experimental::channel_errc::channel_cancelled) {
+            if (ec == asio::error::operation_aborted) {
                 break;
             }
-            continue;
+            break;  // broken_pipe means channel closed
         }
-
-        auto node_id = std::get<1>(result);
-        auto& endpoints = std::get<2>(result);
 
         // 更新内部端点缓存
-        update_node_endpoints(node_id, endpoints);
+        update_node_endpoints(event.node_id, event.endpoints);
     }
 }
 
-asio::awaitable<void> SessionManager::route_change_handler() {
+cobalt::task<void> SessionManager::route_change_handler() {
     while (true) {
-        auto result = co_await route_change_channel_->async_receive(asio::as_tuple(asio::use_awaitable));
-        auto ec = std::get<0>(result);
+        auto [ec, event] = co_await cobalt::as_tuple(route_change_channel_->read());
         if (ec) {
-            if (ec == asio::experimental::channel_errc::channel_cancelled) {
+            if (ec == asio::error::operation_aborted) {
                 break;
             }
-            continue;
+            break;  // broken_pipe means channel closed
         }
 
-        auto node_id = std::get<1>(result);
-        auto& added = std::get<2>(result);
-        auto& removed = std::get<3>(result);
-
         // 广播路由变更
-        auto state = get_client_state(node_id);
+        auto state = get_client_state(event.node_id);
         if (state) {
-            co_await broadcast_route_update(state->network_id, node_id, added, removed);
+            co_await broadcast_route_update(state->network_id, event.node_id, event.added, event.removed);
         }
     }
 }

@@ -1,5 +1,6 @@
 #include "common/node_state.hpp"
 #include "common/logger.hpp"
+#include "common/cobalt_utils.hpp"
 #include <algorithm>
 #include <chrono>
 
@@ -396,8 +397,9 @@ void ControllerStateMachine::record_ping(NodeId node_id) {
     std::unique_lock lock(nodes_mutex_);
     auto* node = get_node_view_mut(node_id);
     if (node) {
-        node->last_ping_time = now_us();
-        node->last_seen_time = now_us();
+        auto now = now_us();
+        node->last_ping_time = now;
+        node->last_seen_time = now;
     }
 }
 
@@ -461,19 +463,19 @@ uint64_t ControllerStateMachine::now_us() {
 
 void ControllerStateMachine::notify_client_online(NodeId node_id, NetworkId network_id) {
     if (client_online_channel_) {
-        client_online_channel_->try_send(boost::system::error_code{}, node_id, network_id);
+        cobalt_utils::fire_write(*client_online_channel_, ClientOnlineEvent{node_id, network_id}, ioc_.get_executor());
     }
 }
 
 void ControllerStateMachine::notify_client_offline(NodeId node_id, NetworkId network_id) {
     if (client_offline_channel_) {
-        client_offline_channel_->try_send(boost::system::error_code{}, node_id, network_id);
+        cobalt_utils::fire_write(*client_offline_channel_, ClientOfflineEvent{node_id, network_id}, ioc_.get_executor());
     }
 }
 
 void ControllerStateMachine::notify_endpoint_update(NodeId node_id, const std::vector<Endpoint>& endpoints) {
     if (endpoint_update_channel_) {
-        endpoint_update_channel_->try_send(boost::system::error_code{}, node_id, endpoints);
+        cobalt_utils::fire_write(*endpoint_update_channel_, EndpointUpdateEvent{node_id, endpoints}, ioc_.get_executor());
     }
 }
 
@@ -481,7 +483,7 @@ void ControllerStateMachine::notify_route_change(NodeId node_id,
                                                    const std::vector<RouteInfo>& added,
                                                    const std::vector<RouteInfo>& removed) {
     if (route_change_channel_) {
-        route_change_channel_->try_send(boost::system::error_code{}, node_id, added, removed);
+        cobalt_utils::fire_write(*route_change_channel_, RouteChangeEvent{node_id, added, removed}, ioc_.get_executor());
     }
 }
 
@@ -1251,6 +1253,7 @@ bool ClientStateMachine::is_peer_p2p_ready(NodeId peer_id) const {
 }
 
 uint32_t ClientStateMachine::next_init_seq() {
+    std::unique_lock lock(self_mutex_);
     return ++state_.next_init_seq;
 }
 
@@ -1343,13 +1346,13 @@ uint64_t ClientStateMachine::now_us() {
 
 void ClientStateMachine::notify_phase_change(ConnectionPhase old_phase, ConnectionPhase new_phase) {
     if (phase_channel_) {
-        phase_channel_->try_send(boost::system::error_code{}, old_phase, new_phase);
+        cobalt_utils::fire_write(*phase_channel_, ConnectionPhaseEvent{old_phase, new_phase}, ioc_.get_executor());
     }
 }
 
 void ClientStateMachine::notify_peer_state_change(NodeId peer_id, P2PConnectionState p2p_state, PeerDataPath data_path) {
     if (peer_state_channel_) {
-        peer_state_channel_->try_send(boost::system::error_code{}, peer_id, p2p_state, data_path);
+        cobalt_utils::fire_write(*peer_state_channel_, PeerStateEvent{peer_id, p2p_state, data_path}, ioc_.get_executor());
     }
 }
 

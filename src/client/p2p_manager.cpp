@@ -2,10 +2,10 @@
 #include "common/logger.hpp"
 #include "common/constants.hpp"
 #include "common/proto_convert.hpp"
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/use_awaitable.hpp>
+#include "common/cobalt_utils.hpp"
 #include <chrono>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -44,11 +44,11 @@ void P2PManager::set_config(const P2PConfig& config) {
     config_ = config;
 }
 
-void P2PManager::set_channels(P2PChannels channels) {
-    channels_ = std::move(channels);
+void P2PManager::set_event_channel(events::P2PEventChannel* ch) {
+    event_ch_ = ch;
 }
 
-asio::awaitable<bool> P2PManager::start() {
+cobalt::task<bool> P2PManager::start() {
     if (!config_.enabled) {
         log().info("P2P 已禁用");
         co_return false;
@@ -65,7 +65,7 @@ asio::awaitable<bool> P2PManager::start() {
         while (starting_ && !running_) {
             asio::steady_timer wait_timer(ioc_);
             wait_timer.expires_after(std::chrono::milliseconds(100));
-            co_await wait_timer.async_wait(asio::use_awaitable);
+            co_await wait_timer.async_wait(cobalt::use_op);
         }
         co_return running_.load();
     }
@@ -84,13 +84,13 @@ asio::awaitable<bool> P2PManager::start() {
     starting_ = false;
 
     // Create loop completion tracking channel
-    loops_done_ch_ = std::make_unique<LoopCompletionChannel>(ioc_, 10);
+    loops_done_ch_ = std::make_unique<LoopCompletionChannel>(10, ioc_.get_executor());
     active_loops_ = 0;
 
     // 【重要】先启动 recv_loop，再查询 STUN
     // 因为 STUN 响应现在通过 recv_loop -> handle_stun_response -> channel 传递
     active_loops_++;
-    asio::co_spawn(ioc_, recv_loop(), asio::detached);
+    cobalt_utils::spawn_task(ioc_.get_executor(), recv_loop());
 
     // 查询 STUN 端点
     auto stun_result = co_await endpoints_.query_stun_endpoint();
@@ -103,10 +103,10 @@ asio::awaitable<bool> P2PManager::start() {
 
     // 启动其他后台任务 (5 loops total)
     active_loops_ += 4;
-    asio::co_spawn(ioc_, keepalive_loop(), asio::detached);
-    asio::co_spawn(ioc_, punch_timeout_loop(), asio::detached);
-    asio::co_spawn(ioc_, retry_loop(), asio::detached);
-    asio::co_spawn(ioc_, endpoint_refresh_loop(), asio::detached);
+    cobalt_utils::spawn_task(ioc_.get_executor(), keepalive_loop());
+    cobalt_utils::spawn_task(ioc_.get_executor(), punch_timeout_loop());
+    cobalt_utils::spawn_task(ioc_.get_executor(), retry_loop());
+    cobalt_utils::spawn_task(ioc_.get_executor(), endpoint_refresh_loop());
 
     log().info("P2P 管理器已启动，端口 {}", endpoints_.local_port());
 
@@ -119,7 +119,7 @@ asio::awaitable<bool> P2PManager::start() {
     co_return true;
 }
 
-asio::awaitable<void> P2PManager::stop() {
+cobalt::task<void> P2PManager::stop() {
     if (!running_) {
         co_return;
     }
@@ -142,37 +142,22 @@ asio::awaitable<void> P2PManager::stop() {
     int expected_loops = active_loops_.load();
     log().debug("Waiting for {} P2P loop(s) to exit...", expected_loops);
 
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    int completed = 0;
-
-    while (completed < expected_loops && std::chrono::steady_clock::now() < deadline) {
-        try {
-            asio::steady_timer wait_timer(ioc_);
-            wait_timer.expires_after(std::chrono::milliseconds(50));
-
-            // Try to receive one completion notification (non-blocking)
-            bool received = false;
-            if (loops_done_ch_) {
-                loops_done_ch_->try_receive([&](boost::system::error_code) {
-                    received = true;
-                    completed++;
-                });
+    try {
+        auto read_all_loops = [this, expected_loops]() -> cobalt::task<void> {
+            for (int i = 0; i < expected_loops; ++i) {
+                auto [ec] = co_await cobalt::as_tuple(loops_done_ch_->read());
+                if (ec) break;
             }
-
-            if (!received) {
-                // No loop completed yet, wait briefly and retry
-                co_await wait_timer.async_wait(asio::use_awaitable);
-            }
-        } catch (...) {
-            break;
-        }
-    }
+        };
+        asio::steady_timer loops_timeout_timer(co_await cobalt::this_coro::executor, std::chrono::seconds(3));
+        co_await cobalt::race(read_all_loops(), loops_timeout_timer.async_wait(cobalt::use_op));
+    } catch (...) {}
 
     int remaining = active_loops_.load();
     if (remaining > 0) {
         log().warn("{} of {} P2P loop(s) did not exit cleanly", remaining, expected_loops);
     } else {
-        log().debug("All {} P2P loops exited successfully", completed);
+        log().debug("All {} P2P loops exited successfully", expected_loops);
     }
 
     // 清除上下文
@@ -186,7 +171,7 @@ asio::awaitable<void> P2PManager::stop() {
     log().info("P2P 管理器已停止");
 }
 
-asio::awaitable<void> P2PManager::connect_peer(NodeId peer_id) {
+cobalt::task<void> P2PManager::connect_peer(NodeId peer_id) {
     // 检查状态机中的当前状态
     auto current_state = state_machine_.get_peer_p2p_state(peer_id);
     if (current_state == P2PConnectionState::CONNECTED ||
@@ -330,10 +315,10 @@ void P2PManager::handle_p2p_endpoint(const P2PEndpointMsg& msg) {
     state_machine_.set_peer_p2p_state(msg.peer_node, P2PConnectionState::PUNCHING);
 
     // 启动分批打洞
-    asio::co_spawn(ioc_, do_punch_batches(msg.peer_node), asio::detached);
+    cobalt_utils::spawn_task(ioc_.get_executor(), do_punch_batches(msg.peer_node));
 }
 
-asio::awaitable<bool> P2PManager::send_data(NodeId peer_id, std::span<const uint8_t> data) {
+cobalt::task<bool> P2PManager::send_data(NodeId peer_id, std::span<const uint8_t> data) {
     // 检查是否已连接
     if (state_machine_.get_peer_p2p_state(peer_id) != P2PConnectionState::CONNECTED) {
         co_return false;
@@ -399,7 +384,7 @@ asio::awaitable<bool> P2PManager::send_data(NodeId peer_id, std::span<const uint
 
     try {
         co_await endpoints_.socket().async_send_to(
-            asio::buffer(frame), endpoint, asio::use_awaitable);
+            asio::buffer(frame), endpoint, cobalt::use_op);
 
         // 更新发送时间
         {
@@ -425,7 +410,7 @@ std::vector<Endpoint> P2PManager::our_endpoints() const {
     return endpoints_.get_all_endpoints();
 }
 
-asio::awaitable<void> P2PManager::recv_loop() {
+cobalt::task<void> P2PManager::recv_loop() {
     std::array<uint8_t, 65536> buffer;
     asio::ip::udp::endpoint sender;
 
@@ -434,7 +419,7 @@ asio::awaitable<void> P2PManager::recv_loop() {
     while (running_ && endpoints_.is_socket_open()) {
         try {
             auto bytes = co_await endpoints_.socket().async_receive_from(
-                asio::buffer(buffer), sender, asio::use_awaitable);
+                asio::buffer(buffer), sender, cobalt::use_op);
 
             if (bytes > 0) {
                 auto data = std::span(buffer.data(), bytes);
@@ -470,17 +455,17 @@ asio::awaitable<void> P2PManager::recv_loop() {
 
     log().debug("recv_loop exited");
     if (loops_done_ch_) {
-        loops_done_ch_->try_send(boost::system::error_code{});
+        co_await cobalt::as_tuple(loops_done_ch_->write());
     }
     active_loops_--;
 }
 
-asio::awaitable<void> P2PManager::keepalive_loop() {
+cobalt::task<void> P2PManager::keepalive_loop() {
     while (running_) {
         keepalive_timer_.expires_after(config_.keepalive_interval);
 
         try {
-            co_await keepalive_timer_.async_wait(asio::use_awaitable);
+            co_await keepalive_timer_.async_wait(cobalt::use_op);
         } catch (const boost::system::system_error&) {
             break;
         }
@@ -543,12 +528,12 @@ asio::awaitable<void> P2PManager::keepalive_loop() {
 
     log().debug("keepalive_loop exited");
     if (loops_done_ch_) {
-        loops_done_ch_->try_send(boost::system::error_code{});
+        co_await cobalt::as_tuple(loops_done_ch_->write());
     }
     active_loops_--;
 }
 
-asio::awaitable<void> P2PManager::punch_timeout_loop() {
+cobalt::task<void> P2PManager::punch_timeout_loop() {
     // 使用 500ms 检查间隔，平衡精度和 CPU 开销
     constexpr auto CHECK_INTERVAL = std::chrono::milliseconds(500);
 
@@ -556,7 +541,7 @@ asio::awaitable<void> P2PManager::punch_timeout_loop() {
         punch_timer_.expires_after(CHECK_INTERVAL);
 
         try {
-            co_await punch_timer_.async_wait(asio::use_awaitable);
+            co_await punch_timer_.async_wait(cobalt::use_op);
         } catch (const boost::system::system_error&) {
             break;
         }
@@ -626,12 +611,12 @@ asio::awaitable<void> P2PManager::punch_timeout_loop() {
 
     log().debug("punch_timeout_loop exited");
     if (loops_done_ch_) {
-        loops_done_ch_->try_send(boost::system::error_code{});
+        co_await cobalt::as_tuple(loops_done_ch_->write());
     }
     active_loops_--;
 }
 
-asio::awaitable<void> P2PManager::do_punch_batches(NodeId peer_id) {
+cobalt::task<void> P2PManager::do_punch_batches(NodeId peer_id) {
     log().debug("开始分批打洞到 peer {} ({} 批, {} 包/批, {}ms 间隔)",
                 peer_id, config_.punch_batch_count, config_.punch_batch_size,
                 config_.punch_batch_interval.count());
@@ -703,7 +688,7 @@ asio::awaitable<void> P2PManager::do_punch_batches(NodeId peer_id) {
         if (batch + 1 < config_.punch_batch_count) {
             batch_timer.expires_after(config_.punch_batch_interval);
             try {
-                co_await batch_timer.async_wait(asio::use_awaitable);
+                co_await batch_timer.async_wait(cobalt::use_op);
             } catch (const boost::system::system_error&) {
                 break;
             }
@@ -713,7 +698,7 @@ asio::awaitable<void> P2PManager::do_punch_batches(NodeId peer_id) {
     log().debug("完成分批打洞到 peer {}", peer_id);
 }
 
-asio::awaitable<void> P2PManager::retry_loop() {
+cobalt::task<void> P2PManager::retry_loop() {
     // 指数退避参数
     constexpr uint32_t MAX_RETRY_COUNT = 10;        // 最大重试次数后使用最大间隔
     constexpr uint64_t CHECK_INTERVAL_SEC = 5;      // 检查间隔（秒）
@@ -723,7 +708,7 @@ asio::awaitable<void> P2PManager::retry_loop() {
         retry_timer_.expires_after(std::chrono::seconds(CHECK_INTERVAL_SEC));
 
         try {
-            co_await retry_timer_.async_wait(asio::use_awaitable);
+            co_await retry_timer_.async_wait(cobalt::use_op);
         } catch (const boost::system::system_error&) {
             break;
         }
@@ -760,23 +745,23 @@ asio::awaitable<void> P2PManager::retry_loop() {
 
         for (auto peer_id : retry_peers) {
             log().debug("重试 P2P 连接到 peer {}", peer_id);
-            asio::co_spawn(ioc_, connect_peer(peer_id), asio::detached);
+            cobalt_utils::spawn_task(ioc_.get_executor(), connect_peer(peer_id));
         }
     }
 
     log().debug("retry_loop exited");
     if (loops_done_ch_) {
-        loops_done_ch_->try_send(boost::system::error_code{});
+        co_await cobalt::as_tuple(loops_done_ch_->write());
     }
     active_loops_--;
 }
 
-asio::awaitable<void> P2PManager::endpoint_refresh_loop() {
+cobalt::task<void> P2PManager::endpoint_refresh_loop() {
     // 等待初始刷新间隔
     endpoint_refresh_timer_.expires_after(config_.endpoint_refresh_interval);
 
     try {
-        co_await endpoint_refresh_timer_.async_wait(asio::use_awaitable);
+        co_await endpoint_refresh_timer_.async_wait(cobalt::use_op);
     } catch (const boost::system::system_error&) {
         co_return;
     }
@@ -787,7 +772,7 @@ asio::awaitable<void> P2PManager::endpoint_refresh_loop() {
         endpoint_refresh_timer_.expires_after(config_.endpoint_refresh_interval);
 
         try {
-            co_await endpoint_refresh_timer_.async_wait(asio::use_awaitable);
+            co_await endpoint_refresh_timer_.async_wait(cobalt::use_op);
         } catch (const boost::system::system_error&) {
             break;
         }
@@ -795,12 +780,12 @@ asio::awaitable<void> P2PManager::endpoint_refresh_loop() {
 
     log().debug("endpoint_refresh_loop exited");
     if (loops_done_ch_) {
-        loops_done_ch_->try_send(boost::system::error_code{});
+        co_await cobalt::as_tuple(loops_done_ch_->write());
     }
     active_loops_--;
 }
 
-asio::awaitable<void> P2PManager::refresh_endpoints() {
+cobalt::task<void> P2PManager::refresh_endpoints() {
     if (!running_) {
         co_return;
     }
@@ -1047,15 +1032,16 @@ void P2PManager::handle_p2p_data(const asio::ip::udp::endpoint& from,
         }
     }
 
-    // 通过 channel 发送数据
-    if (channels_.data_channel) {
-        channels_.data_channel->try_send(
-            boost::system::error_code{}, peer_id,
-            std::vector<uint8_t>(decrypt_result->begin(), decrypt_result->end()));
+    // 通过 event channel 发送数据
+    if (event_ch_) {
+        cobalt_utils::fire_write(*event_ch_,
+            events::p2p::Event{events::p2p::DataReceived{peer_id,
+                std::vector<uint8_t>(decrypt_result->begin(), decrypt_result->end())}},
+            ioc_.get_executor());
     }
 }
 
-asio::awaitable<void> P2PManager::send_p2p_ping(NodeId peer_id,
+cobalt::task<void> P2PManager::send_p2p_ping(NodeId peer_id,
                                                  const asio::ip::udp::endpoint& to) {
     P2PPing ping;
     ping.magic = protocol::P2P_MAGIC;
@@ -1104,7 +1090,7 @@ asio::awaitable<void> P2PManager::send_p2p_ping(NodeId peer_id,
 
     try {
         co_await endpoints_.socket().async_send_to(
-            asio::buffer(frame), to, asio::use_awaitable);
+            asio::buffer(frame), to, cobalt::use_op);
 
         log().debug("发送 P2P_PING 到 {} (peer {})",
             to.address().to_string(), peer_id);
@@ -1161,7 +1147,7 @@ void P2PManager::send_p2p_pong(const P2PPing& ping,
     }
 }
 
-asio::awaitable<void> P2PManager::send_p2p_keepalive(NodeId peer_id) {
+cobalt::task<void> P2PManager::send_p2p_keepalive(NodeId peer_id) {
     if (state_machine_.get_peer_p2p_state(peer_id) != P2PConnectionState::CONNECTED) {
         co_return;
     }
@@ -1213,7 +1199,7 @@ asio::awaitable<void> P2PManager::send_p2p_keepalive(NodeId peer_id) {
 
     try {
         co_await endpoints_.socket().async_send_to(
-            asio::buffer(frame), endpoint, asio::use_awaitable);
+            asio::buffer(frame), endpoint, cobalt::use_op);
     } catch (const std::exception& e) {
         log().debug("发送 keepalive 失败: {}", e.what());
     }
@@ -1233,20 +1219,23 @@ void P2PManager::report_p2p_status(NodeId peer_id, bool success) {
         status.latency_ms = 0;
     }
 
-    if (channels_.status_channel) {
-        channels_.status_channel->try_send(boost::system::error_code{}, status);
+    if (event_ch_) {
+        cobalt_utils::fire_write(*event_ch_,
+            events::p2p::Event{events::p2p::StatusChanged{status}}, ioc_.get_executor());
     }
 }
 
 void P2PManager::notify_endpoints_ready(const std::vector<Endpoint>& endpoints) {
-    if (channels_.endpoints_channel) {
-        channels_.endpoints_channel->try_send(boost::system::error_code{}, endpoints);
+    if (event_ch_) {
+        cobalt_utils::fire_write(*event_ch_,
+            events::p2p::Event{events::p2p::EndpointsReady{endpoints}}, ioc_.get_executor());
     }
 }
 
 void P2PManager::request_p2p_init(const P2PInit& init) {
-    if (channels_.init_channel) {
-        channels_.init_channel->try_send(boost::system::error_code{}, init);
+    if (event_ch_) {
+        cobalt_utils::fire_write(*event_ch_,
+            events::p2p::Event{events::p2p::InitNeeded{init}}, ioc_.get_executor());
     }
 }
 

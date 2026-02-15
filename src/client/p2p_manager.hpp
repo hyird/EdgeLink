@@ -4,12 +4,13 @@
 #include "common/message.hpp"
 #include "common/connection_types.hpp"
 #include "common/node_state.hpp"
+#include "common/events.hpp"
 #include "client/crypto_engine.hpp"
 #include "client/peer_manager.hpp"
 #include "client/endpoint_manager.hpp"
 
 #include <boost/asio.hpp>
-#include <boost/asio/experimental/channel.hpp>
+#include <boost/cobalt.hpp>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -19,6 +20,7 @@
 #include <unordered_map>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -55,30 +57,6 @@ struct PeerP2PContext {
     // 注：打洞/解析状态由 ClientStateMachine 统一管理（P2PConnectionState）
 };
 
-// ============================================================================
-// P2P Channels - 用于协程间通信
-// ============================================================================
-struct P2PChannels {
-    // 端点就绪 channel（触发上报给 Controller）
-    using EndpointsReadyChannel = asio::experimental::channel<
-        void(boost::system::error_code, std::vector<Endpoint>)>;
-    EndpointsReadyChannel* endpoints_channel = nullptr;
-
-    // P2P_INIT 请求 channel（请求 Controller 转发）
-    using P2PInitChannel = asio::experimental::channel<
-        void(boost::system::error_code, P2PInit)>;
-    P2PInitChannel* init_channel = nullptr;
-
-    // P2P_STATUS 上报 channel
-    using P2PStatusChannel = asio::experimental::channel<
-        void(boost::system::error_code, P2PStatusMsg)>;
-    P2PStatusChannel* status_channel = nullptr;
-
-    // P2P 数据接收 channel
-    using DataChannel = asio::experimental::channel<
-        void(boost::system::error_code, NodeId, std::vector<uint8_t>)>;
-    DataChannel* data_channel = nullptr;
-};
 
 /**
  * P2PManager - P2P NAT 穿透管理器
@@ -108,14 +86,14 @@ public:
     // 设置配置
     void set_config(const P2PConfig& config);
 
-    // 设置 channels
-    void set_channels(P2PChannels channels);
+    // 设置事件 channel
+    void set_event_channel(events::P2PEventChannel* ch);
 
     // 启动 P2P 管理器
-    asio::awaitable<bool> start();
+    cobalt::task<bool> start();
 
     // 停止 P2P 管理器
-    asio::awaitable<void> stop();
+    cobalt::task<void> stop();
 
     // 是否正在运行
     bool is_running() const { return running_.load(); }
@@ -125,7 +103,7 @@ public:
     // ========================================================================
 
     // 发起 P2P 连接（异步，需要先上报端点再发送 P2P_INIT）
-    asio::awaitable<void> connect_peer(NodeId peer_id);
+    cobalt::task<void> connect_peer(NodeId peer_id);
 
     // 断开 P2P 连接
     void disconnect_peer(NodeId peer_id);
@@ -142,7 +120,7 @@ public:
 
     // 发送 P2P 数据（如果已连接）
     // 返回 true 表示通过 P2P 发送，false 表示需要通过 Relay
-    asio::awaitable<bool> send_data(NodeId peer_id, std::span<const uint8_t> data);
+    cobalt::task<bool> send_data(NodeId peer_id, std::span<const uint8_t> data);
 
     // 检查是否可以通过 P2P 发送
     bool is_p2p_connected(NodeId peer_id) const;
@@ -156,25 +134,25 @@ public:
 
 private:
     // UDP 接收循环
-    asio::awaitable<void> recv_loop();
+    cobalt::task<void> recv_loop();
 
     // Keepalive 循环
-    asio::awaitable<void> keepalive_loop();
+    cobalt::task<void> keepalive_loop();
 
     // 打洞超时检测循环
-    asio::awaitable<void> punch_timeout_loop();
+    cobalt::task<void> punch_timeout_loop();
 
     // 执行分批打洞
-    asio::awaitable<void> do_punch_batches(NodeId peer_id);
+    cobalt::task<void> do_punch_batches(NodeId peer_id);
 
     // 重试循环
-    asio::awaitable<void> retry_loop();
+    cobalt::task<void> retry_loop();
 
     // 端点刷新循环
-    asio::awaitable<void> endpoint_refresh_loop();
+    cobalt::task<void> endpoint_refresh_loop();
 
     // 刷新端点
-    asio::awaitable<void> refresh_endpoints();
+    cobalt::task<void> refresh_endpoints();
 
     // 处理收到的 UDP 数据
     void handle_udp_packet(const asio::ip::udp::endpoint& from,
@@ -199,14 +177,14 @@ private:
                          std::span<const uint8_t> encrypted_data);
 
     // 发送 P2P_PING
-    asio::awaitable<void> send_p2p_ping(NodeId peer_id,
+    cobalt::task<void> send_p2p_ping(NodeId peer_id,
                                          const asio::ip::udp::endpoint& to);
 
     // 发送 P2P_PONG
     void send_p2p_pong(const P2PPing& ping, const asio::ip::udp::endpoint& to);
 
     // 发送 P2P_KEEPALIVE
-    asio::awaitable<void> send_p2p_keepalive(NodeId peer_id);
+    cobalt::task<void> send_p2p_keepalive(NodeId peer_id);
 
     // 上报 P2P 状态给 Controller（通过 channel）
     void report_p2p_status(NodeId peer_id, bool success);
@@ -230,7 +208,7 @@ private:
     ClientStateMachine& state_machine_;
 
     P2PConfig config_;
-    P2PChannels channels_;
+    events::P2PEventChannel* event_ch_ = nullptr;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> starting_{false};
@@ -249,7 +227,7 @@ private:
     std::atomic<uint32_t> init_seq_{0};
 
     // Loop completion tracking - 5 detached loops: recv, keepalive, punch_timeout, retry, endpoint_refresh
-    using LoopCompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    using LoopCompletionChannel = cobalt::channel<void>;
     std::unique_ptr<LoopCompletionChannel> loops_done_ch_;
     std::atomic<int> active_loops_{0};
 };

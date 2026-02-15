@@ -13,28 +13,14 @@ namespace edgelink::perf {
 // ============================================================================
 
 struct ChannelCapacity {
-    // Client 端 Actor 事件通道
-    static constexpr size_t CLIENT_CONTROL_EVENT = 128;      // 控制事件（优化：64 -> 128）
-    static constexpr size_t CLIENT_RELAY_EVENT = 128;        // 中继事件（优化：64 -> 128）
-    static constexpr size_t CLIENT_DATA_PLANE_EVENT = 256;   // 数据面事件（优化：64 -> 256，高优先级）
-    static constexpr size_t CLIENT_P2P_EVENT = 128;          // P2P 事件（优化：64 -> 128）
-    static constexpr size_t CLIENT_TUN_EVENT = 256;          // TUN 事件（优化：128 -> 256，高吞吐）
-
-    // Actor 命令通道（ActorBase 内部）
-    static constexpr size_t ACTOR_COMMAND = 128;             // 通用 Actor 命令队列
+    // Client 端事件通道（variant event channel）
+    static constexpr size_t CLIENT_CONTROL_EVENT = 128;      // 控制事件
+    static constexpr size_t CLIENT_RELAY_EVENT = 128;        // 中继事件
+    static constexpr size_t CLIENT_P2P_EVENT = 128;          // P2P 事件
+    static constexpr size_t CLIENT_TUN_EVENT = 256;          // TUN 事件（高吞吐）
 
     // 数据通道（高吞吐路径）
-    static constexpr size_t DATA_RELAY = 256;                // 中继数据（优化：64 -> 256）
-    static constexpr size_t DATA_P2P = 256;                  // P2P 数据（优化：64 -> 256）
-    static constexpr size_t DATA_TUN_PACKET = 512;           // TUN 数据包（优化：128 -> 512，最大吞吐）
-
-    // 控制消息通道（低频）
-    static constexpr size_t CONTROL_AUTH = 8;                // 认证（4 -> 8）
-    static constexpr size_t CONTROL_CONFIG = 8;              // 配置（4 -> 8）
-    static constexpr size_t CONTROL_ROUTE = 32;              // 路由更新（16 -> 32）
-    static constexpr size_t CONTROL_P2P_ENDPOINT = 64;       // P2P 端点（32 -> 64）
-    static constexpr size_t CONTROL_ERROR = 16;              // 错误（8 -> 16）
-    static constexpr size_t CONTROL_STATUS = 8;              // 状态（4 -> 8）
+    static constexpr size_t DATA_TUN_PACKET = 512;           // TUN 数据包（最大吞吐）
 
     // Controller 端
     static constexpr size_t SESSION_WRITE = 2048;            // Session 写队列（优化：1024 -> 2048）

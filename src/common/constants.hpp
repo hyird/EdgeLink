@@ -52,6 +52,7 @@ inline constexpr size_t X25519_KEY_SIZE = 32;
 inline constexpr size_t SESSION_KEY_SIZE = 32;
 inline constexpr size_t CHACHA20_NONCE_SIZE = 12;
 inline constexpr size_t POLY1305_TAG_SIZE = 16;
+inline constexpr size_t CHACHA20_TAG_SIZE = POLY1305_TAG_SIZE;  // ChaCha20-Poly1305 uses Poly1305 for auth tags
 
 }  // namespace crypto
 

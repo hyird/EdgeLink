@@ -2,7 +2,8 @@
 
 #include "common/types.hpp"
 #include <boost/asio.hpp>
-#include <boost/asio/experimental/channel.hpp>
+#include <boost/cobalt.hpp>
+#include <boost/cobalt/channel.hpp>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -13,6 +14,7 @@
 #include <vector>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -79,7 +81,7 @@ public:
     // ========================================================================
 
     // 初始化 UDP socket (必须在其他操作前调用)
-    asio::awaitable<bool> init_socket();
+    cobalt::task<bool> init_socket();
 
     // 关闭 socket
     void close_socket();
@@ -88,7 +90,7 @@ public:
     std::vector<Endpoint> get_local_endpoints() const;
 
     // 通过 STUN 查询公网端点 (异步)
-    asio::awaitable<StunQueryResult> query_stun_endpoint();
+    cobalt::task<StunQueryResult> query_stun_endpoint();
 
     // 获取所有已发现的端点 (LAN + STUN)
     std::vector<Endpoint> get_all_endpoints() const;
@@ -98,7 +100,7 @@ public:
     // ========================================================================
 
     // 检测 NAT 类型 (需要至少 2 个 STUN 服务器)
-    asio::awaitable<NatType> detect_nat_type();
+    cobalt::task<NatType> detect_nat_type();
 
     // 获取当前 NAT 类型
     NatType nat_type() const { return nat_type_.load(); }
@@ -139,7 +141,7 @@ public:
 
 private:
     // 发送 STUN Binding Request
-    asio::awaitable<StunQueryResult> send_stun_request(
+    cobalt::task<StunQueryResult> send_stun_request(
         const asio::ip::udp::endpoint& stun_server,
         const std::string& server_name);
 
@@ -173,10 +175,15 @@ private:
     // NAT 类型
     std::atomic<NatType> nat_type_{NatType::UNKNOWN};
 
+    // STUN 响应包装结构体
+    struct StunResponseEvent {
+        std::array<uint8_t, 12> txn_id;
+        std::vector<uint8_t> data;
+    };
+
     // STUN 响应 channel（用于与 recv_loop 协作）
     // 当 recv_loop 收到 STUN 响应时，通过 channel 发送给等待的协程
-    using StunResponseChannel = asio::experimental::channel<
-        void(boost::system::error_code, std::array<uint8_t, 12>, std::vector<uint8_t>)>;
+    using StunResponseChannel = cobalt::channel<StunResponseEvent>;
     std::unique_ptr<StunResponseChannel> stun_response_channel_;
 
     // 当前等待的 STUN 请求 txn_id（用于过滤不匹配的响应）

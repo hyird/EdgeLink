@@ -2,7 +2,8 @@
 
 #include "common/types.hpp"
 #include <boost/asio.hpp>
-#include <boost/asio/experimental/channel.hpp>
+#include "common/cross_thread_channel.hpp"
+#include <boost/cobalt.hpp>
 #include <functional>
 #include <memory>
 #include <span>
@@ -10,6 +11,7 @@
 #include <expected>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -26,8 +28,7 @@ std::string tun_error_message(TunError error);
 
 // TUN 数据包通道（替代 PacketCallback）
 namespace channels {
-using TunPacketChannel = asio::experimental::channel<
-    void(boost::system::error_code, std::vector<uint8_t>)>;
+using TunPacketChannel = edgelink::CrossThreadChannel<std::vector<uint8_t>>;
 }  // namespace channels
 
 // Abstract TUN device interface
@@ -67,7 +68,7 @@ public:
     virtual std::expected<void, TunError> write(std::span<const uint8_t> packet) = 0;
 
     // Async write
-    virtual asio::awaitable<std::expected<void, TunError>> async_write(
+    virtual cobalt::task<std::expected<void, TunError>> async_write(
         std::span<const uint8_t> packet) = 0;
 
     // Factory method - creates platform-specific TUN device

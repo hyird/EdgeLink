@@ -2,7 +2,9 @@
 #include "common/logger.hpp"
 #include "common/proto_convert.hpp"  // Proto conversion helpers (includes edgelink.pb.h)
 #include "common/auth_proto_helpers.hpp"  // Auth protobuf helpers
+#include "common/cobalt_utils.hpp"
 #include <chrono>
+#include <mutex>
 #include <optional>
 
 #ifdef _WIN32
@@ -23,6 +25,8 @@
 #endif
 
 namespace edgelink::client {
+
+namespace cobalt = boost::cobalt;
 
 namespace {
 
@@ -79,36 +83,33 @@ std::string get_arch() {
 // This must be called BEFORE any io_context is running to avoid thread-local storage conflicts
 // Returns true if the system has IPv6 support
 bool is_ipv6_available() {
-    static std::optional<bool> cached_result;
+    static std::once_flag flag;
+    static bool result = false;
 
-    // Cache the result to avoid repeated checks
-    if (cached_result.has_value()) {
-        return *cached_result;
-    }
-
-    // Use raw socket API to avoid io_context conflicts
-    // Try to create an IPv6 socket using POSIX/Windows API
+    std::call_once(flag, []() {
+        // Use raw socket API to avoid io_context conflicts
 #ifdef _WIN32
-    SOCKET sock = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        cached_result = false;
-        log().info("IPv6 not available on this system (socket creation failed)");
-        return false;
-    }
-    ::closesocket(sock);
+        SOCKET sock = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+        if (sock == INVALID_SOCKET) {
+            result = false;
+            log().info("IPv6 not available on this system (socket creation failed)");
+            return;
+        }
+        ::closesocket(sock);
 #else
-    int sock = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
-    if (sock < 0) {
-        cached_result = false;
-        log().info("IPv6 not available on this system (socket creation failed)");
-        return false;
-    }
-    ::close(sock);
+        int sock = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+        if (sock < 0) {
+            result = false;
+            log().info("IPv6 not available on this system (socket creation failed)");
+            return;
+        }
+        ::close(sock);
 #endif
+        result = true;
+        log().debug("IPv6 is available on this system");
+    });
 
-    cached_result = true;
-    log().debug("IPv6 is available on this system");
-    return true;
+    return result;
 }
 
 // Happy Eyeballs连接策略：快速尝试多个endpoints
@@ -120,7 +121,7 @@ bool is_ipv6_available() {
 //   per_endpoint_timeout - 每个endpoint的超时时间
 // 返回：成功连接的endpoint，或nullopt（全部失败）
 template<typename Stream>
-asio::awaitable<std::optional<tcp::endpoint>> async_connect_happy_eyeballs(
+cobalt::task<std::optional<tcp::endpoint>> async_connect_happy_eyeballs(
     Stream& stream,
     const tcp::resolver::results_type& endpoints,
     std::chrono::milliseconds per_endpoint_timeout) {
@@ -150,7 +151,7 @@ asio::awaitable<std::optional<tcp::endpoint>> async_connect_happy_eyeballs(
             }
 
             stream.expires_after(per_endpoint_timeout);
-            co_await stream.async_connect(endpoint, asio::use_awaitable);
+            co_await stream.async_connect(endpoint, cobalt::use_op);
 
             log().info("成功连接到 {}", endpoint.address().to_string());
             co_return endpoint;
@@ -215,8 +216,8 @@ ControlChannel::ControlChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
     write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
 }
 
-void ControlChannel::set_channels(ControlChannelEvents channels) {
-    channels_ = channels;
+void ControlChannel::set_event_channel(events::CtrlEventChannel* ch) {
+    event_ch_ = ch;
 }
 
 bool ControlChannel::is_ws_open() const {
@@ -227,7 +228,7 @@ bool ControlChannel::is_ws_open() const {
     }
 }
 
-asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
+cobalt::task<bool> ControlChannel::connect(const std::string& authkey) {
     authkey_ = authkey;
 
     try {
@@ -252,7 +253,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
         // Resolve host
         auto dns_start = std::chrono::steady_clock::now();
         tcp::resolver resolver(ioc_);
-        auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
+        auto endpoints = co_await resolver.async_resolve(host, port, cobalt::use_op);
         auto dns_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - dns_start).count();
 
@@ -290,7 +291,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
             }
 
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
-            co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
+            co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, cobalt::use_op);
 
             // WebSocket handshake
             tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
@@ -299,7 +300,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
                     req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
                 }));
 
-            co_await tls_ws_->async_handshake(host, target, asio::use_awaitable);
+            co_await tls_ws_->async_handshake(host, target, cobalt::use_op);
 
             // Disable TCP timeout - WebSocket has its own timeout
             beast::get_lowest_layer(*tls_ws_).expires_never();
@@ -328,7 +329,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
                     req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
                 }));
 
-            co_await plain_ws_->async_handshake(host, target, asio::use_awaitable);
+            co_await plain_ws_->async_handshake(host, target, cobalt::use_op);
 
             // Disable TCP timeout - WebSocket has its own timeout
             beast::get_lowest_layer(*plain_ws_).expires_never();
@@ -370,17 +371,19 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
             log().error("Failed to encode AUTH_REQUEST");
             co_return false;
         }
-        co_await send_raw(*result);
+        send_raw(*result);
 
         // Start read/write loops
-        asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc_.get_executor(), [self = shared_from_this()]() -> cobalt::task<void> {
             co_await self->read_loop();
-        }, asio::detached);
+        }());
 
-        asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc_.get_executor(), [self = shared_from_this()]() -> cobalt::task<void> {
             co_await self->write_loop();
-        }, asio::detached);
+        }());
 
+        // NOTE: 返回 true 表示 WebSocket 已连接且 AUTH_REQUEST 已发送，
+        // 但认证尚未完成。状态为 AUTHENTICATING，收到 AUTH_RESPONSE + CONFIG 后才变为 CONNECTED。
         co_return true;
 
     } catch (const std::exception& e) {
@@ -390,7 +393,7 @@ asio::awaitable<bool> ControlChannel::connect(const std::string& authkey) {
     }
 }
 
-asio::awaitable<bool> ControlChannel::reconnect() {
+cobalt::task<bool> ControlChannel::reconnect() {
     // Reconnect using machine key authentication (for already registered nodes)
     if (node_id_ == 0) {
         log().error("Cannot reconnect: not previously authenticated");
@@ -403,9 +406,9 @@ asio::awaitable<bool> ControlChannel::reconnect() {
         // Close existing connection if any
         try {
             if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
-                co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+                co_await tls_ws_->async_close(websocket::close_code::normal, cobalt::use_op);
             } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
-                co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
+                co_await plain_ws_->async_close(websocket::close_code::normal, cobalt::use_op);
             }
         } catch (const std::exception& e) {
             log().debug("Failed to close WebSocket before reconnect: {}", e.what());
@@ -437,7 +440,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
         // Resolve host
         auto dns_start = std::chrono::steady_clock::now();
         tcp::resolver resolver(ioc_);
-        auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
+        auto endpoints = co_await resolver.async_resolve(host, port, cobalt::use_op);
         auto dns_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - dns_start).count();
 
@@ -481,7 +484,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
             }
 
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
-            co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
+            co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, cobalt::use_op);
 
             // WebSocket handshake
             tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
@@ -490,7 +493,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
                     req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
                 }));
 
-            co_await tls_ws_->async_handshake(host, target, asio::use_awaitable);
+            co_await tls_ws_->async_handshake(host, target, cobalt::use_op);
 
             // Disable TCP timeout - WebSocket has its own timeout
             beast::get_lowest_layer(*tls_ws_).expires_never();
@@ -520,7 +523,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
                     req.set(beast::http::field::user_agent, "EdgeLink Client/1.0");
                 }));
 
-            co_await plain_ws_->async_handshake(host, target, asio::use_awaitable);
+            co_await plain_ws_->async_handshake(host, target, cobalt::use_op);
 
             // Disable TCP timeout - WebSocket has its own timeout
             beast::get_lowest_layer(*plain_ws_).expires_never();
@@ -564,16 +567,16 @@ asio::awaitable<bool> ControlChannel::reconnect() {
             state_ = ChannelState::DISCONNECTED;
             co_return false;
         }
-        co_await send_raw(*result);
+        send_raw(*result);
 
         // Start read/write loops
-        asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc_.get_executor(), [self = shared_from_this()]() -> cobalt::task<void> {
             co_await self->read_loop();
-        }, asio::detached);
+        }());
 
-        asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc_.get_executor(), [self = shared_from_this()]() -> cobalt::task<void> {
             co_await self->write_loop();
-        }, asio::detached);
+        }());
 
         co_return true;
 
@@ -584,7 +587,7 @@ asio::awaitable<bool> ControlChannel::reconnect() {
     }
 }
 
-asio::awaitable<void> ControlChannel::close() {
+cobalt::task<void> ControlChannel::close() {
     if (state_ == ChannelState::DISCONNECTED) {
         co_return;
     }
@@ -601,21 +604,22 @@ asio::awaitable<void> ControlChannel::close() {
         if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
             // 尝试优雅关闭，但有超时保护
             // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
-            bool close_completed = false;
-            asio::co_spawn(ioc_, [this, &close_completed]() -> asio::awaitable<void> {
+            // 用 shared_ptr<atomic<bool>> 避免 spawned task 引用已销毁的栈变量
+            auto close_completed = std::make_shared<std::atomic<bool>>(false);
+            cobalt_utils::spawn_task(ioc_.get_executor(), [this, close_completed]() -> cobalt::task<void> {
                 try {
-                    co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
-                    close_completed = true;
+                    co_await tls_ws_->async_close(websocket::close_code::normal, cobalt::use_op);
+                    close_completed->store(true);
                 } catch (...) {}
-            }, asio::detached);
+            }());
 
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-            while (!close_completed && std::chrono::steady_clock::now() < deadline) {
+            while (!close_completed->load() && std::chrono::steady_clock::now() < deadline) {
                 timeout_timer.expires_after(std::chrono::milliseconds(50));
-                co_await timeout_timer.async_wait(asio::use_awaitable);
+                co_await timeout_timer.async_wait(cobalt::use_op);
             }
 
-            closed = close_completed;
+            closed = close_completed->load();
             if (!closed) {
                 // 超时，直接关闭底层连接
                 log().debug("WebSocket close timeout, forcing shutdown");
@@ -624,21 +628,21 @@ asio::awaitable<void> ControlChannel::close() {
             }
         } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
             // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
-            bool close_completed = false;
-            asio::co_spawn(ioc_, [this, &close_completed]() -> asio::awaitable<void> {
+            auto close_completed = std::make_shared<std::atomic<bool>>(false);
+            cobalt_utils::spawn_task(ioc_.get_executor(), [this, close_completed]() -> cobalt::task<void> {
                 try {
-                    co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
-                    close_completed = true;
+                    co_await plain_ws_->async_close(websocket::close_code::normal, cobalt::use_op);
+                    close_completed->store(true);
                 } catch (...) {}
-            }, asio::detached);
+            }());
 
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-            while (!close_completed && std::chrono::steady_clock::now() < deadline) {
+            while (!close_completed->load() && std::chrono::steady_clock::now() < deadline) {
                 timeout_timer.expires_after(std::chrono::milliseconds(50));
-                co_await timeout_timer.async_wait(asio::use_awaitable);
+                co_await timeout_timer.async_wait(cobalt::use_op);
             }
 
-            closed = close_completed;
+            closed = close_completed->load();
             if (!closed) {
                 log().debug("WebSocket close timeout, forcing shutdown");
                 boost::system::error_code ec;
@@ -651,12 +655,13 @@ asio::awaitable<void> ControlChannel::close() {
         log().debug("Unknown error during control channel close");
     }
 
-    if (channels_.disconnected) {
-        channels_.disconnected->try_send(boost::system::error_code{});
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::ctrl::Event{events::ctrl::Disconnected{"connection closed"}}));
     }
 }
 
-asio::awaitable<void> ControlChannel::send_config_ack(uint64_t version, ConfigAckStatus status) {
+cobalt::task<void> ControlChannel::send_config_ack(uint64_t version, ConfigAckStatus status) {
     // Use protobuf ConfigAck
     pb::ConfigAck ack;
     ack.set_version(version);
@@ -664,11 +669,12 @@ asio::awaitable<void> ControlChannel::send_config_ack(uint64_t version, ConfigAc
 
     auto result = FrameCodec::encode_protobuf(FrameType::CONFIG_ACK, ack);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
+    co_return;
 }
 
-asio::awaitable<void> ControlChannel::send_ping() {
+cobalt::task<void> ControlChannel::send_ping() {
     // Use protobuf Ping message
     pb::Ping ping;
     uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -676,34 +682,38 @@ asio::awaitable<void> ControlChannel::send_ping() {
     ping.set_timestamp(now);
     ping.set_seq_num(++ping_seq_);
     last_ping_time_ = now;
+    last_ping_steady_ = std::chrono::steady_clock::now();  // 本地 RTT 计算用
 
     auto result = FrameCodec::encode_protobuf(FrameType::PING, ping);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
+    co_return;
 }
 
-asio::awaitable<void> ControlChannel::send_latency_report(const LatencyReport& report) {
+cobalt::task<void> ControlChannel::send_latency_report(const LatencyReport& report) {
     pb::LatencyReport pb_report;
     to_proto(report, &pb_report);
     auto result = FrameCodec::encode_protobuf(FrameType::LATENCY_REPORT, pb_report);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
     log().debug("Sent latency report with {} entries", report.entries.size());
+    co_return;
 }
 
-asio::awaitable<void> ControlChannel::send_relay_latency_report(const RelayLatencyReport& report) {
+cobalt::task<void> ControlChannel::send_relay_latency_report(const RelayLatencyReport& report) {
     pb::RelayLatencyReport pb_report;
     to_proto(report, &pb_report);
     auto result = FrameCodec::encode_protobuf(FrameType::RELAY_LATENCY_REPORT, pb_report);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
     log().debug("Sent relay latency report with {} entries", report.entries.size());
+    co_return;
 }
 
-asio::awaitable<void> ControlChannel::read_loop() {
+cobalt::task<void> ControlChannel::read_loop() {
     try {
         beast::flat_buffer buffer;
 
@@ -711,9 +721,9 @@ asio::awaitable<void> ControlChannel::read_loop() {
             buffer.clear();
 
             if (use_tls_) {
-                co_await tls_ws_->async_read(buffer, asio::use_awaitable);
+                co_await tls_ws_->async_read(buffer, cobalt::use_op);
             } else {
-                co_await plain_ws_->async_read(buffer, asio::use_awaitable);
+                co_await plain_ws_->async_read(buffer, cobalt::use_op);
             }
 
             auto data = buffer.data();
@@ -734,22 +744,23 @@ asio::awaitable<void> ControlChannel::read_loop() {
         }
     }
 
-    // Only trigger callback if not already disconnected (avoid duplicate calls)
-    if (state_ != ChannelState::DISCONNECTED) {
+    // Only trigger disconnect event if not already disconnected or reconnecting
+    // RECONNECTING 状态下旧 read_loop 退出是正常的，不应触发 Disconnected 事件
+    if (state_ != ChannelState::DISCONNECTED && state_ != ChannelState::RECONNECTING) {
         state_ = ChannelState::DISCONNECTED;
-        if (channels_.disconnected) {
-            channels_.disconnected->try_send(boost::system::error_code{});
+        if (event_ch_) {
+            co_await cobalt::as_tuple(event_ch_->write(
+                events::ctrl::Event{events::ctrl::Disconnected{"read loop ended"}}));
         }
     }
 }
 
-asio::awaitable<void> ControlChannel::write_loop() {
+cobalt::task<void> ControlChannel::write_loop() {
     try {
         while (is_ws_open()) {
             if (write_queue_.empty()) {
                 writing_ = false;
-                boost::system::error_code ec;
-                co_await write_timer_.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+                auto [ec] = co_await write_timer_.async_wait(asio::as_tuple(cobalt::use_op));
                 // Timer cancelled means new data arrived, continue loop
                 if (ec == asio::error::operation_aborted) {
                     continue;
@@ -765,9 +776,9 @@ asio::awaitable<void> ControlChannel::write_loop() {
                 write_queue_.pop();
 
                 if (use_tls_) {
-                    co_await tls_ws_->async_write(asio::buffer(data), asio::use_awaitable);
+                    co_await tls_ws_->async_write(asio::buffer(data), cobalt::use_op);
                 } else {
-                    co_await plain_ws_->async_write(asio::buffer(data), asio::use_awaitable);
+                    co_await plain_ws_->async_write(asio::buffer(data), cobalt::use_op);
                 }
             }
         }
@@ -778,7 +789,7 @@ asio::awaitable<void> ControlChannel::write_loop() {
     }
 }
 
-asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_frame(const Frame& frame) {
     switch (frame.header.type) {
         case FrameType::AUTH_RESPONSE:
             co_await handle_auth_response(frame);
@@ -817,7 +828,7 @@ asio::awaitable<void> ControlChannel::handle_frame(const Frame& frame) {
     }
 }
 
-asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_auth_response(const Frame& frame) {
     // Parse protobuf AuthResponse
     auto pb_resp = FrameCodec::decode_protobuf<pb::AuthResponse>(frame.data());
     if (!pb_resp) {
@@ -869,17 +880,14 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
                 log().error("Failed to encode AUTH_REQUEST for re-registration");
                 co_return;
             }
-            co_await send_raw(*result);
+            send_raw(*result);
             log().info("Re-registration request sent with authkey");
             co_return;
         }
 
-        if (channels_.error) {
-            bool sent = channels_.error->try_send(boost::system::error_code{},
-                static_cast<uint16_t>(pb_resp->error_code()), pb_resp->error_msg());
-            if (!sent) {
-                log().warn("Failed to send auth error event (channel full or closed)");
-            }
+        if (event_ch_) {
+            co_await cobalt::as_tuple(event_ch_->write(
+                events::ctrl::Event{events::ctrl::Error{static_cast<uint16_t>(pb_resp->error_code()), pb_resp->error_msg()}}));
         }
         co_return;
     }
@@ -899,26 +907,13 @@ asio::awaitable<void> ControlChannel::handle_auth_response(const Frame& frame) {
     // Note: state_ is set to CONNECTED after receiving CONFIG, not here
     // This ensures peers are populated before on_connected is called
 
-    if (channels_.auth_response) {
-        // Convert to C++ type for channel compatibility
-        AuthResponse cpp_resp;
-        cpp_resp.success = pb_resp->success();
-        cpp_resp.node_id = pb_resp->node_id();
-        from_proto(pb_resp->virtual_ip(), &cpp_resp.virtual_ip);
-        cpp_resp.network_id = pb_resp->network_id();
-        cpp_resp.auth_token = auth_token_;
-        cpp_resp.relay_token = relay_token_;
-        cpp_resp.error_code = static_cast<uint16_t>(pb_resp->error_code());
-        cpp_resp.error_msg = pb_resp->error_msg();
-
-        bool sent = channels_.auth_response->try_send(boost::system::error_code{}, cpp_resp);
-        if (!sent) {
-            log().warn("Failed to send auth response event (channel full or closed)");
-        }
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::ctrl::Event{events::ctrl::Connected{node_id_, virtual_ip_, subnet_mask_, relay_token_}}));
     }
 }
 
-asio::awaitable<void> ControlChannel::handle_config(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_config(const Frame& frame) {
     // Use protobuf Config message
     auto pb_config = FrameCodec::decode_protobuf<pb::Config>(frame.data());
     if (!pb_config) {
@@ -940,29 +935,21 @@ asio::awaitable<void> ControlChannel::handle_config(const Frame& frame) {
         relay_token_ = config.relay_token;
     }
 
-    if (channels_.config) {
-        bool sent = channels_.config->try_send(boost::system::error_code{}, config);
-        if (!sent) {
-            log().warn("Failed to send config event (channel full or closed)");
-        }
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::ctrl::Event{events::ctrl::ConfigReceived{config}}));
     }
 
     // Mark as connected after receiving initial CONFIG (peers are now populated)
     if (state_ != ChannelState::CONNECTED) {
         state_ = ChannelState::CONNECTED;
-        if (channels_.connected) {
-            bool sent = channels_.connected->try_send(boost::system::error_code{});
-            if (!sent) {
-                log().warn("Failed to send connected event (channel full or closed)");
-            }
-        }
     }
 
     // Send ACK
     co_await send_config_ack(config.version, ConfigAckStatus::SUCCESS);
 }
 
-asio::awaitable<void> ControlChannel::handle_config_update(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_config_update(const Frame& frame) {
     // Use protobuf ConfigUpdate message
     auto pb_update = FrameCodec::decode_protobuf<pb::ConfigUpdate>(frame.data());
     if (!pb_update) {
@@ -987,15 +974,13 @@ asio::awaitable<void> ControlChannel::handle_config_update(const Frame& frame) {
         log().debug("Relay token refreshed");
     }
 
-    if (channels_.config_update) {
-        bool sent = channels_.config_update->try_send(boost::system::error_code{}, update);
-        if (!sent) {
-            log().warn("Failed to send config update event (channel full or closed)");
-        }
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::ctrl::Event{events::ctrl::ConfigUpdateReceived{update}}));
     }
 }
 
-asio::awaitable<void> ControlChannel::handle_route_update(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_route_update(const Frame& frame) {
     auto pb_update = FrameCodec::decode_protobuf<pb::RouteUpdate>(frame.data());
     if (!pb_update) {
         log().error("Failed to parse ROUTE_UPDATE: {}", frame_error_message(pb_update.error()));
@@ -1007,15 +992,13 @@ asio::awaitable<void> ControlChannel::handle_route_update(const Frame& frame) {
     log().debug("Received ROUTE_UPDATE v{}: +{} routes, -{} routes",
                 update.version, update.add_routes.size(), update.del_routes.size());
 
-    if (channels_.route_update) {
-        bool sent = channels_.route_update->try_send(boost::system::error_code{}, update);
-        if (!sent) {
-            log().warn("Failed to send route update event (channel full or closed)");
-        }
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::ctrl::Event{events::ctrl::RouteUpdateReceived{update}}));
     }
 }
 
-asio::awaitable<void> ControlChannel::handle_route_ack(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_route_ack(const Frame& frame) {
     auto pb_ack = FrameCodec::decode_protobuf<pb::RouteAck>(frame.data());
     if (!pb_ack) {
         log().error("Failed to parse ROUTE_ACK: {}", frame_error_message(pb_ack.error()));
@@ -1032,7 +1015,7 @@ asio::awaitable<void> ControlChannel::handle_route_ack(const Frame& frame) {
     }
 }
 
-asio::awaitable<void> ControlChannel::handle_peer_routing_update(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_peer_routing_update(const Frame& frame) {
     auto pb_update = FrameCodec::decode_protobuf<pb::PeerRoutingUpdate>(frame.data());
     if (!pb_update) {
         log().error("Failed to parse PEER_ROUTING_UPDATE: {}", frame_error_message(pb_update.error()));
@@ -1044,12 +1027,13 @@ asio::awaitable<void> ControlChannel::handle_peer_routing_update(const Frame& fr
     log().debug("Received PEER_ROUTING_UPDATE v{} with {} routes",
                 update.version, update.routes.size());
 
-    if (channels_.peer_routing_update) {
-        channels_.peer_routing_update->try_send(boost::system::error_code{}, update);
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::ctrl::Event{events::ctrl::PeerRoutingUpdateReceived{update}}));
     }
 }
 
-asio::awaitable<void> ControlChannel::send_route_announce(const std::vector<RouteInfo>& routes) {
+cobalt::task<void> ControlChannel::send_route_announce(const std::vector<RouteInfo>& routes) {
     if (routes.empty()) {
         co_return;
     }
@@ -1062,12 +1046,13 @@ asio::awaitable<void> ControlChannel::send_route_announce(const std::vector<Rout
     to_proto(announce, &pb_announce);
     auto result = FrameCodec::encode_protobuf(FrameType::ROUTE_ANNOUNCE, pb_announce);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
     log().info("Announced {} routes (request_id={})", routes.size(), announce.request_id);
+    co_return;
 }
 
-asio::awaitable<void> ControlChannel::send_route_withdraw(const std::vector<RouteInfo>& routes) {
+cobalt::task<void> ControlChannel::send_route_withdraw(const std::vector<RouteInfo>& routes) {
     if (routes.empty()) {
         co_return;
     }
@@ -1080,33 +1065,36 @@ asio::awaitable<void> ControlChannel::send_route_withdraw(const std::vector<Rout
     to_proto(withdraw, &pb_withdraw);
     auto result = FrameCodec::encode_protobuf(FrameType::ROUTE_WITHDRAW, pb_withdraw);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
     log().info("Withdrew {} routes (request_id={})", routes.size(), withdraw.request_id);
+    co_return;
 }
 
-asio::awaitable<void> ControlChannel::send_p2p_init(const P2PInit& init) {
+cobalt::task<void> ControlChannel::send_p2p_init(const P2PInit& init) {
     pb::P2PInit pb_init;
     to_proto(init, &pb_init);
     auto result = FrameCodec::encode_protobuf(FrameType::P2P_INIT, pb_init);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
     log().debug("Sent P2P_INIT: target_node={}, init_seq={}", init.target_node, init.init_seq);
+    co_return;
 }
 
-asio::awaitable<void> ControlChannel::send_p2p_status(const P2PStatusMsg& status) {
+cobalt::task<void> ControlChannel::send_p2p_status(const P2PStatusMsg& status) {
     pb::P2PStatusMsg pb_status;
     to_proto(status, &pb_status);
     auto result = FrameCodec::encode_protobuf(FrameType::P2P_STATUS, pb_status);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
     log().debug("Sent P2P_STATUS: peer={}, status={}, latency={}ms",
                 status.peer_node, static_cast<int>(status.status), status.latency_ms);
+    co_return;
 }
 
-asio::awaitable<uint32_t> ControlChannel::send_endpoint_update(const std::vector<Endpoint>& endpoints) {
+cobalt::task<uint32_t> ControlChannel::send_endpoint_update(const std::vector<Endpoint>& endpoints) {
     EndpointUpdate update;
     update.request_id = ++endpoint_request_id_;
     update.endpoints = endpoints;
@@ -1120,7 +1108,7 @@ asio::awaitable<uint32_t> ControlChannel::send_endpoint_update(const std::vector
     to_proto(update, &pb_update);
     auto result = FrameCodec::encode_protobuf(FrameType::ENDPOINT_UPDATE, pb_update);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
     log().debug("Sent ENDPOINT_UPDATE: {} endpoints (request_id={})",
                 endpoints.size(), update.request_id);
@@ -1128,7 +1116,7 @@ asio::awaitable<uint32_t> ControlChannel::send_endpoint_update(const std::vector
     co_return update.request_id;
 }
 
-asio::awaitable<bool> ControlChannel::send_endpoint_update_and_wait_ack(
+cobalt::task<bool> ControlChannel::send_endpoint_update_and_wait_ack(
     const std::vector<Endpoint>& endpoints,
     uint32_t timeout_ms) {
 
@@ -1142,7 +1130,7 @@ asio::awaitable<bool> ControlChannel::send_endpoint_update_and_wait_ack(
         // 等待定时器：
         // - 如果 handle_endpoint_ack 收到 ACK，会取消定时器，抛出 operation_aborted
         // - 如果超时，正常返回
-        co_await endpoint_ack_timer_->async_wait(asio::use_awaitable);
+        co_await endpoint_ack_timer_->async_wait(cobalt::use_op);
 
         // 超时了，检查是否仍在等待
         if (endpoint_ack_pending_ && pending_endpoint_request_id_ == request_id) {
@@ -1164,7 +1152,7 @@ asio::awaitable<bool> ControlChannel::send_endpoint_update_and_wait_ack(
     co_return !endpoint_ack_pending_;
 }
 
-asio::awaitable<void> ControlChannel::resend_pending_endpoints() {
+cobalt::task<void> ControlChannel::resend_pending_endpoints() {
     if (pending_endpoints_.empty()) {
         co_return;
     }
@@ -1180,13 +1168,14 @@ asio::awaitable<void> ControlChannel::resend_pending_endpoints() {
     to_proto(update, &pb_update);
     auto result = FrameCodec::encode_protobuf(FrameType::ENDPOINT_UPDATE, pb_update);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
     log().info("Resent ENDPOINT_UPDATE after reconnect: {} endpoints (request_id={})",
                update.endpoints.size(), update.request_id);
+    co_return;
 }
 
-asio::awaitable<void> ControlChannel::handle_endpoint_ack(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_endpoint_ack(const Frame& frame) {
     auto pb_ack = FrameCodec::decode_protobuf<pb::EndpointAck>(frame.data());
     if (!pb_ack) {
         log().error("Failed to parse ENDPOINT_ACK: {}", frame_error_message(pb_ack.error()));
@@ -1210,7 +1199,7 @@ asio::awaitable<void> ControlChannel::handle_endpoint_ack(const Frame& frame) {
     }
 }
 
-asio::awaitable<void> ControlChannel::handle_p2p_endpoint(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_p2p_endpoint(const Frame& frame) {
     auto pb_msg = FrameCodec::decode_protobuf<pb::P2PEndpoint>(frame.data());
     if (!pb_msg) {
         log().error("Failed to parse P2P_ENDPOINT");
@@ -1223,12 +1212,13 @@ asio::awaitable<void> ControlChannel::handle_p2p_endpoint(const Frame& frame) {
     log().debug("Received P2P_ENDPOINT: peer_node={}, init_seq={}, {} endpoints",
                 msg.peer_node, msg.init_seq, msg.endpoints.size());
 
-    if (channels_.p2p_endpoint) {
-        channels_.p2p_endpoint->try_send(boost::system::error_code{}, msg);
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::ctrl::Event{events::ctrl::P2PEndpointReceived{msg}}));
     }
 }
 
-asio::awaitable<void> ControlChannel::handle_pong(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_pong(const Frame& frame) {
     // Use protobuf Pong message
     auto pong = FrameCodec::decode_protobuf<pb::Pong>(frame.data());
     if (!pong) {
@@ -1236,9 +1226,16 @@ asio::awaitable<void> ControlChannel::handle_pong(const Frame& frame) {
         co_return;
     }
 
-    uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    uint64_t rtt = now - pong->timestamp();
+    // 校验 seq_num 匹配当前 ping
+    if (pong->seq_num() != ping_seq_) {
+        log().debug("Ignoring stale PONG: seq={} (expected {})", pong->seq_num(), ping_seq_);
+        co_return;
+    }
+
+    // 使用 steady_clock 计算本地 RTT，避免 system_clock 跳变
+    auto now_steady = std::chrono::steady_clock::now();
+    auto rtt = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now_steady - last_ping_steady_).count();
 
     // Only log if RTT is unusually high
     if (rtt > 500) {
@@ -1246,7 +1243,7 @@ asio::awaitable<void> ControlChannel::handle_pong(const Frame& frame) {
     }
 }
 
-asio::awaitable<void> ControlChannel::handle_error(const Frame& frame) {
+cobalt::task<void> ControlChannel::handle_error(const Frame& frame) {
     auto pb_error = FrameCodec::decode_protobuf<pb::FrameError>(frame.data());
     if (!pb_error) {
         log().error("Failed to parse FRAME_ERROR: {}", frame_error_message(pb_error.error()));
@@ -1257,22 +1254,22 @@ asio::awaitable<void> ControlChannel::handle_error(const Frame& frame) {
 
     log().error("Control error {}: {}", error.error_code, error.error_msg);
 
-    if (channels_.error) {
-        channels_.error->try_send(boost::system::error_code{}, error.error_code, error.error_msg);
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::ctrl::Event{events::ctrl::Error{error.error_code, error.error_msg}}));
     }
 }
 
-asio::awaitable<void> ControlChannel::send_frame(FrameType type, std::span<const uint8_t> payload) {
+void ControlChannel::send_frame(FrameType type, std::span<const uint8_t> payload) {
     auto data = FrameCodec::encode(type, payload);
-    co_await send_raw(data);
+    send_raw(data);
 }
 
-asio::awaitable<void> ControlChannel::send_raw(std::span<const uint8_t> data) {
+void ControlChannel::send_raw(std::span<const uint8_t> data) {
     write_queue_.push(std::vector<uint8_t>(data.begin(), data.end()));
     if (!writing_) {
         write_timer_.cancel();
     }
-    co_return;
 }
 
 // ============================================================================
@@ -1294,8 +1291,8 @@ RelayChannel::RelayChannel(asio::io_context& ioc, ssl::context& ssl_ctx,
     write_timer_.expires_at(std::chrono::steady_clock::time_point::max());
 }
 
-void RelayChannel::set_channels(RelayChannelEvents channels) {
-    channels_ = channels;
+void RelayChannel::set_event_channel(events::RelayEventChannel* ch) {
+    event_ch_ = ch;
 }
 
 bool RelayChannel::is_ws_open() const {
@@ -1306,7 +1303,7 @@ bool RelayChannel::is_ws_open() const {
     }
 }
 
-asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_token) {
+cobalt::task<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_token) {
     try {
         state_ = ChannelState::CONNECTING;
 
@@ -1335,7 +1332,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
 
         // Resolve host (use connect_host for DNS, not ws_host)
         tcp::resolver resolver(ioc_);
-        auto endpoints = co_await resolver.async_resolve(connect_host, port, asio::use_awaitable);
+        auto endpoints = co_await resolver.async_resolve(connect_host, port, cobalt::use_op);
 
         // 记录所有解析的 endpoints
         size_t endpoint_count = 0;
@@ -1369,11 +1366,11 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
             }
 
             // SSL handshake - verification mode is set in ssl_ctx_ by Client constructor
-            co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
+            co_await tls_ws_->next_layer().async_handshake(ssl::stream_base::client, cobalt::use_op);
 
             // WebSocket handshake (use ws_host as Host header for CDN)
             tls_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-            co_await tls_ws_->async_handshake(ws_host, target, asio::use_awaitable);
+            co_await tls_ws_->async_handshake(ws_host, target, cobalt::use_op);
 
             // Disable TCP timeout - WebSocket has its own timeout
             beast::get_lowest_layer(*tls_ws_).expires_never();
@@ -1397,7 +1394,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
 
             // WebSocket handshake (use ws_host as Host header for CDN)
             plain_ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-            co_await plain_ws_->async_handshake(ws_host, target, asio::use_awaitable);
+            co_await plain_ws_->async_handshake(ws_host, target, cobalt::use_op);
 
             // Disable TCP timeout - WebSocket has its own timeout
             beast::get_lowest_layer(*plain_ws_).expires_never();
@@ -1417,17 +1414,17 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
         // Send RELAY_AUTH
         auto result = FrameCodec::encode_protobuf(FrameType::RELAY_AUTH, auth);
         if (result) {
-            co_await send_raw(*result);
+            send_raw(*result);
         }
 
         // Start read/write loops
-        asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc_.get_executor(), [self = shared_from_this()]() -> cobalt::task<void> {
             co_await self->read_loop();
-        }, asio::detached);
+        }());
 
-        asio::co_spawn(ioc_, [self = shared_from_this()]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc_.get_executor(), [self = shared_from_this()]() -> cobalt::task<void> {
             co_await self->write_loop();
-        }, asio::detached);
+        }());
 
         co_return true;
 
@@ -1438,7 +1435,7 @@ asio::awaitable<bool> RelayChannel::connect(const std::vector<uint8_t>& relay_to
     }
 }
 
-asio::awaitable<void> RelayChannel::close() {
+cobalt::task<void> RelayChannel::close() {
     if (state_ == ChannelState::DISCONNECTED) {
         co_return;
     }
@@ -1454,21 +1451,22 @@ asio::awaitable<void> RelayChannel::close() {
 
         if (use_tls_ && tls_ws_ && tls_ws_->is_open()) {
             // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
-            bool close_completed = false;
-            asio::co_spawn(ioc_, [this, &close_completed]() -> asio::awaitable<void> {
+            // 用 shared_ptr<atomic<bool>> 避免 spawned task 引用已销毁的栈变量
+            auto close_completed = std::make_shared<std::atomic<bool>>(false);
+            cobalt_utils::spawn_task(ioc_.get_executor(), [this, close_completed]() -> cobalt::task<void> {
                 try {
-                    co_await tls_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
-                    close_completed = true;
+                    co_await tls_ws_->async_close(websocket::close_code::normal, cobalt::use_op);
+                    close_completed->store(true);
                 } catch (...) {}
-            }, asio::detached);
+            }());
 
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-            while (!close_completed && std::chrono::steady_clock::now() < deadline) {
+            while (!close_completed->load() && std::chrono::steady_clock::now() < deadline) {
                 timeout_timer.expires_after(std::chrono::milliseconds(50));
-                co_await timeout_timer.async_wait(asio::use_awaitable);
+                co_await timeout_timer.async_wait(cobalt::use_op);
             }
 
-            closed = close_completed;
+            closed = close_completed->load();
             if (!closed) {
                 log().debug("Relay WebSocket close timeout, forcing shutdown");
                 boost::system::error_code ec;
@@ -1476,21 +1474,21 @@ asio::awaitable<void> RelayChannel::close() {
             }
         } else if (!use_tls_ && plain_ws_ && plain_ws_->is_open()) {
             // 使用手动超时检查避免 parallel_group 导致的 TLS allocator 崩溃
-            bool close_completed = false;
-            asio::co_spawn(ioc_, [this, &close_completed]() -> asio::awaitable<void> {
+            auto close_completed = std::make_shared<std::atomic<bool>>(false);
+            cobalt_utils::spawn_task(ioc_.get_executor(), [this, close_completed]() -> cobalt::task<void> {
                 try {
-                    co_await plain_ws_->async_close(websocket::close_code::normal, asio::use_awaitable);
-                    close_completed = true;
+                    co_await plain_ws_->async_close(websocket::close_code::normal, cobalt::use_op);
+                    close_completed->store(true);
                 } catch (...) {}
-            }, asio::detached);
+            }());
 
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-            while (!close_completed && std::chrono::steady_clock::now() < deadline) {
+            while (!close_completed->load() && std::chrono::steady_clock::now() < deadline) {
                 timeout_timer.expires_after(std::chrono::milliseconds(50));
-                co_await timeout_timer.async_wait(asio::use_awaitable);
+                co_await timeout_timer.async_wait(cobalt::use_op);
             }
 
-            closed = close_completed;
+            closed = close_completed->load();
             if (!closed) {
                 log().debug("Relay WebSocket close timeout, forcing shutdown");
                 boost::system::error_code ec;
@@ -1503,12 +1501,13 @@ asio::awaitable<void> RelayChannel::close() {
         log().debug("Unknown error during relay channel close");
     }
 
-    if (channels_.disconnected) {
-        channels_.disconnected->try_send(boost::system::error_code{});
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::relay::Event{events::relay::Disconnected{"connection closed"}}));
     }
 }
 
-asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const uint8_t> plaintext) {
+cobalt::task<bool> RelayChannel::send_data(NodeId peer_id, std::span<const uint8_t> plaintext) {
     if (state_ != ChannelState::CONNECTED) {
         log().warn("Cannot send data: relay not connected (state={})", channel_state_name(state_));
         co_return false;
@@ -1543,13 +1542,13 @@ asio::awaitable<bool> RelayChannel::send_data(NodeId peer_id, std::span<const ui
 
     auto result = FrameCodec::encode_protobuf(FrameType::DATA, data);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
 
     co_return true;
 }
 
-asio::awaitable<void> RelayChannel::send_ping() {
+cobalt::task<void> RelayChannel::send_ping() {
     // Use protobuf Ping message
     pb::Ping ping;
     uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1557,14 +1556,16 @@ asio::awaitable<void> RelayChannel::send_ping() {
     ping.set_timestamp(now);
     ping.set_seq_num(++ping_seq_);
     last_ping_time_ = now;
+    last_ping_steady_ = std::chrono::steady_clock::now();  // 本地 RTT 计算用
 
     auto result = FrameCodec::encode_protobuf(FrameType::PING, ping);
     if (result) {
-        co_await send_raw(*result);
+        send_raw(*result);
     }
+    co_return;
 }
 
-asio::awaitable<void> RelayChannel::read_loop() {
+cobalt::task<void> RelayChannel::read_loop() {
     try {
         beast::flat_buffer buffer;
 
@@ -1572,9 +1573,9 @@ asio::awaitable<void> RelayChannel::read_loop() {
             buffer.clear();
 
             if (use_tls_) {
-                co_await tls_ws_->async_read(buffer, asio::use_awaitable);
+                co_await tls_ws_->async_read(buffer, cobalt::use_op);
             } else {
-                co_await plain_ws_->async_read(buffer, asio::use_awaitable);
+                co_await plain_ws_->async_read(buffer, cobalt::use_op);
             }
 
             auto data = buffer.data();
@@ -1598,19 +1599,19 @@ asio::awaitable<void> RelayChannel::read_loop() {
     // Only trigger callback if not already disconnected (avoid duplicate calls)
     if (state_ != ChannelState::DISCONNECTED) {
         state_ = ChannelState::DISCONNECTED;
-        if (channels_.disconnected) {
-            channels_.disconnected->try_send(boost::system::error_code{});
+        if (event_ch_) {
+            co_await cobalt::as_tuple(event_ch_->write(
+                events::relay::Event{events::relay::Disconnected{"read loop ended"}}));
         }
     }
 }
 
-asio::awaitable<void> RelayChannel::write_loop() {
+cobalt::task<void> RelayChannel::write_loop() {
     try {
         while (is_ws_open()) {
             if (write_queue_.empty()) {
                 writing_ = false;
-                boost::system::error_code ec;
-                co_await write_timer_.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+                auto [ec] = co_await write_timer_.async_wait(asio::as_tuple(cobalt::use_op));
                 // Timer cancelled means new data arrived, continue loop
                 if (ec == asio::error::operation_aborted) {
                     continue;
@@ -1626,9 +1627,9 @@ asio::awaitable<void> RelayChannel::write_loop() {
                 write_queue_.pop();
 
                 if (use_tls_) {
-                    co_await tls_ws_->async_write(asio::buffer(data), asio::use_awaitable);
+                    co_await tls_ws_->async_write(asio::buffer(data), cobalt::use_op);
                 } else {
-                    co_await plain_ws_->async_write(asio::buffer(data), asio::use_awaitable);
+                    co_await plain_ws_->async_write(asio::buffer(data), cobalt::use_op);
                 }
             }
         }
@@ -1650,7 +1651,7 @@ asio::awaitable<void> RelayChannel::write_loop() {
     }
 }
 
-asio::awaitable<void> RelayChannel::handle_frame(const Frame& frame) {
+cobalt::task<void> RelayChannel::handle_frame(const Frame& frame) {
     switch (frame.header.type) {
         case FrameType::RELAY_AUTH_RESP:
             co_await handle_relay_auth_resp(frame);
@@ -1668,7 +1669,7 @@ asio::awaitable<void> RelayChannel::handle_frame(const Frame& frame) {
     }
 }
 
-asio::awaitable<void> RelayChannel::handle_relay_auth_resp(const Frame& frame) {
+cobalt::task<void> RelayChannel::handle_relay_auth_resp(const Frame& frame) {
     auto pb_resp = FrameCodec::decode_protobuf<pb::RelayAuthResp>(frame.data());
     if (!pb_resp) {
         log().error("Failed to parse RELAY_AUTH_RESP");
@@ -1685,12 +1686,13 @@ asio::awaitable<void> RelayChannel::handle_relay_auth_resp(const Frame& frame) {
 
     state_ = ChannelState::CONNECTED;
 
-    if (channels_.connected) {
-        channels_.connected->try_send(boost::system::error_code{});
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::relay::Event{events::relay::Connected{}}));
     }
 }
 
-asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
+cobalt::task<void> RelayChannel::handle_data(const Frame& frame) {
     // Use protobuf DataPayload
     auto pb_data = FrameCodec::decode_protobuf<pb::DataPayload>(frame.data());
     if (!pb_data) {
@@ -1737,15 +1739,13 @@ asio::awaitable<void> RelayChannel::handle_data(const Frame& frame) {
 
     peers_.update_last_seen(data.src_node);
 
-    if (channels_.data) {
-        bool sent = channels_.data->try_send(boost::system::error_code{}, data.src_node, std::move(*plaintext));
-        if (!sent) {
-            log().warn("Failed to send data event for peer {} (channel full or closed)", peer_ip);
-        }
+    if (event_ch_) {
+        co_await cobalt::as_tuple(event_ch_->write(
+            events::relay::Event{events::relay::DataReceived{data.src_node, std::move(*plaintext)}}));
     }
 }
 
-asio::awaitable<void> RelayChannel::handle_pong(const Frame& frame) {
+cobalt::task<void> RelayChannel::handle_pong(const Frame& frame) {
     // Use protobuf Pong message
     auto pong = FrameCodec::decode_protobuf<pb::Pong>(frame.data());
     if (!pong) {
@@ -1753,38 +1753,49 @@ asio::awaitable<void> RelayChannel::handle_pong(const Frame& frame) {
         co_return;
     }
 
-    // Calculate RTT
-    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    // 校验 seq_num 匹配当前 ping
+    if (pong->seq_num() != ping_seq_) {
+        log().debug("Ignoring stale relay PONG: seq={} (expected {})", pong->seq_num(), ping_seq_);
+        co_return;
+    }
 
+    // 使用 steady_clock 计算本地 RTT，避免 system_clock 跳变
     if (last_ping_time_ > 0) {
-        uint16_t rtt_ms = static_cast<uint16_t>(now - last_ping_time_);
+        auto now_steady = std::chrono::steady_clock::now();
+        uint16_t rtt_ms = static_cast<uint16_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now_steady - last_ping_steady_).count());
 
         // Only log if RTT is unusually high
         if (rtt_ms > 500) {
             log().warn("Relay channel high latency: RTT={}ms", rtt_ms);
         }
 
-        // Notify via callback
-        if (channels_.on_pong) {
-            channels_.on_pong(rtt_ms);
+        // Notify via event channel
+        if (event_ch_) {
+            co_await cobalt::as_tuple(event_ch_->write(
+                events::relay::Event{events::relay::Pong{rtt_ms}}));
+        }
+
+        // Per-connection RTT callback (for relay pool tracking)
+        if (on_pong_) {
+            on_pong_(rtt_ms);
         }
     }
 
     co_return;
 }
 
-asio::awaitable<void> RelayChannel::send_frame(FrameType type, std::span<const uint8_t> payload) {
+void RelayChannel::send_frame(FrameType type, std::span<const uint8_t> payload) {
     auto data = FrameCodec::encode(type, payload);
-    co_await send_raw(data);
+    send_raw(data);
 }
 
-asio::awaitable<void> RelayChannel::send_raw(std::span<const uint8_t> data) {
+void RelayChannel::send_raw(std::span<const uint8_t> data) {
     write_queue_.push(std::vector<uint8_t>(data.begin(), data.end()));
     if (!writing_) {
         write_timer_.cancel();
     }
-    co_return;
 }
 
 } // namespace edgelink::client

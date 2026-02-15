@@ -1,9 +1,9 @@
 #include "controller/stun_server.hpp"
 #include "common/logger.hpp"
 #include "common/frame.hpp"
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/use_awaitable.hpp>
+#include <boost/cobalt.hpp>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::controller {
 
@@ -29,7 +29,7 @@ void StunServer::set_public_ip(const std::string& ip) {
     public_ip_ = ip;
 }
 
-asio::awaitable<void> StunServer::start() {
+cobalt::task<void> StunServer::start() {
     if (running_) {
         co_return;
     }
@@ -76,13 +76,13 @@ void StunServer::stop() {
     log().info("STUN server stopped");
 }
 
-asio::awaitable<void> StunServer::recv_loop() {
+cobalt::task<void> StunServer::recv_loop() {
     while (running_ && socket_) {
         try {
             auto bytes_received = co_await socket_->async_receive_from(
                 asio::buffer(recv_buffer_),
                 sender_endpoint_,
-                asio::use_awaitable);
+                cobalt::use_op);
 
             if (bytes_received > 0) {
                 handle_request(

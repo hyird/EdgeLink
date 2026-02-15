@@ -14,9 +14,12 @@
 #include "client/peer_latency_measurer.hpp"
 #include "client/relay_latency_reporter.hpp"
 #include "common/node_state.hpp"
+#include "common/events.hpp"
+#include "common/async_service.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/cobalt.hpp>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -26,6 +29,7 @@
 #include <unordered_map>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 namespace ssl = asio::ssl;
 
 namespace edgelink::client {
@@ -131,30 +135,30 @@ public:
     ~Client();
 
     // Start the client (authenticate and connect to relay)
-    asio::awaitable<bool> start();
+    cobalt::task<bool> start();
 
     // Stop the client
-    asio::awaitable<void> stop();
+    cobalt::task<void> stop();
 
     // Send data to a peer
-    asio::awaitable<bool> send_to_peer(NodeId peer_id, std::span<const uint8_t> data);
+    cobalt::task<bool> send_to_peer(NodeId peer_id, std::span<const uint8_t> data);
 
     // Send data to a peer by virtual IP
-    asio::awaitable<bool> send_to_ip(const IPv4Address& ip, std::span<const uint8_t> data);
+    cobalt::task<bool> send_to_ip(const IPv4Address& ip, std::span<const uint8_t> data);
 
     // Send raw IP packet (for TUN mode)
-    asio::awaitable<bool> send_ip_packet(std::span<const uint8_t> packet);
+    cobalt::task<bool> send_ip_packet(std::span<const uint8_t> packet);
 
     // Ping a peer and return latency in milliseconds (0 = timeout/error)
-    asio::awaitable<uint16_t> ping_peer(NodeId peer_id, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-    asio::awaitable<uint16_t> ping_ip(const IPv4Address& ip, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+    cobalt::task<uint16_t> ping_peer(NodeId peer_id, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+    cobalt::task<uint16_t> ping_ip(const IPv4Address& ip, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
     // Subnet routing - announce routes this node can forward
-    asio::awaitable<void> announce_routes(const std::vector<RouteInfo>& routes);
-    asio::awaitable<void> withdraw_routes(const std::vector<RouteInfo>& routes);
+    cobalt::task<void> announce_routes(const std::vector<RouteInfo>& routes);
+    cobalt::task<void> withdraw_routes(const std::vector<RouteInfo>& routes);
 
     // Announce configured routes from config (advertise_routes and exit_node)
-    asio::awaitable<void> announce_configured_routes();
+    cobalt::task<void> announce_configured_routes();
 
     // Set external event channels
     void set_events(ClientEvents events);
@@ -219,27 +223,16 @@ private:
     void setup_channels();       // 设置事件 channels
     void setup_state_machine();  // 设置状态机回调
 
-    // Control Channel 事件处理协程
-    asio::awaitable<void> ctrl_auth_response_handler();
-    asio::awaitable<void> ctrl_config_handler();
-    asio::awaitable<void> ctrl_config_update_handler();
-    asio::awaitable<void> ctrl_route_update_handler();
-    asio::awaitable<void> ctrl_peer_routing_update_handler();
-    asio::awaitable<void> ctrl_p2p_endpoint_handler();
-    asio::awaitable<void> ctrl_error_handler();
-    asio::awaitable<void> ctrl_connected_handler();
-    asio::awaitable<void> ctrl_disconnected_handler();
-
-    // Relay Channel 事件处理协程
-    asio::awaitable<void> relay_data_handler();
-    asio::awaitable<void> relay_connected_handler();
-    asio::awaitable<void> relay_disconnected_handler();
+    // Unified event loop coroutines (replace 17 per-event handlers)
+    cobalt::task<void> ctrl_event_loop();
+    cobalt::task<void> relay_event_loop();
+    cobalt::task<void> p2p_event_loop();
 
     // TUN device management
     bool setup_tun();
     void teardown_tun();
     void on_tun_packet(std::span<const uint8_t> packet);
-    asio::awaitable<void> tun_packet_handler();
+    cobalt::task<void> tun_packet_handler();
 
     // IPC server management
     bool setup_ipc();
@@ -250,31 +243,25 @@ private:
     void send_pong(NodeId peer_id, uint32_t seq_num, uint64_t timestamp);
 
     // Keepalive timer
-    asio::awaitable<void> keepalive_loop();
+    cobalt::task<void> keepalive_loop();
 
     // DNS refresh loop - periodically check for DNS changes
-    asio::awaitable<void> dns_refresh_loop();
+    cobalt::task<void> dns_refresh_loop();
 
     // Latency measurement loop - periodically measure peer latency
-    asio::awaitable<void> latency_measure_loop();
+    cobalt::task<void> latency_measure_loop();
 
     // Route announce loop - periodically re-announce routes
-    asio::awaitable<void> route_announce_loop();
+    cobalt::task<void> route_announce_loop();
 
     // Config change handler - 处理配置文件变更
-    asio::awaitable<void> config_change_handler();
+    cobalt::task<void> config_change_handler();
 
     // P2P state handler - 处理 P2P 状态变化（替代回调）
-    asio::awaitable<void> p2p_state_handler();
-
-    // P2P channel handlers
-    asio::awaitable<void> p2p_endpoints_handler();
-    asio::awaitable<void> p2p_init_handler();
-    asio::awaitable<void> p2p_status_handler();
-    asio::awaitable<void> p2p_data_handler();
+    cobalt::task<void> p2p_state_handler();
 
     // Reconnection logic
-    asio::awaitable<void> reconnect();
+    cobalt::task<void> reconnect();
 
     asio::io_context& ioc_;
     ssl::context ssl_ctx_;
@@ -309,11 +296,11 @@ private:
     std::unique_ptr<channels::TunPacketChannel> tun_packet_ch_;
 
     // TUN packet handler completion channel
-    using TunHandlerCompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    using TunHandlerCompletionChannel = cobalt::channel<void>;
     std::unique_ptr<TunHandlerCompletionChannel> tun_handler_done_ch_;
 
     // Handler completion tracking - collects exit notifications from all handlers
-    using HandlerCompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    using HandlerCompletionChannel = cobalt::channel<void>;
     std::unique_ptr<HandlerCompletionChannel> handlers_done_ch_;
     std::atomic<int> active_handlers_{0};  // Count of running handler coroutines
 
@@ -337,7 +324,7 @@ private:
     std::atomic<NodeId> current_exit_node_id_{0};  // 当前使用的出口节点 ID
 
     // Pending ping state - 使用 channel 替代回调
-    using PingResponseChannel = asio::experimental::channel<void(boost::system::error_code, uint16_t)>;
+    using PingResponseChannel = cobalt::channel<uint16_t>;
     struct PendingPing {
         uint64_t send_time = 0;
         std::shared_ptr<PingResponseChannel> response_ch;
@@ -351,31 +338,14 @@ private:
     std::unique_ptr<P2PManager> p2p_mgr_;
     std::unique_ptr<edgelink::channels::PeerStateChannel> peer_state_channel_;  // P2P 状态变化通道
 
-    // P2P channels（用于异步通信）
-    std::unique_ptr<P2PChannels::EndpointsReadyChannel> endpoints_ready_channel_;
-    std::unique_ptr<P2PChannels::P2PInitChannel> p2p_init_channel_;
-    std::unique_ptr<P2PChannels::P2PStatusChannel> p2p_status_channel_;
-    std::unique_ptr<P2PChannels::DataChannel> p2p_data_channel_;
+    // Unified event channels (replace 16 per-event channels)
+    std::unique_ptr<events::CtrlEventChannel> ctrl_events_;
+    std::unique_ptr<events::RelayEventChannel> relay_events_;
+    std::unique_ptr<events::P2PEventChannel> p2p_events_;
 
     // 保存最后上报的端点（用于重连后重发）
     std::vector<Endpoint> last_reported_endpoints_;
     std::mutex endpoints_mutex_;
-
-    // Control Channel 事件 channels
-    std::unique_ptr<channels::AuthResponseChannel> ctrl_auth_response_ch_;
-    std::unique_ptr<channels::ConfigChannel> ctrl_config_ch_;
-    std::unique_ptr<channels::ConfigUpdateChannel> ctrl_config_update_ch_;
-    std::unique_ptr<channels::RouteUpdateChannel> ctrl_route_update_ch_;
-    std::unique_ptr<channels::PeerRoutingUpdateChannel> ctrl_peer_routing_update_ch_;
-    std::unique_ptr<channels::P2PEndpointMsgChannel> ctrl_p2p_endpoint_ch_;
-    std::unique_ptr<channels::ControlErrorChannel> ctrl_error_ch_;
-    std::unique_ptr<channels::ControlConnectedChannel> ctrl_connected_ch_;
-    std::unique_ptr<channels::ControlDisconnectedChannel> ctrl_disconnected_ch_;
-
-    // Relay Channel 事件 channels
-    std::unique_ptr<channels::RelayDataChannel> relay_data_ch_;
-    std::unique_ptr<channels::RelayConnectedChannel> relay_connected_ch_;
-    std::unique_ptr<channels::RelayDisconnectedChannel> relay_disconnected_ch_;
 
     // Multi-path Relay support (optional)
     std::shared_ptr<MultiRelayManager> multi_relay_mgr_;

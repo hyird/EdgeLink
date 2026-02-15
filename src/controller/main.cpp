@@ -9,6 +9,9 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>
+#include <boost/cobalt.hpp>
+
+#include "common/cobalt_utils.hpp"
 
 #include <iostream>
 #include <iomanip>
@@ -18,6 +21,7 @@
 #include <chrono>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 
 using namespace edgelink;
 using namespace edgelink::controller;
@@ -712,7 +716,7 @@ int cmd_serve(int argc, char* argv[]) {
         });
 
         // Start server
-        asio::co_spawn(ioc, server.run(), asio::detached);
+        cobalt_utils::spawn_task(ioc.get_executor(), server.run());
 
         // Start STUN server (if enabled)
         std::unique_ptr<StunServer> stun_server;
@@ -725,7 +729,7 @@ int cmd_serve(int argc, char* argv[]) {
                 stun_server = std::make_unique<StunServer>(
                     ioc, "0.0.0.0", cfg.builtin_stun.port);
                 stun_server->set_public_ip(cfg.builtin_stun.public_ip);
-                asio::co_spawn(ioc, stun_server->start(), asio::detached);
+                cobalt_utils::spawn_task(ioc.get_executor(), stun_server->start());
             }
         }
 

@@ -1,12 +1,16 @@
 #include "controller/server.hpp"
 #include "controller/session.hpp"
 #include "common/logger.hpp"
+#include "common/cobalt_utils.hpp"
+#include <boost/cobalt.hpp>
 #include <fstream>
 #include <sstream>
 #include <openssl/evp.h>
 #include <openssl/x509.h>
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::controller {
 
@@ -15,7 +19,7 @@ namespace {
 
     // Health check response helper
     template<typename Stream>
-    asio::awaitable<void> send_health_response(
+    cobalt::task<void> send_health_response(
         Stream& stream,
         http::request<http::string_body>& req,
         http::status status,
@@ -26,7 +30,7 @@ namespace {
         res.set(http::field::content_type, "application/json");
         res.body() = body;
         res.prepare_payload();
-        co_await http::async_write(stream, res, asio::use_awaitable);
+        co_await http::async_write(stream, res, cobalt::use_op);
     }
 }
 
@@ -42,7 +46,7 @@ Server::Server(asio::io_context& ioc, ssl::context& ssl_ctx,
     , config_(config)
     , acceptor_(ioc) {}
 
-asio::awaitable<void> Server::run() {
+cobalt::task<void> Server::run() {
     // Setup acceptor
     tcp::endpoint endpoint(asio::ip::make_address(config_.bind_address), config_.port);
 
@@ -63,13 +67,13 @@ void Server::stop() {
     acceptor_.close();
 }
 
-asio::awaitable<void> Server::accept_loop() {
+cobalt::task<void> Server::accept_loop() {
     while (running_) {
         try {
-            tcp::socket socket = co_await acceptor_.async_accept(asio::use_awaitable);
+            tcp::socket socket = co_await acceptor_.async_accept(cobalt::use_op);
 
             // Spawn connection handler
-            asio::co_spawn(ioc_, handle_connection(std::move(socket)), asio::detached);
+            cobalt_utils::spawn_task(ioc_.get_executor(), handle_connection(std::move(socket)));
 
         } catch (const boost::system::system_error& e) {
             if (e.code() != asio::error::operation_aborted) {
@@ -79,7 +83,7 @@ asio::awaitable<void> Server::accept_loop() {
     }
 }
 
-asio::awaitable<void> Server::handle_connection(tcp::socket socket) {
+cobalt::task<void> Server::handle_connection(tcp::socket socket) {
     if (config_.tls) {
         co_await handle_tls_connection(std::move(socket));
     } else {
@@ -87,13 +91,13 @@ asio::awaitable<void> Server::handle_connection(tcp::socket socket) {
     }
 }
 
-asio::awaitable<void> Server::handle_tls_connection(tcp::socket socket) {
+cobalt::task<void> Server::handle_tls_connection(tcp::socket socket) {
     try {
         // Create SSL stream
         beast::ssl_stream<beast::tcp_stream> stream(std::move(socket), ssl_ctx_);
 
         // Perform SSL handshake
-        co_await stream.async_handshake(ssl::stream_base::server, asio::use_awaitable);
+        co_await stream.async_handshake(ssl::stream_base::server, cobalt::use_op);
 
         // Create HTTP session to handle upgrade
         auto session = std::make_shared<HttpSession>(std::move(stream), manager_);
@@ -104,7 +108,7 @@ asio::awaitable<void> Server::handle_tls_connection(tcp::socket socket) {
     }
 }
 
-asio::awaitable<void> Server::handle_plain_connection(tcp::socket socket) {
+cobalt::task<void> Server::handle_plain_connection(tcp::socket socket) {
     try {
         // Create plain TCP stream
         beast::tcp_stream stream(std::move(socket));
@@ -127,13 +131,13 @@ HttpSession::HttpSession(beast::ssl_stream<beast::tcp_stream>&& stream,
     : stream_(std::move(stream))
     , manager_(manager) {}
 
-asio::awaitable<void> HttpSession::run() {
+cobalt::task<void> HttpSession::run() {
     // Set timeout
     beast::get_lowest_layer(stream_).expires_after(std::chrono::seconds(30));
 
     // Read HTTP request
     http::request<http::string_body> req;
-    co_await http::async_read(stream_, buffer_, req, asio::use_awaitable);
+    co_await http::async_read(stream_, buffer_, req, cobalt::use_op);
 
     // Get target path for routing
     std::string target(req.target());
@@ -170,7 +174,7 @@ asio::awaitable<void> HttpSession::run() {
         res.body() = "WebSocket upgrade required";
         res.prepare_payload();
 
-        co_await http::async_write(stream_, res, asio::use_awaitable);
+        co_await http::async_write(stream_, res, cobalt::use_op);
         co_return;
     }
 
@@ -187,7 +191,7 @@ asio::awaitable<void> HttpSession::run() {
         }));
 
     // Accept WebSocket handshake
-    co_await ws.async_accept(req, asio::use_awaitable);
+    co_await ws.async_accept(req, cobalt::use_op);
 
     // Disable the HTTP timeout on the underlying stream - WebSocket has its own timeout
     beast::get_lowest_layer(ws).expires_never();
@@ -209,7 +213,7 @@ asio::awaitable<void> HttpSession::run() {
     } else {
         // Unknown endpoint
         log().warn("Unknown WebSocket endpoint: {}", target);
-        co_await ws.async_close(websocket::close_code::policy_error, asio::use_awaitable);
+        co_await ws.async_close(websocket::close_code::policy_error, cobalt::use_op);
     }
 }
 
@@ -222,13 +226,13 @@ PlainHttpSession::PlainHttpSession(beast::tcp_stream&& stream,
     : stream_(std::move(stream))
     , manager_(manager) {}
 
-asio::awaitable<void> PlainHttpSession::run() {
+cobalt::task<void> PlainHttpSession::run() {
     // Set timeout
     stream_.expires_after(std::chrono::seconds(30));
 
     // Read HTTP request
     http::request<http::string_body> req;
-    co_await http::async_read(stream_, buffer_, req, asio::use_awaitable);
+    co_await http::async_read(stream_, buffer_, req, cobalt::use_op);
 
     // Get target path for routing
     std::string target(req.target());
@@ -265,7 +269,7 @@ asio::awaitable<void> PlainHttpSession::run() {
         res.body() = "WebSocket upgrade required";
         res.prepare_payload();
 
-        co_await http::async_write(stream_, res, asio::use_awaitable);
+        co_await http::async_write(stream_, res, cobalt::use_op);
         co_return;
     }
 
@@ -282,7 +286,7 @@ asio::awaitable<void> PlainHttpSession::run() {
         }));
 
     // Accept WebSocket handshake
-    co_await ws.async_accept(req, asio::use_awaitable);
+    co_await ws.async_accept(req, cobalt::use_op);
 
     // Disable the HTTP timeout on the underlying stream - WebSocket has its own timeout
     beast::get_lowest_layer(ws).expires_never();
@@ -304,7 +308,7 @@ asio::awaitable<void> PlainHttpSession::run() {
     } else {
         // Unknown endpoint
         log().warn("Unknown WebSocket endpoint: {}", target);
-        co_await ws.async_close(websocket::close_code::policy_error, asio::use_awaitable);
+        co_await ws.async_close(websocket::close_code::policy_error, cobalt::use_op);
     }
 }
 

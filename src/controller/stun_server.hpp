@@ -1,6 +1,7 @@
 #pragma once
 
 #include <boost/asio.hpp>
+#include <boost/cobalt.hpp>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <vector>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::controller {
 
@@ -49,7 +51,7 @@ public:
     void set_public_ip(const std::string& ip);
 
     // 启动服务
-    asio::awaitable<void> start();
+    cobalt::task<void> start();
 
     // 停止服务
     void stop();
@@ -65,7 +67,7 @@ public:
 
 private:
     // UDP 接收循环
-    asio::awaitable<void> recv_loop();
+    cobalt::task<void> recv_loop();
 
     // 处理 STUN 请求
     void handle_request(const asio::ip::udp::endpoint& from,

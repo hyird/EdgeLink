@@ -2,6 +2,7 @@
 
 #include "controller/session_manager.hpp"
 #include <boost/asio.hpp>
+#include <boost/cobalt.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -11,6 +12,7 @@
 #include <string>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 namespace beast = boost::beast;
 namespace http = beast::http;
 namespace websocket = beast::websocket;
@@ -37,19 +39,19 @@ public:
            SessionManager& manager, const ServerConfig& config);
 
     // Start accepting connections
-    asio::awaitable<void> run();
+    cobalt::task<void> run();
 
     // Stop the server
     void stop();
 
 private:
     // Accept loop
-    asio::awaitable<void> accept_loop();
+    cobalt::task<void> accept_loop();
 
     // Handle HTTP upgrade request and route to appropriate session type
-    asio::awaitable<void> handle_connection(tcp::socket socket);
-    asio::awaitable<void> handle_tls_connection(tcp::socket socket);
-    asio::awaitable<void> handle_plain_connection(tcp::socket socket);
+    cobalt::task<void> handle_connection(tcp::socket socket);
+    cobalt::task<void> handle_tls_connection(tcp::socket socket);
+    cobalt::task<void> handle_plain_connection(tcp::socket socket);
 
     asio::io_context& ioc_;
     ssl::context& ssl_ctx_;
@@ -67,7 +69,7 @@ public:
                 SessionManager& manager);
 
     // Run the session (handle HTTP upgrade)
-    asio::awaitable<void> run();
+    cobalt::task<void> run();
 
 private:
     beast::ssl_stream<beast::tcp_stream> stream_;
@@ -82,7 +84,7 @@ public:
                      SessionManager& manager);
 
     // Run the session (handle HTTP upgrade)
-    asio::awaitable<void> run();
+    cobalt::task<void> run();
 
 private:
     beast::tcp_stream stream_;

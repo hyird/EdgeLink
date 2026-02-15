@@ -5,12 +5,13 @@
 #include "common/config.hpp"
 #include "common/config_metadata.hpp"
 #include "common/config_writer.hpp"
+#include "common/cobalt_utils.hpp"
 
 #include <boost/json.hpp>
 #include <filesystem>
-#include <future>
 #include <sstream>
 
+namespace cobalt = boost::cobalt;
 namespace json = boost::json;
 
 namespace edgelink::client {
@@ -77,7 +78,7 @@ bool IpcServer::start(const IpcServerConfig& config) {
         log().info("IPC server started on: {}", config_.socket_path);
 
         // Start accept loop
-        asio::co_spawn(ioc_, accept_loop(), asio::detached);
+        cobalt_utils::spawn_task(ioc_.get_executor(), accept_loop());
 
         return true;
     } catch (const std::exception& e) {
@@ -98,6 +99,8 @@ bool IpcServer::start(const IpcServerConfig& config) {
 
         // Set socket permissions (world read/write for daemon-CLI communication)
         // This allows non-root users to connect when daemon runs as root
+        // SECURITY: 0666 权限允许所有用户连接。IPC 命令本身不含敏感操作，
+        // 但在多用户系统上应考虑使用 group 权限 (0660) + edgelink 用户组
         std::filesystem::permissions(config_.socket_path,
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
             std::filesystem::perms::group_read | std::filesystem::perms::group_write |
@@ -108,7 +111,7 @@ bool IpcServer::start(const IpcServerConfig& config) {
         log().info("IPC server started on: {}", config_.socket_path);
 
         // Start accept loop
-        asio::co_spawn(ioc_, accept_loop(), asio::detached);
+        cobalt_utils::spawn_task(ioc_.get_executor(), accept_loop());
 
         return true;
     } catch (const std::exception& e) {
@@ -136,14 +139,14 @@ void IpcServer::stop() {
     log().info("IPC server stopped");
 }
 
-asio::awaitable<void> IpcServer::accept_loop() {
+cobalt::task<void> IpcServer::accept_loop() {
     while (running_ && acceptor_) {
         try {
-            auto socket = co_await acceptor_->async_accept(asio::use_awaitable);
+            auto socket = co_await acceptor_->async_accept(cobalt::use_op);
             log().debug("IPC client connected");
 
             // Handle client in a new coroutine
-            asio::co_spawn(ioc_, handle_client(std::move(socket)), asio::detached);
+            cobalt_utils::spawn_task(ioc_.get_executor(), handle_client(std::move(socket)));
 
         } catch (const boost::system::system_error& e) {
             if (e.code() != asio::error::operation_aborted && running_) {
@@ -153,14 +156,14 @@ asio::awaitable<void> IpcServer::accept_loop() {
     }
 }
 
-asio::awaitable<void> IpcServer::handle_client(asio::local::stream_protocol::socket socket) {
+cobalt::task<void> IpcServer::handle_client(asio::local::stream_protocol::socket socket) {
     try {
-        // Simple line-based protocol
-        asio::streambuf buffer;
+        // Simple line-based protocol (限制缓冲区大小防止恶意大请求耗尽内存)
+        asio::streambuf buffer(65536);
 
         while (running_) {
             // Read a line (request)
-            size_t n = co_await asio::async_read_until(socket, buffer, '\n', asio::use_awaitable);
+            size_t n = co_await asio::async_read_until(socket, buffer, '\n', cobalt::use_op);
 
             std::istream is(&buffer);
             std::string request;
@@ -173,12 +176,12 @@ asio::awaitable<void> IpcServer::handle_client(asio::local::stream_protocol::soc
 
             log().debug("IPC request: {}", request);
 
-            // Process request
-            std::string response = process_request(request);
+            // Process request (coroutine，ping 等命令需要异步执行)
+            std::string response = co_await process_request(request);
 
             // Send response (with newline)
             response += '\n';
-            co_await asio::async_write(socket, asio::buffer(response), asio::use_awaitable);
+            co_await asio::async_write(socket, asio::buffer(response), cobalt::use_op);
         }
     } catch (const boost::system::system_error& e) {
         if (e.code() != asio::error::eof &&
@@ -191,7 +194,7 @@ asio::awaitable<void> IpcServer::handle_client(asio::local::stream_protocol::soc
     log().debug("IPC client disconnected");
 }
 
-std::string IpcServer::process_request(const std::string& request) {
+cobalt::task<std::string> IpcServer::process_request(const std::string& request) {
     try {
         // Parse JSON request
         auto jv = json::parse(request);
@@ -200,45 +203,45 @@ std::string IpcServer::process_request(const std::string& request) {
         std::string cmd = json::value_to<std::string>(obj.at("cmd"));
 
         if (cmd == "status") {
-            return handle_status();
+            co_return handle_status();
         } else if (cmd == "peers") {
             bool online_only = false;
             if (obj.contains("online_only")) {
                 online_only = obj.at("online_only").as_bool();
             }
-            return handle_peers(online_only);
+            co_return handle_peers(online_only);
         } else if (cmd == "routes") {
-            return handle_routes();
+            co_return handle_routes();
         } else if (cmd == "ping") {
             std::string target = json::value_to<std::string>(obj.at("target"));
-            return handle_ping(target);
+            co_return co_await handle_ping(target);
         } else if (cmd == "log_level") {
             std::string module = obj.contains("module") ?
                 json::value_to<std::string>(obj.at("module")) : "";
             std::string level = obj.contains("level") ?
                 json::value_to<std::string>(obj.at("level")) : "";
-            return handle_log_level(module, level);
+            co_return handle_log_level(module, level);
         } else if (cmd == "shutdown") {
-            return handle_shutdown();
+            co_return handle_shutdown();
         } else if (cmd == "config_get") {
             std::string key = json::value_to<std::string>(obj.at("key"));
-            return handle_config_get(key);
+            co_return handle_config_get(key);
         } else if (cmd == "config_set") {
             std::string key = json::value_to<std::string>(obj.at("key"));
             std::string value = json::value_to<std::string>(obj.at("value"));
-            return handle_config_set(key, value);
+            co_return handle_config_set(key, value);
         } else if (cmd == "config_list") {
-            return handle_config_list();
+            co_return handle_config_list();
         } else if (cmd == "config_reload") {
-            return handle_config_reload();
+            co_return handle_config_reload();
         } else if (cmd == "prefs_update") {
-            return handle_prefs_update();
+            co_return handle_prefs_update();
         } else {
-            return encode_error(IpcStatus::INVALID_REQUEST, "Unknown command: " + cmd);
+            co_return encode_error(IpcStatus::INVALID_REQUEST, "Unknown command: " + cmd);
         }
 
     } catch (const std::exception& e) {
-        return encode_error(IpcStatus::INVALID_REQUEST, std::string("Parse error: ") + e.what());
+        co_return encode_error(IpcStatus::INVALID_REQUEST, std::string("Parse error: ") + e.what());
     }
 }
 
@@ -252,6 +255,7 @@ std::string IpcServer::handle_status() {
     data.peer_count = client_.peers().peer_count();
     data.online_peer_count = client_.peers().online_peer_count();
     data.tun_enabled = client_.is_tun_enabled();
+    data.controller_host = client_.config().controller_url;
 
     return encode_status_response(IpcStatus::OK, data);
 }
@@ -338,51 +342,38 @@ std::string IpcServer::handle_routes() {
     return encode_routes_response(IpcStatus::OK, routes);
 }
 
-std::string IpcServer::handle_ping(const std::string& target) {
+cobalt::task<std::string> IpcServer::handle_ping(const std::string& target) {
     if (target.empty()) {
-        return encode_error(IpcStatus::INVALID_REQUEST, "Target IP required");
+        co_return encode_error(IpcStatus::INVALID_REQUEST, "Target IP required");
     }
 
     // Parse target IP
     IPv4Address ip = IPv4Address::from_string(target);
     if (ip.to_u32() == 0) {
-        return encode_error(IpcStatus::INVALID_REQUEST, "Invalid IP address: " + target);
+        co_return encode_error(IpcStatus::INVALID_REQUEST, "Invalid IP address: " + target);
     }
 
     // Find peer by IP
     auto peer = client_.peers().get_peer_by_ip(ip);
     if (!peer) {
-        return encode_error(IpcStatus::PEER_NOT_FOUND, "No peer with IP: " + target);
+        co_return encode_error(IpcStatus::PEER_NOT_FOUND, "No peer with IP: " + target);
     }
 
     if (!peer->info.online) {
-        return encode_error(IpcStatus::PEER_NOT_FOUND, "Peer is offline: " + target);
+        co_return encode_error(IpcStatus::PEER_NOT_FOUND, "Peer is offline: " + target);
     }
 
-    // Execute ping synchronously using a promise - 使用 shared_from_this 保证生命周期安全
-    auto promise = std::make_shared<std::promise<uint16_t>>();
-    auto future = promise->get_future();
-
-    asio::co_spawn(ioc_, [self = shared_from_this(), ip, promise]() -> asio::awaitable<void> {
-        uint16_t latency = co_await self->client_.ping_ip(ip);
-        promise->set_value(latency);
-    }, asio::detached);
-
-    // Wait for result with timeout (6 seconds to allow for 5s ping timeout)
-    if (future.wait_for(std::chrono::seconds(6)) == std::future_status::timeout) {
-        return encode_error(IpcStatus::ERROR, "Ping timeout");
-    }
-
-    uint16_t latency = future.get();
+    // 直接 co_await ping，避免 promise/future 阻塞 io_context 线程导致死锁
+    uint16_t latency = co_await client_.ping_ip(ip);
     if (latency == 0) {
-        return encode_error(IpcStatus::ERROR, "Ping failed or timed out");
+        co_return encode_error(IpcStatus::ERROR, "Ping failed or timed out");
     }
 
     json::object result;
     result["status"] = "ok";
     result["target"] = target;
     result["latency_ms"] = latency;
-    return json::serialize(result);
+    co_return json::serialize(result);
 }
 
 std::string IpcServer::handle_log_level(const std::string& module, const std::string& level) {
@@ -609,54 +600,13 @@ std::string IpcServer::handle_prefs_update() {
         ClientConfig& cfg = client_.config();
         prefs.apply_to(cfg);
 
-        // 如果有配置应用器，通知它配置已更改
-        if (client_.config_applier()) {
-            // 创建一个包含 prefs 相关配置的变更列表
-            std::vector<ConfigChange> changes;
-
-            // exit_node 变更
-            if (prefs.exit_node()) {
-                ConfigChange change;
-                change.key = "routing.use_exit_node";
-                change.new_value = *prefs.exit_node();
-                change.applied = true;
-                changes.push_back(change);
-            }
-
-            // advertise_exit_node 变更
-            {
-                ConfigChange change;
-                change.key = "routing.exit_node";
-                change.new_value = prefs.advertise_exit_node() ? "true" : "false";
-                change.applied = true;
-                changes.push_back(change);
-            }
-
-            // advertise_routes 变更
-            {
-                ConfigChange change;
-                change.key = "routing.advertise_routes";
-                std::string routes_str;
-                for (const auto& r : prefs.advertise_routes()) {
-                    if (!routes_str.empty()) routes_str += ",";
-                    routes_str += r;
-                }
-                change.new_value = routes_str;
-                change.applied = true;
-                changes.push_back(change);
-            }
-
-            // accept_routes 变更
-            {
-                ConfigChange change;
-                change.key = "routing.accept_routes";
-                change.new_value = prefs.accept_routes() ? "true" : "false";
-                change.applied = true;
-                changes.push_back(change);
-            }
-
-            log().info("Applied {} prefs changes", changes.size());
-        }
+        // prefs.apply_to(cfg) 已直接更新内存中的配置
+        // 日志记录变更概要
+        log().info("Prefs applied: exit_node={}, advertise_exit_node={}, accept_routes={}, advertise_routes={}",
+                   prefs.exit_node().value_or("(unset)"),
+                   prefs.advertise_exit_node() ? "true" : "false",
+                   prefs.accept_routes() ? "true" : "false",
+                   prefs.advertise_routes().size());
 
         // 触发路由重新公告（如果需要）
         client_.request_route_reannounce();
@@ -749,6 +699,7 @@ std::string IpcServer::encode_status_response(IpcStatus status, const IpcStatusR
         {"state", data.state},
         {"node_id", data.node_id},
         {"virtual_ip", data.virtual_ip},
+        {"controller_host", data.controller_host},
         {"network_id", data.network_id},
         {"peer_count", data.peer_count},
         {"online_peer_count", data.online_peer_count},
@@ -888,7 +839,11 @@ std::string IpcClient::get_routes() {
 }
 
 std::string IpcClient::ping_peer(const std::string& target) {
-    return send_request(R"({"cmd":"ping","target":")" + target + "\"}");
+    // 使用 json::object 构建请求，避免字符串拼接导致的 JSON 注入
+    json::object obj;
+    obj["cmd"] = "ping";
+    obj["target"] = target;
+    return send_request(json::serialize(obj));
 }
 
 std::string IpcClient::set_log_level(const std::string& module, const std::string& level) {

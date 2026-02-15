@@ -10,7 +10,10 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>
+#include <boost/cobalt.hpp>
 #include <boost/json.hpp>
+
+#include "common/cobalt_utils.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -20,6 +23,7 @@
 #include <thread>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 
 using namespace edgelink;
 using namespace edgelink::client;
@@ -1154,11 +1158,11 @@ int cmd_daemon(int argc, char* argv[]) {
         auto client = std::make_shared<Client>(ioc, client_cfg);
 
         // 创建 Client 事件 channels
-        auto connected_ch = std::make_unique<client::channels::ClientConnectedChannel>(ioc, 4);
-        auto disconnected_ch = std::make_unique<client::channels::ClientDisconnectedChannel>(ioc, 4);
-        auto data_ch = std::make_unique<client::channels::ClientDataChannel>(ioc, 64);
-        auto error_ch = std::make_unique<client::channels::ClientErrorChannel>(ioc, 8);
-        auto shutdown_ch = std::make_unique<client::channels::ShutdownRequestChannel>(ioc, 4);
+        auto connected_ch = std::make_unique<client::channels::ClientConnectedChannel>(4, ioc.get_executor());
+        auto disconnected_ch = std::make_unique<client::channels::ClientDisconnectedChannel>(4, ioc.get_executor());
+        auto data_ch = std::make_unique<client::channels::ClientDataChannel>(64, ioc.get_executor());
+        auto error_ch = std::make_unique<client::channels::ClientErrorChannel>(8, ioc.get_executor());
+        auto shutdown_ch = std::make_unique<client::channels::ShutdownRequestChannel>(4, ioc.get_executor());
 
         // 获取原始指针用于 lambda 捕获
         auto* connected_ptr = connected_ch.get();
@@ -1177,70 +1181,74 @@ int cmd_daemon(int argc, char* argv[]) {
         client->set_events(events);
 
         // 启动事件处理协程: on_connected
-        asio::co_spawn(ioc, [&ioc, &log, client,
-                             connected_ptr]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc.get_executor(), [&ioc, &log, client,
+                             connected_ptr]() -> cobalt::task<void> {
             while (true) {
-                auto [ec] = co_await connected_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
+                auto [ec] = co_await cobalt::as_tuple(connected_ptr->read());
                 if (ec) break;
 
                 log.info("Client connected and ready");
                 log.info("  Virtual IP: {}", client->virtual_ip().to_string());
                 log.info("  Peers online: {}", client->peers().online_peer_count());
             }
-        }, asio::detached);
+        }());
 
         // 启动事件处理协程: on_disconnected
-        asio::co_spawn(ioc, [disconnected_ptr]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc.get_executor(), [disconnected_ptr]() -> cobalt::task<void> {
             while (true) {
-                auto [ec] = co_await disconnected_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
+                auto [ec] = co_await cobalt::as_tuple(disconnected_ptr->read());
                 if (ec) break;
                 Logger::get("client").warn("Client disconnected");
             }
-        }, asio::detached);
+        }());
 
         // 启动事件处理协程: on_data_received
-        asio::co_spawn(ioc, [client, data_ptr]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc.get_executor(), [client, data_ptr]() -> cobalt::task<void> {
             while (true) {
-                auto [ec, src, data] = co_await data_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
+                auto [ec, event] = co_await cobalt::as_tuple(data_ptr->read());
                 if (ec) break;
+                auto& src = event.src_node;
+                auto& data = event.data;
                 auto src_ip = client->peers().get_peer_ip_str(src);
                 Logger::get("client").debug("Data from {}: {} bytes", src_ip, data.size());
             }
-        }, asio::detached);
+        }());
 
         // 启动事件处理协程: on_error
-        asio::co_spawn(ioc, [error_ptr]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc.get_executor(), [error_ptr]() -> cobalt::task<void> {
             while (true) {
-                auto [ec, code, msg] = co_await error_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
+                auto [ec, event] = co_await cobalt::as_tuple(error_ptr->read());
                 if (ec) break;
+                auto& code = event.code;
+                auto& msg = event.message;
                 Logger::get("client").error("Error {}: {}", code, msg);
             }
-        }, asio::detached);
+        }());
 
         // 启动事件处理协程: on_shutdown_requested
-        asio::co_spawn(ioc, [&ioc, &log, client, &work_guard,
-                             shutdown_ptr]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc.get_executor(), [&ioc, &log, client, &work_guard,
+                             shutdown_ptr]() -> cobalt::task<void> {
             while (true) {
-                auto [ec] = co_await shutdown_ptr->async_receive(asio::as_tuple(asio::use_awaitable));
+                auto [ec] = co_await cobalt::as_tuple(shutdown_ptr->read());
                 if (ec) break;
                 log.info("Shutdown requested via IPC, stopping...");
                 work_guard.reset();
-                asio::co_spawn(ioc, client->stop(), asio::detached);
+                cobalt_utils::spawn_task(ioc.get_executor(), client->stop());
             }
-        }, asio::detached);
+        }());
 
         // 启动性能监控输出协程（每60秒打印一次）
-        asio::co_spawn(ioc, [&ioc, &log]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc.get_executor(), [&ioc, &log]() -> cobalt::task<void> {
             asio::steady_timer timer(ioc);
             while (true) {
                 timer.expires_after(std::chrono::seconds(60));
-                co_await timer.async_wait(asio::use_awaitable);
+                co_await timer.async_wait(cobalt::use_op);
 
                 // 打印性能摘要
                 auto summary = edgelink::perf::PerformanceMonitor::instance().get_summary();
                 log.info("{}", summary);
             }
-        }, asio::detached);
+        }());
 
         // Enable config file watching if config file was specified
         if (!config_file.empty()) {
@@ -1266,7 +1274,7 @@ int cmd_daemon(int argc, char* argv[]) {
             work_guard.reset();
 
             // Start graceful shutdown
-            asio::co_spawn(ioc, client->stop(), asio::detached);
+            cobalt_utils::spawn_task(ioc.get_executor(), client->stop());
 
             // 启动独立线程实现强制超时（2 秒）
             std::thread([&ioc, &log]() {
@@ -1281,12 +1289,12 @@ int cmd_daemon(int argc, char* argv[]) {
         });
 
         // Start client
-        asio::co_spawn(ioc, [client, &log]() -> asio::awaitable<void> {
+        cobalt_utils::spawn_task(ioc.get_executor(), [client, &log]() -> cobalt::task<void> {
             bool success = co_await client->start();
             if (!success) {
                 log.error("Failed to start client");
             }
-        }, asio::detached);
+        }());
 
         log.info("Daemon running, press Ctrl+C to stop");
         if (!cfg.controller_url.empty()) {

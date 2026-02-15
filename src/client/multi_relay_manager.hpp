@@ -10,7 +10,9 @@
 #include <unordered_map>
 #include <shared_mutex>
 #include <chrono>
-#include <boost/asio/experimental/channel.hpp>
+#include <boost/cobalt.hpp>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -35,13 +37,13 @@ public:
 
     // 初始化所有 Relay 连接（relays 来自 CONFIG 消息）
     // controller_hostname: 控制器地址，当 relay hostname 为 "builtin" 或空时使用
-    asio::awaitable<bool> initialize(const std::vector<RelayInfo>& relays,
+    cobalt::task<bool> initialize(const std::vector<RelayInfo>& relays,
                                       const std::vector<uint8_t>& relay_token,
                                       bool use_tls,
                                       const std::string& controller_hostname);
 
     // 停止所有连接
-    asio::awaitable<void> stop();
+    cobalt::task<void> stop();
 
     // 获取发送到指定 Peer 的最优连接
     std::shared_ptr<RelayChannel> get_channel_for_peer(NodeId peer_id);
@@ -72,11 +74,11 @@ public:
     size_t total_connection_count() const;
 
     // 设置事件通道（转发给所有 Relay）
-    void set_channels(RelayChannelEvents channels);
+    void set_event_channel(events::RelayEventChannel* ch);
 
 private:
     // 启动 RTT 测量循环
-    asio::awaitable<void> rtt_measure_loop();
+    cobalt::task<void> rtt_measure_loop();
 
     asio::io_context& ioc_;
     ssl::context& ssl_ctx_;
@@ -92,14 +94,14 @@ private:
     PeerRoutingTable routing_table_;
 
     // 事件通道
-    RelayChannelEvents channels_;
+    events::RelayEventChannel* event_ch_ = nullptr;
 
     // 运行状态
     bool running_ = false;
     std::unique_ptr<asio::steady_timer> rtt_timer_;
 
     // RTT 循环完成通知 (用于同步 stop)
-    using CompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    using CompletionChannel = cobalt::channel<void>;
     std::unique_ptr<CompletionChannel> rtt_loop_done_ch_;
 };
 

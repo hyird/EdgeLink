@@ -6,7 +6,10 @@
 #include <chrono>
 #include <filesystem>
 #include <boost/asio.hpp>
-#include <boost/asio/experimental/channel.hpp>
+#include "common/cross_thread_channel.hpp"
+#include <boost/cobalt.hpp>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -14,8 +17,7 @@ struct ClientConfig;
 
 // 配置文件变更通道
 namespace channels {
-using ConfigChangeChannel = boost::asio::experimental::channel<
-    void(boost::system::error_code, ClientConfig)>;
+using ConfigChangeChannel = edgelink::CrossThreadChannel<ClientConfig>;
 }  // namespace channels
 
 // 配置文件监控器
@@ -44,7 +46,7 @@ public:
 
 private:
     // 监控循环
-    boost::asio::awaitable<void> watch_loop();
+    cobalt::task<void> watch_loop();
 
     // 检查文件是否变更
     bool check_file_changed();

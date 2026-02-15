@@ -3,6 +3,9 @@
 
 #include "client/tun_device.hpp"
 #include "common/logger.hpp"
+#include "common/cobalt_utils.hpp"
+
+namespace cobalt = boost::cobalt;
 
 #ifdef __linux__
 
@@ -216,7 +219,7 @@ public:
         return {};
     }
 
-    asio::awaitable<std::expected<void, TunError>> async_write(
+    cobalt::task<std::expected<void, TunError>> async_write(
         std::span<const uint8_t> packet) override {
 
         if (!is_open()) {
@@ -226,7 +229,7 @@ public:
         try {
             co_await asio::async_write(stream_,
                 asio::buffer(packet.data(), packet.size()),
-                asio::use_awaitable);
+                cobalt::use_op);
             co_return std::expected<void, TunError>{};
         } catch (const boost::system::system_error& e) {
             log().debug("TUN async write error: {}", e.what());
@@ -327,7 +330,7 @@ public:
         return std::unexpected(TunError::NOT_SUPPORTED);
     }
 
-    asio::awaitable<std::expected<void, TunError>> async_write(std::span<const uint8_t>) override {
+    cobalt::task<std::expected<void, TunError>> async_write(std::span<const uint8_t>) override {
         co_return std::unexpected(TunError::NOT_SUPPORTED);
     }
 };

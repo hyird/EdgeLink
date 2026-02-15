@@ -8,7 +8,10 @@
 #include <map>
 #include <shared_mutex>
 #include <chrono>
-#include <boost/asio/experimental/channel.hpp>
+#include <boost/cobalt.hpp>
+#include <boost/cobalt/channel.hpp>
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -45,10 +48,10 @@ public:
                         const LatencyMeasureConfig& config);
 
     // 启动测量循环
-    asio::awaitable<void> start();
+    cobalt::task<void> start();
 
     // 停止测量 (异步等待循环退出)
-    asio::awaitable<void> stop();
+    cobalt::task<void> stop();
 
     // 设置上报回调（用于发送 PEER_PATH_REPORT）
     void set_report_callback(ReportCallback callback);
@@ -69,16 +72,16 @@ public:
 
 private:
     // 测量循环
-    asio::awaitable<void> measure_loop();
+    cobalt::task<void> measure_loop();
 
     // 上报循环
-    asio::awaitable<void> report_loop();
+    cobalt::task<void> report_loop();
 
     // 测量所有 (peer, relay) 组合
-    asio::awaitable<void> measure_all_paths();
+    cobalt::task<void> measure_all_paths();
 
     // 测量单条路径
-    asio::awaitable<uint16_t> measure_single_path(
+    cobalt::task<uint16_t> measure_single_path(
         NodeId peer_id,
         std::shared_ptr<RelayConnectionPool> relay_pool);
 
@@ -104,7 +107,7 @@ private:
     std::unique_ptr<asio::steady_timer> report_timer_;
 
     // 循环完成通知 (用于同步 stop)
-    using CompletionChannel = asio::experimental::channel<void(boost::system::error_code)>;
+    using CompletionChannel = cobalt::channel<void>;
     std::unique_ptr<CompletionChannel> measure_done_ch_;
     std::unique_ptr<CompletionChannel> report_done_ch_;
 

@@ -4,15 +4,17 @@
 #include "common/frame.hpp"
 #include "common/message.hpp"
 #include <boost/asio.hpp>
+#include <boost/cobalt.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/ssl.hpp>
-#include <boost/asio/experimental/concurrent_channel.hpp>
+#include "common/cross_thread_channel.hpp"
 #include <functional>
 #include <memory>
 #include <string>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
 namespace ssl = asio::ssl;
@@ -39,14 +41,14 @@ public:
     virtual ~ISession() = default;
 
     // Send raw bytes (for relay forwarding)
-    virtual asio::awaitable<void> send_raw(std::span<const uint8_t> data) = 0;
+    virtual cobalt::task<void> send_raw(std::span<const uint8_t> data) = 0;
 
     // Send a frame
-    virtual asio::awaitable<void> send_frame(FrameType type, std::span<const uint8_t> payload,
+    virtual cobalt::task<void> send_frame(FrameType type, std::span<const uint8_t> payload,
                                               FrameFlags flags = FrameFlags::NONE) = 0;
 
     // Close the session
-    virtual asio::awaitable<void> close() = 0;
+    virtual cobalt::task<void> close() = 0;
 
     // Get session info
     virtual bool is_authenticated() const = 0;
@@ -64,14 +66,14 @@ public:
     virtual ~SessionBase() = default;
 
     // Send a frame (ISession interface)
-    asio::awaitable<void> send_frame(FrameType type, std::span<const uint8_t> payload,
+    cobalt::task<void> send_frame(FrameType type, std::span<const uint8_t> payload,
                                      FrameFlags flags = FrameFlags::NONE) override;
 
     // Send raw bytes (ISession interface)
-    asio::awaitable<void> send_raw(std::span<const uint8_t> data) override;
+    cobalt::task<void> send_raw(std::span<const uint8_t> data) override;
 
     // Close the session (ISession interface)
-    asio::awaitable<void> close() override;
+    cobalt::task<void> close() override;
 
     // Get session info (ISession interface)
     bool is_authenticated() const override { return authenticated_; }
@@ -82,19 +84,19 @@ protected:
     SessionBase(StreamType&& ws, SessionManager& manager);
 
     // Run the session (to be implemented by subclasses)
-    virtual asio::awaitable<void> run() = 0;
+    virtual cobalt::task<void> run() = 0;
 
     // Handle a received frame (to be implemented by subclasses)
-    virtual asio::awaitable<void> handle_frame(const Frame& frame) = 0;
+    virtual cobalt::task<void> handle_frame(const Frame& frame) = 0;
 
     // Read loop
-    asio::awaitable<void> read_loop();
+    cobalt::task<void> read_loop();
 
     // Write loop
-    asio::awaitable<void> write_loop();
+    cobalt::task<void> write_loop();
 
     // Send error response
-    asio::awaitable<void> send_error(uint16_t code, const std::string& message,
+    cobalt::task<void> send_error(uint16_t code, const std::string& message,
                                      FrameType request_type = FrameType::FRAME_ERROR,
                                      uint32_t request_id = 0);
 
@@ -105,8 +107,8 @@ protected:
     NodeId node_id_ = 0;
     NetworkId network_id_ = 0;
 
-    // Write channel (thread-safe, lock-free)
-    using WriteChannel = asio::experimental::concurrent_channel<void(boost::system::error_code, std::vector<uint8_t>)>;
+    // Write channel (thread-safe)
+    using WriteChannel = edgelink::CrossThreadChannel<std::vector<uint8_t>>;
     WriteChannel write_channel_;
 
     // Read buffer
@@ -122,29 +124,29 @@ class ControlSessionImpl : public SessionBase<StreamType> {
 public:
     ControlSessionImpl(StreamType&& ws, SessionManager& manager);
 
-    static asio::awaitable<void> start(StreamType ws, SessionManager& manager);
+    static cobalt::task<void> start(StreamType ws, SessionManager& manager);
 
 protected:
-    asio::awaitable<void> run() override;
-    asio::awaitable<void> handle_frame(const Frame& frame) override;
+    cobalt::task<void> run() override;
+    cobalt::task<void> handle_frame(const Frame& frame) override;
 
 private:
-    asio::awaitable<void> handle_auth_request(const Frame& frame);
-    asio::awaitable<void> handle_config_ack(const Frame& frame);
-    asio::awaitable<void> handle_ping(const Frame& frame);
-    asio::awaitable<void> handle_latency_report(const Frame& frame);
-    asio::awaitable<void> handle_peer_path_report(const Frame& frame);
-    asio::awaitable<void> handle_relay_latency_report(const Frame& frame);
-    asio::awaitable<void> handle_route_announce(const Frame& frame);
-    asio::awaitable<void> handle_route_withdraw(const Frame& frame);
-    asio::awaitable<void> handle_p2p_init(const Frame& frame);
-    asio::awaitable<void> handle_endpoint_update(const Frame& frame);
+    cobalt::task<void> handle_auth_request(const Frame& frame);
+    cobalt::task<void> handle_config_ack(const Frame& frame);
+    cobalt::task<void> handle_ping(const Frame& frame);
+    cobalt::task<void> handle_latency_report(const Frame& frame);
+    cobalt::task<void> handle_peer_path_report(const Frame& frame);
+    cobalt::task<void> handle_relay_latency_report(const Frame& frame);
+    cobalt::task<void> handle_route_announce(const Frame& frame);
+    cobalt::task<void> handle_route_withdraw(const Frame& frame);
+    cobalt::task<void> handle_p2p_init(const Frame& frame);
+    cobalt::task<void> handle_endpoint_update(const Frame& frame);
 
     // Send CONFIG to this client
-    asio::awaitable<void> send_config();
+    cobalt::task<void> send_config();
 
     // Send ROUTE_ACK to this client
-    asio::awaitable<void> send_route_ack(uint32_t request_id, bool success,
+    cobalt::task<void> send_route_ack(uint32_t request_id, bool success,
                                          uint16_t error_code = 0,
                                          const std::string& error_msg = "");
 
@@ -160,16 +162,16 @@ class RelaySessionImpl : public SessionBase<StreamType> {
 public:
     RelaySessionImpl(StreamType&& ws, SessionManager& manager);
 
-    static asio::awaitable<void> start(StreamType ws, SessionManager& manager);
+    static cobalt::task<void> start(StreamType ws, SessionManager& manager);
 
 protected:
-    asio::awaitable<void> run() override;
-    asio::awaitable<void> handle_frame(const Frame& frame) override;
+    cobalt::task<void> run() override;
+    cobalt::task<void> handle_frame(const Frame& frame) override;
 
 private:
-    asio::awaitable<void> handle_relay_auth(const Frame& frame);
-    asio::awaitable<void> handle_data(const Frame& frame);
-    asio::awaitable<void> handle_ping(const Frame& frame);
+    cobalt::task<void> handle_relay_auth(const Frame& frame);
+    cobalt::task<void> handle_data(const Frame& frame);
+    cobalt::task<void> handle_ping(const Frame& frame);
 };
 
 // ============================================================================

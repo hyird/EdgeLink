@@ -7,6 +7,7 @@
 #include "controller/jwt_util.hpp"
 #include "controller/path_decision.hpp"
 #include <boost/asio.hpp>
+#include <boost/cobalt.hpp>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -14,6 +15,7 @@
 #include <unordered_map>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::controller {
 
@@ -48,15 +50,15 @@ public:
     // ========================================================================
 
     // Broadcast CONFIG_UPDATE to all nodes in a network (except sender)
-    asio::awaitable<void> broadcast_config_update(NetworkId network_id, NodeId except_node = 0);
+    cobalt::task<void> broadcast_config_update(NetworkId network_id, NodeId except_node = 0);
 
     // Broadcast ROUTE_UPDATE to all nodes in a network (except sender)
-    asio::awaitable<void> broadcast_route_update(NetworkId network_id, NodeId except_node,
+    cobalt::task<void> broadcast_route_update(NetworkId network_id, NodeId except_node,
                                                   const std::vector<RouteInfo>& add_routes,
                                                   const std::vector<RouteInfo>& del_routes);
 
     // Notify a specific node that a peer came online/offline
-    asio::awaitable<void> notify_peer_status(NodeId target_node, NodeId peer_node, bool online);
+    cobalt::task<void> notify_peer_status(NodeId target_node, NodeId peer_node, bool online);
 
     // ========================================================================
     // Statistics
@@ -165,10 +167,10 @@ public:
 
 private:
     // Channel 事件处理协程
-    asio::awaitable<void> client_online_handler();
-    asio::awaitable<void> client_offline_handler();
-    asio::awaitable<void> endpoint_update_handler();
-    asio::awaitable<void> route_change_handler();
+    cobalt::task<void> client_online_handler();
+    cobalt::task<void> client_offline_handler();
+    cobalt::task<void> endpoint_update_handler();
+    cobalt::task<void> route_change_handler();
     asio::io_context& ioc_;
     Database& db_;
     JwtUtil& jwt_;

@@ -1,11 +1,11 @@
 #include "client/relay_pool.hpp"
 #include "common/logger.hpp"
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/use_awaitable.hpp>
+#include "common/cobalt_utils.hpp"
 #include <boost/asio/ip/tcp.hpp>
 #include <atomic>
 #include "common/math_utils.hpp"
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -28,7 +28,7 @@ RelayConnectionPool::RelayConnectionPool(
     , use_tls_(use_tls) {
 }
 
-asio::awaitable<bool> RelayConnectionPool::connect_all(
+cobalt::task<bool> RelayConnectionPool::connect_all(
     const std::vector<uint8_t>& relay_token) {
 
     // 获取所有 endpoints（从 RelayInfo 或 DNS 解析）
@@ -67,7 +67,7 @@ asio::awaitable<bool> RelayConnectionPool::connect_all(
                relay_info_.server_id, relay_info_.hostname, endpoints.size());
 
     // 并发连接所有 endpoints
-    std::vector<asio::awaitable<bool>> tasks;
+    std::vector<cobalt::task<bool>> tasks;
     for (const auto& ep : endpoints) {
         tasks.push_back(connect_single(ep, relay_token));
     }
@@ -94,7 +94,7 @@ asio::awaitable<bool> RelayConnectionPool::connect_all(
             std::shared_lock lock(mutex_);
             for (const auto& [id, info] : connections_) {
                 if (!endpoints_info.empty()) endpoints_info += ", ";
-                endpoints_info += fmt::format("{}:{}ms{}",
+                endpoints_info += std::format("{}:{}ms{}",
                     info.endpoint.address().to_string(),
                     info.stats.avg_rtt_ms,
                     info.is_active ? "*" : "");
@@ -110,7 +110,7 @@ asio::awaitable<bool> RelayConnectionPool::connect_all(
     co_return success_count > 0;
 }
 
-asio::awaitable<bool> RelayConnectionPool::connect_single(
+cobalt::task<bool> RelayConnectionPool::connect_single(
     const tcp::endpoint& endpoint,
     const std::vector<uint8_t>& relay_token) {
 
@@ -118,12 +118,12 @@ asio::awaitable<bool> RelayConnectionPool::connect_single(
     std::string url;
     std::string addr_str = endpoint.address().to_string();
     if (endpoint.address().is_v6()) {
-        addr_str = fmt::format("[{}]", addr_str);
+        addr_str = std::format("[{}]", addr_str);
     }
     if (use_tls_) {
-        url = fmt::format("wss://{}:{}/api/v1/relay", addr_str, endpoint.port());
+        url = std::format("wss://{}:{}/api/v1/relay", addr_str, endpoint.port());
     } else {
-        url = fmt::format("ws://{}:{}/api/v1/relay", addr_str, endpoint.port());
+        url = std::format("ws://{}:{}/api/v1/relay", addr_str, endpoint.port());
     }
 
     log().debug("Connecting to relay: wss://{} [ip:{}]", relay_info_.hostname, addr_str);
@@ -135,12 +135,11 @@ asio::awaitable<bool> RelayConnectionPool::connect_single(
     // 生成连接 ID（需要在设置回调前生成）
     ConnectionId conn_id = generate_connection_id();
 
-    // 设置事件通道（包含 RTT 回调）
-    RelayChannelEvents ch = channels_;
-    ch.on_pong = [this, conn_id](uint16_t rtt_ms) {
+    // 设置事件通道和 RTT 回调
+    channel->set_event_channel(event_ch_);
+    channel->set_pong_callback([this, conn_id](uint16_t rtt_ms) {
         this->update_rtt(conn_id, rtt_ms);
-    };
-    channel->set_channels(ch);
+    });
 
     // 连接
     auto start_time = std::chrono::steady_clock::now();
@@ -186,7 +185,7 @@ asio::awaitable<bool> RelayConnectionPool::connect_single(
     co_return true;
 }
 
-asio::awaitable<void> RelayConnectionPool::close_all() {
+cobalt::task<void> RelayConnectionPool::close_all() {
     std::vector<std::shared_ptr<RelayChannel>> channels_to_close;
 
     {
@@ -248,7 +247,7 @@ size_t RelayConnectionPool::connection_count() const {
     return connections_.size();
 }
 
-asio::awaitable<void> RelayConnectionPool::measure_rtt_all() {
+cobalt::task<void> RelayConnectionPool::measure_rtt_all() {
     std::vector<std::pair<ConnectionId, std::shared_ptr<RelayChannel>>> active_connections;
 
     // Collect all active connections
@@ -276,7 +275,7 @@ asio::awaitable<void> RelayConnectionPool::measure_rtt_all() {
         }
     }
 
-    // Note: RTT updates are handled via on_pong callback set in set_channels()
+    // Note: RTT updates are handled via on_pong callback set in connect_single()
     co_return;
 }
 
@@ -349,24 +348,22 @@ ConnectionId RelayConnectionPool::active_connection_id() const {
     return active_connection_id_;
 }
 
-void RelayConnectionPool::set_channels(RelayChannelEvents channels) {
-    channels_ = channels;
+void RelayConnectionPool::set_event_channel(events::RelayEventChannel* ch) {
+    event_ch_ = ch;
 
     // 更新已有连接的通道，并设置 RTT 回调
     std::shared_lock lock(mutex_);
     for (auto& [id, info] : connections_) {
         if (info.channel) {
-            // Create a copy of channels with our RTT callback
-            RelayChannelEvents ch = channels;
-            ch.on_pong = [this, conn_id = id](uint16_t rtt_ms) {
+            info.channel->set_event_channel(ch);
+            info.channel->set_pong_callback([this, conn_id = id](uint16_t rtt_ms) {
                 this->update_rtt(conn_id, rtt_ms);
-            };
-            info.channel->set_channels(ch);
+            });
         }
     }
 }
 
-asio::awaitable<std::vector<tcp::endpoint>> RelayConnectionPool::resolve_endpoints() {
+cobalt::task<std::vector<tcp::endpoint>> RelayConnectionPool::resolve_endpoints() {
     std::vector<tcp::endpoint> result;
 
     try {
@@ -392,7 +389,7 @@ asio::awaitable<std::vector<tcp::endpoint>> RelayConnectionPool::resolve_endpoin
 
         log().debug("Resolving relay hostname: {}:{}", host, port);
 
-        auto endpoints = co_await resolver.async_resolve(host, port, asio::use_awaitable);
+        auto endpoints = co_await resolver.async_resolve(host, port, cobalt::use_op);
 
         for (const auto& ep : endpoints) {
             result.push_back(ep.endpoint());

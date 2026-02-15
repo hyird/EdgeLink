@@ -1,8 +1,7 @@
 #include "client/endpoint_manager.hpp"
 #include "common/logger.hpp"
 #include "common/frame.hpp"
-#include <boost/asio/use_awaitable.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
+#include "common/cobalt_utils.hpp"
 #include <random>
 
 #ifdef _WIN32
@@ -15,6 +14,8 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 #endif
+
+namespace cobalt = boost::cobalt;
 
 namespace edgelink::client {
 
@@ -117,7 +118,7 @@ const char* nat_type_name(NatType type) {
 EndpointManager::EndpointManager(asio::io_context& ioc)
     : ioc_(ioc)
     , socket_(ioc)
-    , stun_response_channel_(std::make_unique<StunResponseChannel>(ioc, 16))
+    , stun_response_channel_(std::make_unique<StunResponseChannel>(16, ioc.get_executor()))
 {
 }
 
@@ -141,7 +142,7 @@ void EndpointManager::set_local_port(uint16_t port) {
     requested_port_ = port;
 }
 
-asio::awaitable<bool> EndpointManager::init_socket() {
+cobalt::task<bool> EndpointManager::init_socket() {
     if (socket_.is_open()) {
         co_return true;
     }
@@ -197,7 +198,7 @@ std::vector<Endpoint> EndpointManager::get_local_endpoints() const {
     return local_endpoints_;
 }
 
-asio::awaitable<StunQueryResult> EndpointManager::query_stun_endpoint() {
+cobalt::task<StunQueryResult> EndpointManager::query_stun_endpoint() {
     StunQueryResult result;
 
     if (stun_servers_.empty()) {
@@ -216,7 +217,7 @@ asio::awaitable<StunQueryResult> EndpointManager::query_stun_endpoint() {
             // 解析 STUN 服务器地址
             asio::ip::udp::resolver resolver(ioc_);
             auto endpoints = co_await resolver.async_resolve(
-                stun.hostname, std::to_string(stun.port), asio::use_awaitable);
+                stun.hostname, std::to_string(stun.port), cobalt::use_op);
 
             for (const auto& ep : endpoints) {
                 if (ep.endpoint().address().is_v4()) {
@@ -261,7 +262,7 @@ std::vector<Endpoint> EndpointManager::get_all_endpoints() const {
     return endpoints;
 }
 
-asio::awaitable<NatType> EndpointManager::detect_nat_type() {
+cobalt::task<NatType> EndpointManager::detect_nat_type() {
     // NAT 类型检测需要至少 2 个 STUN 服务器
     if (stun_servers_.size() < 2) {
         log().warn("NAT type detection requires at least 2 STUN servers");
@@ -335,7 +336,7 @@ std::optional<Endpoint> EndpointManager::stun_endpoint() const {
     return stun_endpoint_;
 }
 
-asio::awaitable<StunQueryResult> EndpointManager::send_stun_request(
+cobalt::task<StunQueryResult> EndpointManager::send_stun_request(
     const asio::ip::udp::endpoint& stun_server,
     const std::string& server_name) {
 
@@ -359,35 +360,28 @@ asio::awaitable<StunQueryResult> EndpointManager::send_stun_request(
 
             // 发送 Binding Request
             co_await socket_.async_send_to(
-                asio::buffer(request), stun_server, asio::use_awaitable);
+                asio::buffer(request), stun_server, cobalt::use_op);
 
             // 使用 channel 异步等待响应（带超时）
-            // 使用轮询方式避免 parallel_group 导致的 TLS allocator 崩溃
-            asio::steady_timer timer(ioc_);
-            auto deadline = std::chrono::steady_clock::now() +
-                            std::chrono::milliseconds(config_.stun_timeout_ms);
-
             bool got_response = false;
             std::vector<uint8_t> response_data;
 
-            while (std::chrono::steady_clock::now() < deadline && !got_response) {
-                // 非阻塞检查 channel
-                stun_response_channel_->try_receive([&](boost::system::error_code,
-                                                         std::array<uint8_t, 12> recv_txn_id,
-                                                         std::vector<uint8_t> data) {
-                    if (recv_txn_id == txn_id) {
-                        got_response = true;
-                        response_data = std::move(data);
+            {
+                auto read_stun = [this, &txn_id, &got_response, &response_data]() -> cobalt::task<void> {
+                    // 循环读取直到匹配我们的 txn_id
+                    while (true) {
+                        auto [ec, event] = co_await cobalt::as_tuple(stun_response_channel_->read());
+                        if (ec) break;
+                        if (event.txn_id == txn_id) {
+                            got_response = true;
+                            response_data = std::move(event.data);
+                            break;
+                        }
                     }
-                });
-
-                if (got_response) {
-                    break;
-                }
-
-                // 短暂等待后重试
-                timer.expires_after(std::chrono::milliseconds(10));
-                co_await timer.async_wait(asio::use_awaitable);
+                };
+                asio::steady_timer stun_timer(co_await cobalt::this_coro::executor,
+                    std::chrono::milliseconds(config_.stun_timeout_ms));
+                co_await cobalt::race(read_stun(), stun_timer.async_wait(cobalt::use_op));
             }
 
             // 移除待处理 txn_id
@@ -435,7 +429,7 @@ asio::awaitable<StunQueryResult> EndpointManager::send_stun_request(
         if (i + 1 < config_.stun_retry_count) {
             asio::steady_timer delay(ioc_);
             delay.expires_after(std::chrono::milliseconds(config_.stun_retry_interval_ms));
-            co_await delay.async_wait(asio::use_awaitable);
+            co_await delay.async_wait(cobalt::use_op);
         }
     }
 
@@ -661,9 +655,9 @@ void EndpointManager::handle_stun_response(std::span<const uint8_t> data) {
         }
     }
 
-    // 通过 channel 发送响应数据（非阻塞）
+    // 通过 channel 发送响应数据（非阻塞，fire-and-forget）
     std::vector<uint8_t> data_copy(data.begin(), data.end());
-    stun_response_channel_->try_send(boost::system::error_code{}, txn_id, std::move(data_copy));
+    cobalt_utils::fire_write(*stun_response_channel_, StunResponseEvent{txn_id, std::move(data_copy)}, ioc_.get_executor());
 }
 
 } // namespace edgelink::client

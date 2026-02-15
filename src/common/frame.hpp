@@ -197,6 +197,9 @@ public:
 
     // Decode a frame from buffer
     // Returns the decoded frame and number of bytes consumed
+    // NOTE: 对于分片帧，decode() 只解析单个 FRAGMENT 帧。
+    // 调用者需自行实现基于 message_id 的分片重组（收集所有 frag_index，
+    // 全部到齐后按序拼接 payload）。当前客户端/控制器未使用分片功能。
     static std::expected<std::pair<Frame, size_t>, FrameError> decode(
         std::span<const uint8_t> data);
 

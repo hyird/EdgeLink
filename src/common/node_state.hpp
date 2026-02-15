@@ -4,7 +4,7 @@
 #include "common/connection_types.hpp"
 #include "common/constants.hpp"
 #include <boost/asio.hpp>
-#include <boost/asio/experimental/channel.hpp>
+#include <boost/cobalt/channel.hpp>
 #include <array>
 #include <chrono>
 #include <mutex>
@@ -15,8 +15,52 @@
 #include <optional>
 
 namespace asio = boost::asio;
+namespace cobalt = boost::cobalt;
 
 namespace edgelink {
+
+// ============================================================================
+// 多参数 channel 包装结构体
+// ============================================================================
+
+// Controller 端事件
+struct ClientOnlineEvent {
+    NodeId node_id;
+    NetworkId network_id;
+};
+
+struct ClientOfflineEvent {
+    NodeId node_id;
+    NetworkId network_id;
+};
+
+struct EndpointUpdateEvent {
+    NodeId node_id;
+    std::vector<Endpoint> endpoints;
+};
+
+struct RouteChangeEvent {
+    NodeId node_id;
+    std::vector<RouteInfo> added;
+    std::vector<RouteInfo> removed;
+};
+
+// Client 端事件
+struct ConnectionPhaseEvent {
+    ConnectionPhase old_phase;
+    ConnectionPhase new_phase;
+};
+
+struct PeerStateEvent {
+    NodeId node_id;
+    P2PConnectionState p2p_state;
+    PeerDataPath data_path;
+};
+
+struct DataReceivedEvent {
+    NodeId src_node;
+    std::vector<uint8_t> data;
+};
 
 // ============================================================================
 // Channel 类型定义（替代同步回调）
@@ -24,22 +68,15 @@ namespace edgelink {
 namespace channels {
 
 // Controller 端事件通道
-using ClientOnlineChannel = asio::experimental::channel<
-    void(boost::system::error_code, NodeId, NetworkId)>;
-using ClientOfflineChannel = asio::experimental::channel<
-    void(boost::system::error_code, NodeId, NetworkId)>;
-using EndpointUpdateChannel = asio::experimental::channel<
-    void(boost::system::error_code, NodeId, std::vector<Endpoint>)>;
-using RouteChangeChannel = asio::experimental::channel<
-    void(boost::system::error_code, NodeId, std::vector<RouteInfo>, std::vector<RouteInfo>)>;
+using ClientOnlineChannel = cobalt::channel<ClientOnlineEvent>;
+using ClientOfflineChannel = cobalt::channel<ClientOfflineEvent>;
+using EndpointUpdateChannel = cobalt::channel<EndpointUpdateEvent>;
+using RouteChangeChannel = cobalt::channel<RouteChangeEvent>;
 
 // Client 端事件通道
-using ConnectionPhaseChannel = asio::experimental::channel<
-    void(boost::system::error_code, ConnectionPhase, ConnectionPhase)>;
-using PeerStateChannel = asio::experimental::channel<
-    void(boost::system::error_code, NodeId, P2PConnectionState, PeerDataPath)>;
-using DataReceivedChannel = asio::experimental::channel<
-    void(boost::system::error_code, NodeId, std::vector<uint8_t>)>;
+using ConnectionPhaseChannel = cobalt::channel<ConnectionPhaseEvent>;
+using PeerStateChannel = cobalt::channel<PeerStateEvent>;
+using DataReceivedChannel = cobalt::channel<DataReceivedEvent>;
 
 }  // namespace channels
 
