@@ -8,9 +8,17 @@ if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
         CACHE STRING "vcpkg toolchain file")
 endif()
 
-# 指定 triplet (静态链接，Windows)
-if(WIN32 AND NOT DEFINED VCPKG_TARGET_TRIPLET)
-    set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
+# 指定 vcpkg triplet（静态链接）
+if(NOT DEFINED VCPKG_TARGET_TRIPLET)
+    if(WIN32)
+        set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
+    elseif(UNIX AND NOT APPLE)
+        set(VCPKG_TARGET_TRIPLET "x64-linux-static" CACHE STRING "")
+        if(NOT DEFINED VCPKG_OVERLAY_TRIPLETS)
+            set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_SOURCE_DIR}/triplets"
+                CACHE STRING "vcpkg overlay triplets")
+        endif()
+    endif()
 endif()
 
 # Match vcpkg x64-windows-static triplet: use static runtime (/MT, /MTd)

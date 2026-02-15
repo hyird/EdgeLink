@@ -26,19 +26,34 @@ jobs:
         apk add --no-cache \
           build-base cmake ninja git curl zip unzip tar \
           pkgconfig linux-headers musl-dev perl bash python3 \
-          autoconf automake libtool go
+          autoconf automake libtool
 
     - uses: actions/checkout@v4
+
+    - name: Cache vcpkg
+      uses: actions/cache@v4
+      with:
+        path: /opt/vcpkg
+        key: vcpkg-alpine-v1
+
+    - name: Setup vcpkg
+      run: |
+        if [ ! -f "/opt/vcpkg/vcpkg" ]; then
+          git clone https://github.com/microsoft/vcpkg.git /opt/vcpkg
+          /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+        fi
 
     - name: Cache build
       uses: actions/cache@v4
       with:
         path: build-release
-        key: build-linux-release-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+        key: build-linux-release-v4-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
         restore-keys: |
-          build-linux-release-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+          build-linux-release-v4-
 
     - name: Configure CMake
+      env:
+        VCPKG_ROOT: /opt/vcpkg
       run: |
         cmake -B build-release -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
@@ -64,7 +79,7 @@ jobs:
         mkdir -p artifacts/linux
         cp build-release/edgelink-controller artifacts/linux/ || true
         cp build-release/edgelink-client artifacts/linux/ || true
-        cp -r config artifacts/linux/
+        cp -r config artifacts/linux/ || true
         tar -czvf edgelink-linux-x64-release.tar.gz -C artifacts linux
 
     - name: Upload Artifacts
@@ -106,19 +121,34 @@ jobs:
         apk add --no-cache \
           build-base cmake ninja git curl zip unzip tar \
           pkgconfig linux-headers musl-dev perl bash python3 \
-          autoconf automake libtool go
+          autoconf automake libtool
 
     - uses: actions/checkout@v4
+
+    - name: Cache vcpkg
+      uses: actions/cache@v4
+      with:
+        path: /opt/vcpkg
+        key: vcpkg-alpine-v1
+
+    - name: Setup vcpkg
+      run: |
+        if [ ! -f "/opt/vcpkg/vcpkg" ]; then
+          git clone https://github.com/microsoft/vcpkg.git /opt/vcpkg
+          /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+        fi
 
     - name: Cache build
       uses: actions/cache@v4
       with:
         path: build-debug
-        key: build-linux-debug-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+        key: build-linux-debug-v4-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
         restore-keys: |
-          build-linux-debug-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+          build-linux-debug-v4-
 
     - name: Configure CMake
+      env:
+        VCPKG_ROOT: /opt/vcpkg
       run: |
         cmake -B build-debug -G Ninja \
           -DCMAKE_BUILD_TYPE=Debug \
@@ -144,7 +174,7 @@ jobs:
         mkdir -p artifacts/linux
         cp build-debug/edgelink-controller artifacts/linux/ || true
         cp build-debug/edgelink-client artifacts/linux/ || true
-        cp -r config artifacts/linux/
+        cp -r config artifacts/linux/ || true
         tar -czvf edgelink-linux-x64-debug.tar.gz -C artifacts linux
 
     - name: Upload Artifacts
@@ -192,7 +222,7 @@ jobs:
           mingw-w64-x86_64-toolchain
           mingw-w64-x86_64-cmake
           mingw-w64-x86_64-ninja
-          mingw-w64-x86_64-go
+          mingw-w64-x86_64-pkgconf
           make
           git
           perl
@@ -204,13 +234,26 @@ jobs:
 
     - uses: actions/checkout@v4
 
+    - name: Cache vcpkg
+      uses: actions/cache@v4
+      with:
+        path: C:\vcpkg
+        key: vcpkg-mingw-v1
+
+    - name: Setup vcpkg
+      run: |
+        if [ ! -f "/c/vcpkg/vcpkg.exe" ]; then
+          git clone https://github.com/microsoft/vcpkg.git /c/vcpkg
+          /c/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+        fi
+
     - name: Cache build
       uses: actions/cache@v4
       with:
         path: build-release
-        key: build-windows-release-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+        key: build-windows-release-v4-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
         restore-keys: |
-          build-windows-release-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+          build-windows-release-v4-
 
     - name: Cache wintun
       uses: actions/cache@v4
@@ -227,10 +270,13 @@ jobs:
         Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-extract"
 
     - name: Configure CMake
+      env:
+        VCPKG_ROOT: C:/vcpkg
       run: |
         cmake -B build-release -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DVCPKG_TARGET_TRIPLET=x64-mingw-static \
           -DBUILD_SHARED_LIBS=OFF \
           -DBUILD_CONTROLLER=ON \
           -DBUILD_SERVER=OFF \
@@ -246,7 +292,7 @@ jobs:
         Copy-Item -Path "build-release/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "build-release/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "wintun-extract/wintun/bin/amd64/wintun.dll" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse
+        Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse -ErrorAction SilentlyContinue
         Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-release.zip"
 
     - name: Upload Artifacts
@@ -285,7 +331,7 @@ jobs:
           mingw-w64-x86_64-toolchain
           mingw-w64-x86_64-cmake
           mingw-w64-x86_64-ninja
-          mingw-w64-x86_64-go
+          mingw-w64-x86_64-pkgconf
           make
           git
           perl
@@ -297,13 +343,26 @@ jobs:
 
     - uses: actions/checkout@v4
 
+    - name: Cache vcpkg
+      uses: actions/cache@v4
+      with:
+        path: C:\vcpkg
+        key: vcpkg-mingw-v1
+
+    - name: Setup vcpkg
+      run: |
+        if [ ! -f "/c/vcpkg/vcpkg.exe" ]; then
+          git clone https://github.com/microsoft/vcpkg.git /c/vcpkg
+          /c/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+        fi
+
     - name: Cache build
       uses: actions/cache@v4
       with:
         path: build-debug
-        key: build-windows-debug-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+        key: build-windows-debug-v4-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
         restore-keys: |
-          build-windows-debug-v3-${{ hashFiles('third_party/*.cmake', 'CMakeLists.txt') }}
+          build-windows-debug-v4-
 
     - name: Cache wintun
       uses: actions/cache@v4
@@ -320,10 +379,13 @@ jobs:
         Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-extract"
 
     - name: Configure CMake
+      env:
+        VCPKG_ROOT: C:/vcpkg
       run: |
         cmake -B build-debug -G Ninja \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DVCPKG_TARGET_TRIPLET=x64-mingw-static \
           -DBUILD_SHARED_LIBS=OFF \
           -DBUILD_CONTROLLER=ON \
           -DBUILD_SERVER=OFF \
@@ -339,7 +401,7 @@ jobs:
         Copy-Item -Path "build-debug/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "build-debug/edgelink-client.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
         Copy-Item -Path "wintun-extract/wintun/bin/amd64/wintun.dll" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse
+        Copy-Item -Path "config" -Destination "artifacts/windows/" -Recurse -ErrorAction SilentlyContinue
         Compress-Archive -Path "artifacts/windows/*" -DestinationPath "edgelink-windows-x64-debug.zip"
 
     - name: Upload Artifacts
