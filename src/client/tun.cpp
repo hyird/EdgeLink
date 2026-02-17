@@ -262,7 +262,7 @@ private:
                     // 复制数据到 vector 并通过 channel 发送
                     std::vector<uint8_t> packet(linux_tun->read_buffer_.begin(),
                                                 linux_tun->read_buffer_.begin() + bytes);
-                    linux_tun->packet_channel_->try_send(boost::system::error_code{}, std::move(packet));
+                    linux_tun->packet_channel_->try_send(std::move(packet));
                 }
 
                 // Continue reading (双重检查避免析构时继续读取)
