@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: alpine:3.20
+    env:
+      VCPKG_FORCE_SYSTEM_BINARIES: 1
 
     steps:
     - name: Install Dependencies
@@ -225,57 +227,26 @@ jobs:
           release/edgelink-controller-linux-amd64-debug
 
   # =============================================================================
-  # Windows Release Build - MinGW-w64 via MSYS2
+  # Windows Release Build - MSVC
   # =============================================================================
   build-windows-release:
     runs-on: windows-latest
 
-    defaults:
-      run:
-        shell: msys2 {0}
-
     steps:
-    - name: Setup MSYS2
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: MINGW64
-        update: true
-        install: >-
-          mingw-w64-x86_64-toolchain
-          mingw-w64-x86_64-cmake
-          mingw-w64-x86_64-ninja
-          mingw-w64-x86_64-pkgconf
-          make
-          git
-          perl
-          autoconf
-          automake
-          libtool
-          zip
-          unzip
-
     - uses: actions/checkout@v4
 
-    - name: Cache vcpkg
-      uses: actions/cache@v4
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
       with:
-        path: C:\vcpkg
-        key: vcpkg-mingw-v1
-
-    - name: Setup vcpkg
-      run: |
-        if [ ! -f "/c/vcpkg/vcpkg.exe" ]; then
-          git clone https://github.com/microsoft/vcpkg.git /c/vcpkg
-          /c/vcpkg/bootstrap-vcpkg.sh -disableMetrics
-        fi
+        arch: amd64
 
     - name: Restore build cache
       uses: actions/cache/restore@v4
       with:
         path: build-release
-        key: build-windows-release-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+        key: build-windows-release-v7-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
         restore-keys: |
-          build-windows-release-v5-
+          build-windows-release-v7-
 
     - name: Cache wintun
       uses: actions/cache@v4
@@ -286,36 +257,34 @@ jobs:
 
     - name: Download wintun
       if: steps.cache-wintun.outputs.cache-hit != 'true'
-      shell: powershell
       run: |
         Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile "wintun.zip"
         Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-extract"
 
     - name: Configure CMake
       env:
-        VCPKG_ROOT: C:/vcpkg
-      run: |
-        cmake -B build-release -G Ninja \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-          -DVCPKG_TARGET_TRIPLET=x64-mingw-static \
-          -DBUILD_SHARED_LIBS=OFF \
-          -DBUILD_CONTROLLER=ON \
-          -DBUILD_SERVER=OFF \
-          -DBUILD_CLIENT=ON
+        VCPKG_ROOT: C:\vcpkg
+      run: >
+        cmake -B build-release -G Ninja
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        -DVCPKG_TARGET_TRIPLET=x64-windows-static
+        -DBUILD_SHARED_LIBS=OFF
+        -DBUILD_CONTROLLER=ON
+        -DBUILD_SERVER=OFF
+        -DBUILD_CLIENT=ON
 
     - name: Build
-      run: cmake --build build-release --config Release -j $(nproc)
+      run: cmake --build build-release --config Release -j $env:NUMBER_OF_PROCESSORS
 
     - name: Save build cache
       if: always()
       uses: actions/cache/save@v4
       with:
         path: build-release
-        key: build-windows-release-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+        key: build-windows-release-v7-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
 
     - name: Package Artifacts
-      shell: powershell
       run: |
         New-Item -ItemType Directory -Force -Path artifacts/windows
         Copy-Item -Path "build-release/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
@@ -341,57 +310,26 @@ jobs:
         files: edgelink-windows-x64-release.zip
 
   # =============================================================================
-  # Windows Debug Build - MinGW-w64 via MSYS2
+  # Windows Debug Build - MSVC
   # =============================================================================
   build-windows-debug:
     runs-on: windows-latest
 
-    defaults:
-      run:
-        shell: msys2 {0}
-
     steps:
-    - name: Setup MSYS2
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: MINGW64
-        update: true
-        install: >-
-          mingw-w64-x86_64-toolchain
-          mingw-w64-x86_64-cmake
-          mingw-w64-x86_64-ninja
-          mingw-w64-x86_64-pkgconf
-          make
-          git
-          perl
-          autoconf
-          automake
-          libtool
-          zip
-          unzip
-
     - uses: actions/checkout@v4
 
-    - name: Cache vcpkg
-      uses: actions/cache@v4
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
       with:
-        path: C:\vcpkg
-        key: vcpkg-mingw-v1
-
-    - name: Setup vcpkg
-      run: |
-        if [ ! -f "/c/vcpkg/vcpkg.exe" ]; then
-          git clone https://github.com/microsoft/vcpkg.git /c/vcpkg
-          /c/vcpkg/bootstrap-vcpkg.sh -disableMetrics
-        fi
+        arch: amd64
 
     - name: Restore build cache
       uses: actions/cache/restore@v4
       with:
         path: build-debug
-        key: build-windows-debug-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+        key: build-windows-debug-v7-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
         restore-keys: |
-          build-windows-debug-v5-
+          build-windows-debug-v7-
 
     - name: Cache wintun
       uses: actions/cache@v4
@@ -402,36 +340,34 @@ jobs:
 
     - name: Download wintun
       if: steps.cache-wintun.outputs.cache-hit != 'true'
-      shell: powershell
       run: |
         Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile "wintun.zip"
         Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-extract"
 
     - name: Configure CMake
       env:
-        VCPKG_ROOT: C:/vcpkg
-      run: |
-        cmake -B build-debug -G Ninja \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-          -DVCPKG_TARGET_TRIPLET=x64-mingw-static \
-          -DBUILD_SHARED_LIBS=OFF \
-          -DBUILD_CONTROLLER=ON \
-          -DBUILD_SERVER=OFF \
-          -DBUILD_CLIENT=ON
+        VCPKG_ROOT: C:\vcpkg
+      run: >
+        cmake -B build-debug -G Ninja
+        -DCMAKE_BUILD_TYPE=Debug
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        -DVCPKG_TARGET_TRIPLET=x64-windows-static
+        -DBUILD_SHARED_LIBS=OFF
+        -DBUILD_CONTROLLER=ON
+        -DBUILD_SERVER=OFF
+        -DBUILD_CLIENT=ON
 
     - name: Build
-      run: cmake --build build-debug --config Debug -j $(nproc)
+      run: cmake --build build-debug --config Debug -j $env:NUMBER_OF_PROCESSORS
 
     - name: Save build cache
       if: always()
       uses: actions/cache/save@v4
       with:
         path: build-debug
-        key: build-windows-debug-v5-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+        key: build-windows-debug-v7-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
 
     - name: Package Artifacts
-      shell: powershell
       run: |
         New-Item -ItemType Directory -Force -Path artifacts/windows
         Copy-Item -Path "build-debug/edgelink-controller.exe" -Destination "artifacts/windows/" -ErrorAction SilentlyContinue
