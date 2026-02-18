@@ -60,15 +60,20 @@ jobs:
       env:
         VCPKG_ROOT: /opt/vcpkg
         VCPKG_FORCE_SYSTEM_BINARIES: 1
-      run: |
-        cmake -B build-release -G Ninja \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-          -DBUILD_SHARED_LIBS=OFF \
-          -DEDGELINK_STATIC=ON \
-          -DBUILD_CONTROLLER=ON \
-          -DBUILD_SERVER=OFF \
-          -DBUILD_CLIENT=ON
+      uses: nick-fields/retry@v3
+      with:
+        timeout_minutes: 30
+        max_attempts: 3
+        retry_wait_seconds: 30
+        command: |
+          cmake -B build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DEDGELINK_STATIC=ON \
+            -DBUILD_CONTROLLER=ON \
+            -DBUILD_SERVER=OFF \
+            -DBUILD_CLIENT=ON
 
     - name: Build
       run: cmake --build build-release --config Release -j $(nproc)
@@ -166,15 +171,20 @@ jobs:
       env:
         VCPKG_ROOT: /opt/vcpkg
         VCPKG_FORCE_SYSTEM_BINARIES: 1
-      run: |
-        cmake -B build-debug -G Ninja \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-          -DBUILD_SHARED_LIBS=OFF \
-          -DEDGELINK_STATIC=ON \
-          -DBUILD_CONTROLLER=ON \
-          -DBUILD_SERVER=OFF \
-          -DBUILD_CLIENT=ON
+      uses: nick-fields/retry@v3
+      with:
+        timeout_minutes: 30
+        max_attempts: 3
+        retry_wait_seconds: 30
+        command: |
+          cmake -B build-debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DEDGELINK_STATIC=ON \
+            -DBUILD_CONTROLLER=ON \
+            -DBUILD_SERVER=OFF \
+            -DBUILD_CLIENT=ON
 
     - name: Build
       run: cmake --build build-debug --config Debug -j $(nproc)
@@ -264,15 +274,20 @@ jobs:
     - name: Configure CMake
       env:
         VCPKG_ROOT: C:\vcpkg
-      run: >
-        cmake -B build-release -G Ninja
-        -DCMAKE_BUILD_TYPE=Release
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-        -DVCPKG_TARGET_TRIPLET=x64-windows-static
-        -DBUILD_SHARED_LIBS=OFF
-        -DBUILD_CONTROLLER=ON
-        -DBUILD_SERVER=OFF
-        -DBUILD_CLIENT=ON
+      uses: nick-fields/retry@v3
+      with:
+        timeout_minutes: 30
+        max_attempts: 3
+        retry_wait_seconds: 30
+        command: >
+          cmake -B build-release -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static
+          -DBUILD_SHARED_LIBS=OFF
+          -DBUILD_CONTROLLER=ON
+          -DBUILD_SERVER=OFF
+          -DBUILD_CLIENT=ON
 
     - name: Build
       run: cmake --build build-release --config Release -j $env:NUMBER_OF_PROCESSORS
@@ -347,15 +362,20 @@ jobs:
     - name: Configure CMake
       env:
         VCPKG_ROOT: C:\vcpkg
-      run: >
-        cmake -B build-debug -G Ninja
-        -DCMAKE_BUILD_TYPE=Debug
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-        -DVCPKG_TARGET_TRIPLET=x64-windows-static
-        -DBUILD_SHARED_LIBS=OFF
-        -DBUILD_CONTROLLER=ON
-        -DBUILD_SERVER=OFF
-        -DBUILD_CLIENT=ON
+      uses: nick-fields/retry@v3
+      with:
+        timeout_minutes: 30
+        max_attempts: 3
+        retry_wait_seconds: 30
+        command: >
+          cmake -B build-debug -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static
+          -DBUILD_SHARED_LIBS=OFF
+          -DBUILD_CONTROLLER=ON
+          -DBUILD_SERVER=OFF
+          -DBUILD_CLIENT=ON
 
     - name: Build
       run: cmake --build build-debug --config Debug -j $env:NUMBER_OF_PROCESSORS
